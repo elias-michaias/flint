@@ -1,10 +1,10 @@
 # Flint
 
 Flint is a linear logic programming language that is statically typed and compiled to C code.
-Currently, it is in the most infantile stages of development, and can only produce very basic logic programs using a highly sub-optimal unification implementation.
+Currently, it is in the most infantile stages of development, and can only produce very basic logic programs using a highly sub-optimal unification engine.
 
-The goal is to utilize a resource-consumption model of data processing that allows for a lean C implementation without any garbage collection or reference counting subprocesses, minimizing any performance overhead and maximizing interoperation and reach through the C ecosystem.
-```haskell
+The goal is to utilize a resource-consumption model of data processing that allows for a lean C implementation without any garbage collection or reference counting subprocesses. In theory, the advantage of this approach is minimizing any performance overhead while also maximizing interoperation and reach through the C ecosystem.
+```prolog
 // ancestor.fn
 
 // Define type
