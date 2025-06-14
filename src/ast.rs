@@ -6,6 +6,37 @@ pub type VarName = String;
 /// Represents a function name
 pub type FunctionName = String;
 
+/// Represents a type name
+pub type TypeName = String;
+
+/// Type declarations
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogicType {
+    /// Built-in types
+    Integer,
+    String,
+    /// User-defined type (e.g., person)
+    Named(TypeName),
+    /// Function type (for predicates): A -> B -> ... -> type
+    Arrow(Vec<LogicType>),
+    /// The special "type" type for predicates
+    Type,
+}
+
+/// Type declaration for predicates
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredicateType {
+    pub name: String,
+    pub signature: LogicType, // Now uses the arrow type
+}
+
+/// Term type declaration  
+#[derive(Debug, Clone, PartialEq)]
+pub struct TermType {
+    pub name: String,
+    pub term_type: LogicType,
+}
+
 /// Linear Logic expressions
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -135,6 +166,8 @@ pub struct Function {
 /// Top-level program
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub type_declarations: Vec<PredicateType>,
+    pub term_types: Vec<TermType>,
     pub functions: Vec<Function>,
     pub clauses: Vec<Clause>,
     pub query: Option<Query>,
@@ -198,11 +231,17 @@ impl TypeEnv {
 /// Logical programming constructs
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
-    /// Atom (constant)
-    Atom(String),
+    /// Atom (constant) with type
+    Atom {
+        name: String,
+        type_name: Option<LogicType>,
+    },
     
-    /// Variable
-    Var(String),
+    /// Variable with type
+    Var {
+        name: String,
+        type_name: Option<LogicType>,
+    },
     
     /// Compound term: functor(args...)
     Compound {
@@ -259,7 +298,7 @@ impl Substitution {
     
     pub fn apply(&self, term: &Term) -> Term {
         match term {
-            Term::Var(name) => {
+            Term::Var { name, type_name } => {
                 if let Some(binding) = self.lookup(name) {
                     self.apply(binding)
                 } else {

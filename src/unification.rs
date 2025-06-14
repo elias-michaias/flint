@@ -31,13 +31,13 @@ impl UnificationEngine {
     /// Rename variables in a term to avoid conflicts
     fn rename_variables(&mut self, term: &Term, mapping: &mut HashMap<String, String>) -> Term {
         match term {
-            Term::Var(name) => {
+            Term::Var { name, type_name } => {
                 if let Some(new_name) = mapping.get(name) {
-                    Term::Var(new_name.clone())
+                    Term::Var { name: new_name.clone(), type_name: type_name.clone() }
                 } else {
                     let new_name = self.fresh_var();
                     mapping.insert(name.clone(), new_name.clone());
-                    Term::Var(new_name)
+                    Term::Var { name: new_name, type_name: type_name.clone() }
                 }
             }
             Term::Compound { functor, args } => {
@@ -67,18 +67,18 @@ impl UnificationEngine {
         
         match (&t1, &t2) {
             // Variable unification
-            (Term::Var(v1), Term::Var(v2)) if v1 == v2 => true,
-            (Term::Var(v), term) | (term, Term::Var(v)) => {
-                if self.occurs_check(v, term) {
+            (Term::Var { name: n1, .. }, Term::Var { name: n2, .. }) if n1 == n2 => true,
+            (Term::Var { name, .. }, term) | (term, Term::Var { name, .. }) => {
+                if self.occurs_check(name, term) {
                     false // Occurs check failure
                 } else {
-                    subst.bind(v.clone(), term.clone());
+                    subst.bind(name.clone(), term.clone());
                     true
                 }
             }
             
             // Atom unification
-            (Term::Atom(a1), Term::Atom(a2)) => a1 == a2,
+            (Term::Atom { name: n1, .. }, Term::Atom { name: n2, .. }) => n1 == n2,
             
             // Integer unification
             (Term::Integer(i1), Term::Integer(i2)) => i1 == i2,
@@ -102,7 +102,7 @@ impl UnificationEngine {
     /// Occurs check to prevent infinite structures
     fn occurs_check(&self, var: &str, term: &Term) -> bool {
         match term {
-            Term::Var(v) => var == v,
+            Term::Var { name, .. } => var == name,
             Term::Compound { args, .. } => {
                 args.iter().any(|arg| self.occurs_check(var, arg))
             }
@@ -216,14 +216,14 @@ mod tests {
     fn test_simple_unification() {
         let engine = UnificationEngine::new();
         
-        let term1 = Term::Var("X".to_string());
-        let term2 = Term::Atom("john".to_string());
+        let term1 = Term::Var { name: "X".to_string(), type_name: None };
+        let term2 = Term::Atom { name: "john".to_string(), type_name: None };
         
         let result = engine.unify(&term1, &term2);
         assert!(result.is_some());
         
         let subst = result.unwrap();
-        assert_eq!(subst.lookup("X"), Some(&Term::Atom("john".to_string())));
+        assert_eq!(subst.lookup("X"), Some(&Term::Atom { name: "john".to_string(), type_name: None }));
     }
     
     #[test]
@@ -232,19 +232,25 @@ mod tests {
         
         let term1 = Term::Compound {
             functor: "parent".to_string(),
-            args: vec![Term::Var("X".to_string()), Term::Atom("mary".to_string())],
+            args: vec![
+                Term::Var { name: "X".to_string(), type_name: None }, 
+                Term::Atom { name: "mary".to_string(), type_name: None }
+            ],
         };
         
         let term2 = Term::Compound {
             functor: "parent".to_string(),
-            args: vec![Term::Atom("john".to_string()), Term::Var("Y".to_string())],
+            args: vec![
+                Term::Atom { name: "john".to_string(), type_name: None }, 
+                Term::Var { name: "Y".to_string(), type_name: None }
+            ],
         };
         
         let result = engine.unify(&term1, &term2);
         assert!(result.is_some());
         
         let subst = result.unwrap();
-        assert_eq!(subst.lookup("X"), Some(&Term::Atom("john".to_string())));
-        assert_eq!(subst.lookup("Y"), Some(&Term::Atom("mary".to_string())));
+        assert_eq!(subst.lookup("X"), Some(&Term::Atom { name: "john".to_string(), type_name: None }));
+        assert_eq!(subst.lookup("Y"), Some(&Term::Atom { name: "mary".to_string(), type_name: None }));
     }
 }

@@ -1,10 +1,13 @@
 use crate::ast::*;
-use crate::lexer::Token;
+use crate::lexer::{Token, TokenSpan};
+use crate::diagnostic::{Diagnostic, DiagnosticBuilder, SourceLocation};
 
 #[derive(Debug)]
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<TokenSpan>,
     current: usize,
+    file_path: String,
+    source_text: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -17,15 +20,28 @@ pub enum ParseError {
     
     #[error("Invalid expression")]
     InvalidExpression,
+    
+    #[error("Diagnostic error")]
+    Diagnostic(Diagnostic),
+}
+
+enum TypeDeclaration {
+    Predicate(PredicateType),
+    Term(TermType),
+    BatchTerms(Vec<String>, LogicType),
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, current: 0 }
+    pub fn new(tokens: Vec<TokenSpan>, file_path: String, source_text: String) -> Self {
+        Self { tokens, current: 0, file_path, source_text }
     }
     
     fn current_token(&self) -> &Token {
-        self.tokens.get(self.current).unwrap_or(&Token::Eof)
+        self.tokens.get(self.current).map(|ts| &ts.token).unwrap_or(&Token::Eof)
+    }
+    
+    fn current_token_span(&self) -> Option<&TokenSpan> {
+        self.tokens.get(self.current)
     }
     
     fn advance(&mut self) -> &Token {
@@ -35,34 +51,92 @@ impl Parser {
         self.current_token()
     }
     
+    fn peek_token(&self) -> Option<&Token> {
+        self.tokens.get(self.current + 1).map(|ts| &ts.token)
+    }
+
+    fn peek_token_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.current + offset).map(|ts| &ts.token)
+    }
+    
     fn expect(&mut self, expected: Token) -> Result<(), ParseError> {
         let current = self.current_token().clone();
         if std::mem::discriminant(&current) == std::mem::discriminant(&expected) {
             self.advance();
             Ok(())
         } else {
-            Err(ParseError::UnexpectedToken {
-                expected: format!("{:?}", expected),
-                found: current,
-            })
+            let current_span = self.current_token_span();
+            if let Some(span) = current_span {
+                let diagnostic = Diagnostic::error(format!("Expected {:?}, found {:?}", expected, span.token))
+                    .with_location(SourceLocation::new(
+                        self.file_path.clone(),
+                        span.line,
+                        span.column,
+                        span.length,
+                    ))
+                    .with_source_text(self.source_text.clone());
+                Err(ParseError::Diagnostic(diagnostic))
+            } else {
+                Err(ParseError::UnexpectedToken {
+                    expected: format!("{:?}", expected),
+                    found: current,
+                })
+            }
+        }
+    }
+    
+    fn create_error_diagnostic(&self, message: String) -> ParseError {
+        let current_span = self.current_token_span();
+        if let Some(span) = current_span {
+            let diagnostic = Diagnostic::error(message)
+                .with_location(SourceLocation::new(
+                    self.file_path.clone(),
+                    span.line,
+                    span.column,
+                    span.length,
+                ))
+                .with_source_text(self.source_text.clone());
+            ParseError::Diagnostic(diagnostic)
+        } else {
+            ParseError::InvalidExpression
         }
     }
     
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+        let mut type_declarations = Vec::new();
+        let mut term_types = Vec::new();
         let mut functions = Vec::new();
         let mut clauses = Vec::new();
         let mut query = None;
         let mut main = None;
         
-        // Parse clauses, functions, and queries
+        // Parse type declarations, clauses, functions, and queries
         while !matches!(self.current_token(), Token::Eof) {
             match self.current_token() {
-                Token::Question => {
+                Token::Query => {
                     // Parse query: ?- goal1, goal2.
                     query = Some(self.parse_query()?);
                 }
                 Token::Identifier(_) => {
-                    if self.peek_function_def() {
+                    // Check if this is a type declaration (name :: type_signature.)
+                    if self.peek_type_declaration() {
+                        // Parse the type declaration and decide if it's a predicate or term
+                        let type_decl = self.parse_type_declaration()?;
+                        match type_decl {
+                            TypeDeclaration::Predicate(pred_type) => {
+                                type_declarations.push(pred_type);
+                            }
+                            TypeDeclaration::Term(term_type) => {
+                                term_types.push(term_type);
+                            }
+                            TypeDeclaration::BatchTerms(names, logic_type) => {
+                                // Create individual TermType entries for each name
+                                for name in names {
+                                    term_types.push(TermType { name, term_type: logic_type.clone() });
+                                }
+                            }
+                        }
+                    } else if self.peek_function_def() {
                         functions.push(self.parse_function()?);
                     } else if self.peek_clause() {
                         clauses.push(self.parse_clause()?);
@@ -72,8 +146,12 @@ impl Parser {
                         break;
                     }
                 }
+                Token::Eof => {
+                    // End of file reached, exit the loop
+                    break;
+                }
                 _ => {
-                    // Main expression
+                    // Main expression or unexpected token
                     main = Some(self.parse_expression()?);
                     break;
                 }
@@ -82,7 +160,14 @@ impl Parser {
         
         self.expect(Token::Eof)?;
         
-        Ok(Program { functions, clauses, query, main })
+        Ok(Program { 
+            type_declarations, 
+            term_types, 
+            functions, 
+            clauses, 
+            query, 
+            main 
+        })
     }
     
     fn peek_function_def(&self) -> bool {
@@ -90,7 +175,7 @@ impl Parser {
         // Pattern: identifier ( identifier : type ) : type = expr
         if self.current + 4 < self.tokens.len() {
             matches!(
-                (&self.tokens[self.current + 1], &self.tokens[self.current + 3]),
+                (&self.tokens[self.current + 1].token, &self.tokens[self.current + 3].token),
                 (Token::LeftParen, Token::Identifier(_))
             )
         } else {
@@ -101,14 +186,67 @@ impl Parser {
     fn peek_clause(&self) -> bool {
         // Look for patterns like: pred(args) :- body. or pred(args).
         for i in self.current..self.tokens.len() {
-            match &self.tokens[i] {
-                Token::Period => return true,
-                Token::ColonDash => return true,
+            match &self.tokens[i].token {
+                Token::Dot => return true,
+                Token::Rule => return true,
                 Token::Equal => return false, // Function definition
                 _ => continue,
             }
         }
         false
+    }
+    
+    fn peek_type_declaration(&self) -> bool {
+        // Look for pattern: identifier [, identifier]* :: ...
+        if !matches!(self.current_token(), Token::Identifier(_)) {
+            return false;
+        }
+        
+        // Check if we can find :: after potential comma-separated identifiers
+        let mut i = 1;
+        loop {
+            match self.peek_token_at(i) {
+                Some(Token::ColonColon) => return true,
+                Some(Token::Comma) => {
+                    // Check if next token after comma is identifier
+                    if let Some(Token::Identifier(_)) = self.peek_token_at(i + 1) {
+                        i += 2; // Skip comma and identifier
+                        continue;
+                    } else {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn peek_predicate_type(&self) -> bool {
+        // Look ahead to see if this is a predicate type (contains arrow)
+        // We need to look past the identifier :: part
+        let mut i = 2; // Skip identifier and ::
+        while let Some(token) = self.peek_token_at(i) {
+            match token {
+                Token::Arrow => return true,
+                Token::Dot => return false,
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    fn peek_term_type(&self) -> bool {
+        // Look for pattern: name : type.
+        // Must be: Identifier followed by Colon, then some type, then Dot
+        if self.current + 3 < self.tokens.len() {
+            matches!((&self.tokens[self.current].token, &self.tokens[self.current + 1].token), 
+                     (Token::Identifier(_), Token::Colon)) &&
+            // Look ahead to make sure it ends with dot and not other clause patterns
+            self.tokens[self.current + 2..].iter().take_while(|t| !matches!(t.token, Token::Dot | Token::Eof)).any(|_| true) &&
+            self.tokens[self.current + 2..].iter().find(|t| matches!(t.token, Token::Dot | Token::Rule | Token::LeftParen)).map_or(false, |t| matches!(t.token, Token::Dot))
+        } else {
+            false
+        }
     }
     
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -366,8 +504,7 @@ impl Parser {
     }
     
     fn parse_query(&mut self) -> Result<Query, ParseError> {
-        self.expect(Token::Question)?;
-        self.expect(Token::Minus)?; // For ?-
+        self.expect(Token::Query)?; // For ?-
         
         let mut goals = Vec::new();
         goals.push(self.parse_term()?);
@@ -377,7 +514,7 @@ impl Parser {
             goals.push(self.parse_term()?);
         }
         
-        self.expect(Token::Period)?;
+        self.expect(Token::Dot)?;
         Ok(Query { goals })
     }
     
@@ -385,7 +522,7 @@ impl Parser {
         let head_term = self.parse_term()?;
         
         match self.current_token() {
-            Token::Period => {
+            Token::Dot => {
                 // Fact
                 self.advance();
                 match head_term {
@@ -395,7 +532,7 @@ impl Parser {
                     _ => Err(ParseError::InvalidExpression),
                 }
             }
-            Token::ColonDash => {
+            Token::Rule => {
                 // Rule
                 self.advance();
                 let mut body = Vec::new();
@@ -406,7 +543,7 @@ impl Parser {
                     body.push(self.parse_term()?);
                 }
                 
-                self.expect(Token::Period)?;
+                self.expect(Token::Dot)?;
                 Ok(Clause::Rule { head: head_term, body })
             }
             _ => Err(ParseError::InvalidExpression),
@@ -438,9 +575,15 @@ impl Parser {
                 } else {
                     // Check if it's a variable (starts with uppercase) or atom
                     if name.chars().next().unwrap().is_uppercase() {
-                        Ok(Term::Var(name))
+                        Ok(Term::Var { 
+                            name, 
+                            type_name: None 
+                        })
                     } else {
-                        Ok(Term::Atom(name))
+                        Ok(Term::Atom { 
+                            name, 
+                            type_name: None 
+                        })
                     }
                 }
             }
@@ -451,6 +594,154 @@ impl Parser {
             }
             _ => Err(ParseError::InvalidExpression),
         }
+    }
+    
+    fn parse_logic_type(&mut self) -> Result<LogicType, ParseError> {
+        // Parse the first type
+        let mut current_type = self.parse_base_type()?;
+        
+        // If we see arrows, parse as function type
+        let mut types = vec![current_type];
+        while matches!(self.current_token(), Token::Arrow) {
+            self.advance(); // consume ->
+            types.push(self.parse_base_type()?);
+        }
+        
+        if types.len() == 1 {
+            Ok(types.into_iter().next().unwrap())
+        } else {
+            Ok(LogicType::Arrow(types))
+        }
+    }
+    
+    fn parse_base_type(&mut self) -> Result<LogicType, ParseError> {
+        match self.current_token() {
+            Token::Identifier(name) => {
+                let type_name = name.clone();
+                self.advance();
+                match type_name.as_str() {
+                    "int" => Ok(LogicType::Integer),
+                    "string" => Ok(LogicType::String),
+                    _ => Ok(LogicType::Named(type_name)),
+                }
+            }
+            Token::Type => {
+                self.advance();
+                Ok(LogicType::Type)
+            }
+            _ => Err(ParseError::InvalidExpression),
+        }
+    }
+    
+    fn parse_predicate_type(&mut self) -> Result<PredicateType, ParseError> {
+        // Parse predicate name
+        let name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(ParseError::InvalidExpression),
+        };
+        
+        self.expect(Token::ColonColon)?;
+        
+        // Parse the signature (e.g., person -> person -> type)
+        let signature = self.parse_logic_type()?;
+        
+        self.expect(Token::Dot)?;
+        
+        Ok(PredicateType { name, signature })
+    }
+    
+    fn parse_term_type(&mut self) -> Result<TermType, ParseError> {
+        let name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(ParseError::InvalidExpression),
+        };
+        
+        self.expect(Token::ColonColon)?; // Use ColonColon for consistency
+        
+        let term_type = self.parse_logic_type()?;
+        
+        self.expect(Token::Dot)?;
+        
+        Ok(TermType { name, term_type })
+    }
+
+    fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
+        // Parse name(s) :: type_signature.
+        // This can be either "name :: type" or "name1, name2, name3 :: type"
+        let mut names = Vec::new();
+        
+        // Parse the first name
+        let first_name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(self.create_error_diagnostic("Expected identifier for type declaration".to_string())),
+        };
+        names.push(first_name);
+        
+        // Parse additional names separated by commas
+        while matches!(self.current_token(), Token::Comma) {
+            self.advance(); // consume comma
+            
+            let name = match self.current_token() {
+                Token::Identifier(n) => {
+                    let name = n.clone();
+                    self.advance();
+                    name
+                }
+                _ => return Err(self.create_error_diagnostic("Expected identifier after comma in type declaration".to_string())),
+            };
+            names.push(name);
+        }
+        
+        self.expect(Token::ColonColon)?;
+        
+        let signature = self.parse_logic_type()?;
+        
+        self.expect(Token::Dot)?;
+        
+        // Decide if this is a predicate or term type based on the signature
+        match &signature {
+            LogicType::Arrow(_) => {
+                // Has arrows, so it's a predicate type - only single names allowed
+                if names.len() > 1 {
+                    return Err(self.create_error_diagnostic("Cannot batch assign predicate types - predicates must be declared individually".to_string()));
+                }
+                Ok(TypeDeclaration::Predicate(PredicateType { name: names[0].clone(), signature }))
+            }
+            _ => {
+                // No arrows, so it's a term type - batch assignment allowed
+                if names.len() == 1 {
+                    Ok(TypeDeclaration::Term(TermType { name: names[0].clone(), term_type: signature }))
+                } else {
+                    eprintln!("DEBUG: Creating BatchTerms for {} names", names.len());
+                    Ok(TypeDeclaration::BatchTerms(names, signature))
+                }
+            }
+        }
+    }
+
+    /// Create a diagnostic for the current parsing context
+    fn create_diagnostic(&self, message: String, file_path: &str, source_text: &str) -> Diagnostic {
+        let builder = DiagnosticBuilder::new(file_path.to_string(), source_text.to_string());
+        
+        // For now, we'll use a simple line/column estimate
+        // In a real implementation, we'd track exact positions during tokenization
+        let line = 1; // Placeholder
+        let column = 1; // Placeholder
+        let length = 1; // Placeholder
+        
+        builder.error_at(message, line, column, length)
     }
 }
 

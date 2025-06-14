@@ -2,303 +2,344 @@ use crate::ast::*;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
-pub enum TypeError {
-    #[error("Variable '{0}' not found")]
-    VariableNotFound(String),
+pub enum TypeCheckError {
+    #[error("Predicate '{predicate}' expects {expected} arguments, but got {actual}")]
+    ArityMismatch {
+        predicate: String,
+        expected: usize,
+        actual: usize,
+    },
     
-    #[error("Variable '{0}' used more than once")]
-    LinearityViolation(String),
+    #[error("Type mismatch: expected {expected:?}, but got {actual:?}")]
+    TypeMismatch {
+        expected: LogicType,
+        actual: LogicType,
+    },
     
-    #[error("Variable '{0}' not used")]
-    UnusedVariable(String),
+    #[error("Unknown predicate: {predicate}")]
+    UnknownPredicate { predicate: String },
     
-    #[error("Type mismatch: expected {expected:?}, found {found:?}")]
-    TypeMismatch { expected: Type, found: Type },
+    #[error("Unknown term: {term}")]
+    UnknownTerm { term: String },
     
-    #[error("Function '{0}' not found")]
-    FunctionNotFound(String),
-    
-    #[error("Wrong number of arguments: expected {expected}, found {found}")]
-    WrongArgumentCount { expected: usize, found: usize },
-    
-    #[error("Cannot apply non-function type: {0:?}")]
-    NotAFunction(Type),
-    
-    #[error("Invalid binary operation: {op:?} on {left:?} and {right:?}")]
-    InvalidBinaryOp { op: BinOpKind, left: Type, right: Type },
+    #[error("Unification failed: cannot unify {term1:?} with {term2:?}")]
+    UnificationFailed { term1: Term, term2: Term },
 }
 
 pub struct TypeChecker {
-    functions: HashMap<String, (Type, Type)>, // (param_type, return_type)
+    predicate_types: HashMap<String, PredicateType>,
+    term_types: HashMap<String, LogicType>,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
         Self {
-            functions: HashMap::new(),
+            predicate_types: HashMap::new(),
+            term_types: HashMap::new(),
         }
     }
     
-    pub fn check_program(&mut self, program: &Program) -> Result<Type, TypeError> {
-        // First pass: collect function signatures
-        for func in &program.functions {
-            self.functions.insert(
-                func.name.clone(),
-                (func.param_type.clone(), func.return_type.clone()),
-            );
+    pub fn add_predicate_type(&mut self, pred_type: PredicateType) {
+        self.predicate_types.insert(pred_type.name.clone(), pred_type);
+    }
+    
+    pub fn add_term_type(&mut self, term_type: TermType) {
+        self.term_types.insert(term_type.name.clone(), term_type.term_type);
+    }
+    
+    pub fn check_program(&mut self, program: &Program) -> Result<(), TypeCheckError> {
+        // Load type declarations
+        for pred_type in &program.type_declarations {
+            self.add_predicate_type(pred_type.clone());
         }
         
-        // Second pass: check function bodies
-        for func in &program.functions {
-            let mut env = TypeEnv::new();
-            env.bind(func.param.clone(), func.param_type.clone());
-            
-            let body_type = self.check_expr(&func.body, &mut env)?;
-            if body_type != func.return_type {
-                return Err(TypeError::TypeMismatch {
-                    expected: func.return_type.clone(),
-                    found: body_type,
+        for term_type in &program.term_types {
+            self.add_term_type(term_type.clone());
+        }
+        
+        // Validate that all user-defined types are properly declared
+        self.validate_user_defined_types(program)?;
+        
+        // Check all clauses
+        for clause in &program.clauses {
+            self.check_clause(clause)?;
+        }
+        
+        // Check query if present
+        if let Some(query) = &program.query {
+            self.check_query(query)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn check_clause(&self, clause: &Clause) -> Result<(), TypeCheckError> {
+        match clause {
+            Clause::Fact { predicate, args } => {
+                // Check the fact predicate
+                self.check_predicate_call(predicate, args)?;
+            }
+            Clause::Rule { head, body } => {
+                // Check head
+                match head {
+                    Term::Compound { functor, args } => {
+                        self.check_predicate_call(functor, args)?;
+                    }
+                    _ => {
+                        // Single atom fact - infer as 0-arity predicate
+                    }
+                }
+                
+                // Check body terms
+                for term in body {
+                    match term {
+                        Term::Compound { functor, args } => {
+                            self.check_predicate_call(functor, args)?;
+                        }
+                        _ => {
+                            // Single atom - infer as 0-arity predicate
+                        }
+                    }
+                }
+                
+                // Check variable consistency between head and body
+                self.check_variable_consistency(head, body)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn check_query(&self, query: &Query) -> Result<(), TypeCheckError> {
+        for term in &query.goals {
+            match term {
+                Term::Compound { functor, args } => {
+                    self.check_predicate_call(functor, args)?;
+                }
+                _ => {
+                    // Single atom query
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn check_predicate_call(&self, predicate: &str, args: &[Term]) -> Result<(), TypeCheckError> {
+        let pred_type = self.predicate_types.get(predicate)
+            .ok_or_else(|| TypeCheckError::UnknownPredicate {
+                predicate: predicate.to_string(),
+            })?;
+        
+        // Extract argument types from the arrow signature
+        let arg_types = self.extract_arg_types(&pred_type.signature);
+        
+        // Check arity
+        if args.len() != arg_types.len() {
+            return Err(TypeCheckError::ArityMismatch {
+                predicate: predicate.to_string(),
+                expected: arg_types.len(),
+                actual: args.len(),
+            });
+        }
+        
+        // Check argument types
+        for (_i, (arg, expected_type)) in args.iter().zip(&arg_types).enumerate() {
+            let actual_type = self.infer_term_type(arg)?;
+            if !self.types_compatible(&actual_type, expected_type) {
+                return Err(TypeCheckError::TypeMismatch {
+                    expected: expected_type.clone(),
+                    actual: actual_type,
                 });
             }
-            
-            // Check that all linear variables are used
-            env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
         }
         
-        // Check main expression if it exists
-        if let Some(ref main_expr) = program.main {
-            let mut main_env = TypeEnv::new();
-            let main_type = self.check_expr(main_expr, &mut main_env)?;
-            main_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-            Ok(main_type)
-        } else {
-            // If no main expression, return Unit type
-            Ok(Type::Unit)
+        Ok(())
+    }
+    
+    fn infer_term_type(&self, term: &Term) -> Result<LogicType, TypeCheckError> {
+        match term {
+            Term::Atom { name, type_name: _ } => {
+                // Look up the term's declared type
+                if let Some(term_type) = self.term_types.get(name) {
+                    Ok(term_type.clone())
+                } else {
+                    // For now, if a term doesn't have an explicit type, we'll infer "any"
+                    // In a stricter system, this would be an error
+                    if name.chars().next().unwrap_or('a').is_uppercase() {
+                        // Variables get special treatment - for now we'll say they're "any"
+                        Ok(LogicType::Named("any".to_string()))
+                    } else {
+                        Err(TypeCheckError::UnknownTerm { term: name.clone() })
+                    }
+                }
+            }
+            Term::Var { name: _, type_name } => {
+                // Variables should have their types inferred from context
+                // For now, return a placeholder type
+                if let Some(type_name) = type_name {
+                    Ok(type_name.clone())
+                } else {
+                    Ok(LogicType::Named("any".to_string()))
+                }
+            }
+            Term::Integer(_) => Ok(LogicType::Integer),
+            Term::Compound { functor, args: _ } => {
+                // For compound terms, we need to look up the predicate type
+                // This is a simplified approach - in practice you'd want more sophisticated inference
+                Err(TypeCheckError::UnknownTerm { term: functor.clone() })
+            }
         }
     }
     
-    fn check_expr(&self, expr: &Expr, env: &mut TypeEnv) -> Result<Type, TypeError> {
-        match expr {
-            Expr::Var(name) => {
-                env.use_var(name).map_err(|_| TypeError::LinearityViolation(name.clone()))?;
-                env.lookup(name)
-                    .cloned()
-                    .ok_or_else(|| TypeError::VariableNotFound(name.clone()))
+    fn types_compatible(&self, actual: &LogicType, expected: &LogicType) -> bool {
+        match (actual, expected) {
+            (LogicType::Named(a), LogicType::Named(e)) => a == e || a == "any" || e == "any",
+            (LogicType::Integer, LogicType::Integer) => true,
+            (LogicType::String, LogicType::String) => true,
+            (LogicType::Type, LogicType::Type) => true,
+            _ => false,
+        }
+    }
+    
+    fn check_variable_consistency(&self, head: &Term, body: &[Term]) -> Result<(), TypeCheckError> {
+        let mut var_types = HashMap::new();
+        
+        // Collect variable types from head
+        self.collect_variable_types(head, &mut var_types)?;
+        
+        // Collect and check variable types from body
+        for term in body {
+            self.collect_variable_types(term, &mut var_types)?;
+        }
+        
+        // Verify all variables are consistently typed
+        self.check_term_variables(head, &var_types)?;
+        for term in body {
+            self.check_term_variables(term, &var_types)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn collect_variable_types(&self, term: &Term, var_types: &mut HashMap<String, LogicType>) -> Result<(), TypeCheckError> {
+        match term {
+            Term::Var { name, type_name: _ } => {
+                // For now, we'll assign a generic type to variables
+                var_types.insert(name.clone(), LogicType::Named("any".to_string()));
             }
-            
-            Expr::Int(_) => Ok(Type::Int),
-            
-            Expr::Str(_) => Ok(Type::Str),
-            
-            Expr::App { func, args } => {
-                let (param_type, return_type) = self.functions
-                    .get(func)
-                    .cloned()
-                    .ok_or_else(|| TypeError::FunctionNotFound(func.clone()))?;
-                
-                if args.len() != 1 {
-                    return Err(TypeError::WrongArgumentCount {
-                        expected: 1,
-                        found: args.len(),
+            Term::Compound { functor: _, args } => {
+                for arg in args {
+                    self.collect_variable_types(arg, var_types)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
+    fn check_term_variables(&self, term: &Term, var_types: &HashMap<String, LogicType>) -> Result<(), TypeCheckError> {
+        match term {
+            Term::Var { name, type_name: _ } => {
+                if let Some(_expected_type) = var_types.get(name) {
+                    // Variable is consistent
+                } else {
+                    return Err(TypeCheckError::TypeMismatch {
+                        expected: LogicType::Named("any".to_string()),
+                        actual: LogicType::Named("unknown".to_string()),
                     });
                 }
-                
-                let arg_type = self.check_expr(&args[0], env)?;
-                if arg_type != param_type {
-                    return Err(TypeError::TypeMismatch {
-                        expected: param_type,
-                        found: arg_type,
-                    });
+            }
+            Term::Compound { functor: _, args } => {
+                for arg in args {
+                    self.check_term_variables(arg, var_types)?;
                 }
-                
-                Ok(return_type)
             }
-            
-            Expr::Lambda { param, body } => {
-                // For now, assume Int -> Int (simplified)
-                let mut lambda_env = env.clone();
-                lambda_env.bind(param.clone(), Type::Int);
-                
-                let body_type = self.check_expr(body, &mut lambda_env)?;
-                lambda_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-                
-                Ok(Type::Linear(Box::new(Type::Int), Box::new(body_type)))
-            }
-            
-            Expr::Let { var, value, body } => {
-                let value_type = self.check_expr(value, env)?;
-                
-                let mut body_env = env.clone();
-                body_env.bind(var.clone(), value_type);
-                
-                let body_type = self.check_expr(body, &mut body_env)?;
-                body_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-                
-                Ok(body_type)
-            }
-            
-            Expr::If { cond, then_branch, else_branch } => {
-                let cond_type = self.check_expr(cond, env)?;
-                if cond_type != Type::Int {
-                    return Err(TypeError::TypeMismatch {
-                        expected: Type::Int,
-                        found: cond_type,
-                    });
+            _ => {}
+        }
+        Ok(())
+    }
+    
+    /// Extract argument types from an arrow type signature
+    /// e.g., person -> person -> type becomes [person, person]
+    fn extract_arg_types(&self, logic_type: &LogicType) -> Vec<LogicType> {
+        match logic_type {
+            LogicType::Arrow(types) => {
+                // Return all but the last type (which should be 'type')
+                if types.len() > 1 {
+                    types[..types.len()-1].to_vec()
+                } else {
+                    Vec::new()
                 }
-                
-                // For linear logic, we need to split the environment
-                let (mut then_env, mut else_env) = env.clone().split();
-                
-                let then_type = self.check_expr(then_branch, &mut then_env)?;
-                let else_type = self.check_expr(else_branch, &mut else_env)?;
-                
-                if then_type != else_type {
-                    return Err(TypeError::TypeMismatch {
-                        expected: then_type,
-                        found: else_type,
-                    });
-                }
-                
-                // Both branches must use the same linear variables
-                then_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-                else_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-                
-                Ok(then_type)
             }
-            
-            Expr::Pair(left, right) => {
-                let left_type = self.check_expr(left, env)?;
-                let right_type = self.check_expr(right, env)?;
-                Ok(Type::Tensor(Box::new(left_type), Box::new(right_type)))
+            _ => Vec::new(), // Not an arrow type, no arguments
+        }
+    }
+    
+    fn validate_user_defined_types(&self, program: &Program) -> Result<(), TypeCheckError> {
+        // Get all types that are defined with ":: type."
+        let mut defined_types = std::collections::HashSet::new();
+        defined_types.insert("int".to_string());  // Built-in types
+        defined_types.insert("string".to_string());
+        defined_types.insert("type".to_string());
+        
+        // Find all user-defined types
+        for term_type in &program.term_types {
+            if let LogicType::Type = term_type.term_type {
+                defined_types.insert(term_type.name.clone());
             }
-            
-            Expr::MatchPair { expr, left_var, right_var, body } => {
-                let expr_type = self.check_expr(expr, env)?;
-                
-                match expr_type {
-                    Type::Tensor(left_type, right_type) => {
-                        let mut body_env = env.clone();
-                        body_env.bind(left_var.clone(), *left_type);
-                        body_env.bind(right_var.clone(), *right_type);
-                        
-                        let body_type = self.check_expr(body, &mut body_env)?;
-                        body_env.check_all_used().map_err(|msg| TypeError::UnusedVariable(msg))?;
-                        
-                        Ok(body_type)
+        }
+        
+        // Check that all referenced types are defined
+        for term_type in &program.term_types {
+            match &term_type.term_type {
+                LogicType::Named(type_name) => {
+                    if !defined_types.contains(type_name) {
+                        return Err(TypeCheckError::UnknownTerm { 
+                            term: format!("Type '{}' is not defined. Define it with '{} :: type.'", type_name, type_name)
+                        });
                     }
-                    _ => Err(TypeError::TypeMismatch {
-                        expected: Type::Tensor(Box::new(Type::Unit), Box::new(Type::Unit)),
-                        found: expr_type,
-                    }),
                 }
-            }
-            
-            Expr::Alloc { size } => {
-                let size_type = self.check_expr(size, env)?;
-                if size_type != Type::Int {
-                    return Err(TypeError::TypeMismatch {
-                        expected: Type::Int,
-                        found: size_type,
-                    });
-                }
-                Ok(Type::LinearPtr(Box::new(Type::Int))) // Simplified
-            }
-            
-            Expr::Free { ptr } => {
-                let ptr_type = self.check_expr(ptr, env)?;
-                match ptr_type {
-                    Type::LinearPtr(_) => Ok(Type::Unit),
-                    _ => Err(TypeError::TypeMismatch {
-                        expected: Type::LinearPtr(Box::new(Type::Unit)),
-                        found: ptr_type,
-                    }),
-                }
-            }
-            
-            Expr::Load { ptr } => {
-                let ptr_type = self.check_expr(ptr, env)?;
-                match ptr_type {
-                    Type::LinearPtr(inner_type) => Ok(*inner_type),
-                    _ => Err(TypeError::TypeMismatch {
-                        expected: Type::LinearPtr(Box::new(Type::Unit)),
-                        found: ptr_type,
-                    }),
-                }
-            }
-            
-            Expr::Store { ptr, value } => {
-                let ptr_type = self.check_expr(ptr, env)?;
-                let value_type = self.check_expr(value, env)?;
-                
-                match ptr_type {
-                    Type::LinearPtr(inner_type) => {
-                        if *inner_type != value_type {
-                            return Err(TypeError::TypeMismatch {
-                                expected: *inner_type,
-                                found: value_type,
-                            });
+                LogicType::Arrow(types) => {
+                    // Check all types in the arrow
+                    for logic_type in types {
+                        if let LogicType::Named(type_name) = logic_type {
+                            if !defined_types.contains(type_name) {
+                                return Err(TypeCheckError::UnknownTerm { 
+                                    term: format!("Type '{}' is not defined. Define it with '{} :: type.'", type_name, type_name)
+                                });
+                            }
                         }
-                        Ok(Type::Unit)
                     }
-                    _ => Err(TypeError::TypeMismatch {
-                        expected: Type::LinearPtr(Box::new(Type::Unit)),
-                        found: ptr_type,
-                    }),
                 }
-            }
-            
-            Expr::BinOp { op, left, right } => {
-                let left_type = self.check_expr(left, env)?;
-                let right_type = self.check_expr(right, env)?;
-                
-                match (op, &left_type, &right_type) {
-                    (BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div, Type::Int, Type::Int) => {
-                        Ok(Type::Int)
-                    }
-                    (BinOpKind::Eq | BinOpKind::Lt | BinOpKind::Gt, Type::Int, Type::Int) => {
-                        Ok(Type::Int) // Using Int for boolean (simplified)
-                    }
-                    (BinOpKind::And | BinOpKind::Or, Type::Int, Type::Int) => {
-                        Ok(Type::Int)
-                    }
-                    _ => Err(TypeError::InvalidBinaryOp {
-                        op: op.clone(),
-                        left: left_type,
-                        right: right_type,
-                    }),
-                }
+                _ => {}
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::tokenize;
-    use crate::parser::Parser;
-    
-    #[test]
-    fn test_simple_type_check() {
-        let tokens = tokenize("let x = 42 in x + 1").unwrap();
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
         
-        let mut type_checker = TypeChecker::new();
-        let result = type_checker.check_program(&program);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Type::Int);
-    }
-    
-    #[test]
-    fn test_linearity_violation() {
-        let tokens = tokenize("let x = 42 in x + x").unwrap();
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
+        // Also check predicate types
+        for pred_type in &program.type_declarations {
+            match &pred_type.signature {
+                LogicType::Arrow(types) => {
+                    for logic_type in types {
+                        if let LogicType::Named(type_name) = logic_type {
+                            if !defined_types.contains(type_name) {
+                                return Err(TypeCheckError::UnknownTerm { 
+                                    term: format!("Type '{}' is not defined. Define it with '{} :: type.'", type_name, type_name)
+                                });
+                            }
+                        }
+                    }
+                }
+                LogicType::Named(type_name) => {
+                    if !defined_types.contains(type_name) {
+                        return Err(TypeCheckError::UnknownTerm { 
+                            term: format!("Type '{}' is not defined. Define it with '{} :: type.'", type_name, type_name)
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
         
-        let mut type_checker = TypeChecker::new();
-        let result = type_checker.check_program(&program);
-        assert!(result.is_err());
-        // Should fail due to using x twice
+        Ok(())
     }
 }

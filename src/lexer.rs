@@ -9,6 +9,20 @@ use nom::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TokenSpan {
+    pub token: Token,
+    pub line: usize,
+    pub column: usize,
+    pub length: usize,
+}
+
+impl TokenSpan {
+    pub fn new(token: Token, line: usize, column: usize, length: usize) -> Self {
+        Self { token, line, column, length }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords
     Let,
@@ -59,10 +73,13 @@ pub enum Token {
     Eof,
     
     // Logical programming tokens
-    ColonDash,   // :-
-    Question,    // ?
-    Period,      // .
-    Pipe,        // |
+    Query,      // ?-
+    Rule,       // :-
+    
+    // Types
+    Type,       // type
+    Colon,      // :
+    ColonColon, // ::
 }
 
 /// Parse an identifier
@@ -116,6 +133,7 @@ fn parse_keywords(input: &str) -> IResult<&str, Token> {
         map(tag("lam"), |_| Token::Lam),
         map(tag("in"), |_| Token::In),
         map(tag("if"), |_| Token::If),
+        map(tag("type"), |_| Token::Type),
     ))(input)
 }
 
@@ -140,16 +158,17 @@ fn parse_operators(input: &str) -> IResult<&str, Token> {
 /// Parse punctuation
 fn parse_punctuation(input: &str) -> IResult<&str, Token> {
     alt((
-        map(tag(":-"), |_| Token::ColonDash),
+        map(tag(":-"), |_| Token::Rule),
+        map(tag("?-"), |_| Token::Query),
+        map(tag("::"), |_| Token::ColonColon),
+        map(tag(":"), |_| Token::Colon),
         map(tag("("), |_| Token::LeftParen),
         map(tag(")"), |_| Token::RightParen),
         map(tag("{"), |_| Token::LeftBrace),
         map(tag("}"), |_| Token::RightBrace),
         map(tag(","), |_| Token::Comma),
-        map(tag("."), |_| Token::Period),
+        map(tag("."), |_| Token::Dot),
         map(tag(";"), |_| Token::Semicolon),
-        map(tag("?"), |_| Token::Question),
-        map(tag("|"), |_| Token::Pipe),
     ))(input)
 }
 
@@ -162,34 +181,119 @@ fn parse_literals(input: &str) -> IResult<&str, Token> {
 }
 
 /// Tokenize the entire input
-pub fn tokenize(mut input: &str) -> Result<Vec<Token>, String> {
+#[derive(Debug, Clone)]
+pub struct LexError {
+    pub message: String,
+    pub line: usize,
+    pub column: usize,
+    pub length: usize,
+}
+
+#[derive(Debug)]
+pub struct LexResult {
+    pub tokens: Vec<TokenSpan>,
+    pub errors: Vec<LexError>,
+}
+
+impl LexResult {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
+pub fn tokenize(input: &str) -> Result<LexResult, String> {
     let mut tokens = Vec::new();
+    let mut errors = Vec::new();
+    let mut remaining = input;
+    let mut line = 1;
+    let mut column = 1;
     
-    while !input.is_empty() {
-        // Skip whitespace
-        match multispace0::<&str, nom::error::Error<&str>>(input) {
-            Ok((rest, _)) => input = rest,
+    while !remaining.is_empty() {
+        // Skip whitespace and track position
+        match multispace0::<&str, nom::error::Error<&str>>(remaining) {
+            Ok((rest, whitespace)) => {
+                for ch in whitespace.chars() {
+                    if ch == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
+                remaining = rest;
+            }
             Err(_) => break,
         }
         
-        if input.is_empty() {
+        if remaining.is_empty() {
             break;
         }
         
-        // Parse token
-        match token(input) {
+        // Skip comments (lines starting with //)
+        if remaining.starts_with("//") {
+            // Skip to end of line
+            if let Some(newline_pos) = remaining.find('\n') {
+                remaining = &remaining[newline_pos + 1..];
+                line += 1;
+                column = 1;
+            } else {
+                // Comment goes to end of file
+                break;
+            }
+            continue;
+        }
+        
+        // Parse token and calculate its length
+        let token_start_column = column;
+        match token(remaining) {
             Ok((rest, tok)) => {
-                tokens.push(tok);
-                input = rest;
+                let token_length = remaining.len() - rest.len();
+                tokens.push(TokenSpan::new(tok, line, token_start_column, token_length));
+                
+                // Update position for consumed characters
+                let consumed = &remaining[..token_length];
+                for ch in consumed.chars() {
+                    if ch == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
+                
+                remaining = rest;
             }
             Err(_) => {
-                return Err(format!("Unexpected character at: {}", &input[..10.min(input.len())]));
+                // Record the error but continue lexing
+                let error_char = remaining.chars().next().unwrap_or('\0');
+                let error_length = if error_char == '\0' { 0 } else { 1 };
+                
+                errors.push(LexError {
+                    message: format!("Unexpected character: '{}'", error_char),
+                    line,
+                    column,
+                    length: error_length,
+                });
+                
+                // Skip the problematic character and continue
+                if !remaining.is_empty() {
+                    let mut chars = remaining.chars();
+                    let skipped_char = chars.next().unwrap();
+                    remaining = chars.as_str();
+                    
+                    if skipped_char == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
             }
         }
     }
     
-    tokens.push(Token::Eof);
-    Ok(tokens)
+    tokens.push(TokenSpan::new(Token::Eof, line, column, 0));
+    Ok(LexResult { tokens, errors })
 }
 
 #[cfg(test)]
@@ -200,31 +304,33 @@ mod tests {
     fn test_tokenize_simple() {
         let input = "let x = 42 in x + 1";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec![
-            Token::Let,
-            Token::Identifier("x".to_string()),
-            Token::Equal,
-            Token::Integer(42),
-            Token::In,
-            Token::Identifier("x".to_string()),
-            Token::Plus,
-            Token::Integer(1),
-            Token::Eof,
-        ]);
+        let expected_tokens = vec![
+            TokenSpan::new(Token::Let, 1, 1, 3),
+            TokenSpan::new(Token::Identifier("x".to_string()), 1, 5, 1),
+            TokenSpan::new(Token::Equal, 1, 7, 1),
+            TokenSpan::new(Token::Integer(42), 1, 9, 2),
+            TokenSpan::new(Token::In, 1, 12, 2),
+            TokenSpan::new(Token::Identifier("x".to_string()), 1, 15, 1),
+            TokenSpan::new(Token::Plus, 1, 17, 1),
+            TokenSpan::new(Token::Integer(1), 1, 19, 1),
+            TokenSpan::new(Token::Eof, 1, 20, 0),
+        ];
+        assert_eq!(tokens, expected_tokens);
     }
     
     #[test]
     fn test_tokenize_lambda() {
         let input = "lam x. x + 1";
         let tokens = tokenize(input).unwrap();
-        assert_eq!(tokens, vec![
-            Token::Lam,
-            Token::Identifier("x".to_string()),
-            Token::Dot,
-            Token::Identifier("x".to_string()),
-            Token::Plus,
-            Token::Integer(1),
-            Token::Eof,
-        ]);
+        let expected_tokens = vec![
+            TokenSpan::new(Token::Lam, 1, 1, 3),
+            TokenSpan::new(Token::Identifier("x".to_string()), 1, 5, 1),
+            TokenSpan::new(Token::Dot, 1, 6, 1),
+            TokenSpan::new(Token::Identifier("x".to_string()), 1, 8, 1),
+            TokenSpan::new(Token::Plus, 1, 10, 1),
+            TokenSpan::new(Token::Integer(1), 1, 12, 1),
+            TokenSpan::new(Token::Eof, 1, 13, 0),
+        ];
+        assert_eq!(tokens, expected_tokens);
     }
 }

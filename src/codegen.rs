@@ -51,10 +51,15 @@ impl CodeGenerator {
             self.generate_function_declaration(func)?;
         }
         
-        // Generate logical programming structures if we have clauses
+        // Always generate logical runtime for logic programs
+        self.generate_logical_runtime()?;
+        
+        // Generate logical programming structures
         if !program.clauses.is_empty() {
-            self.generate_logical_runtime()?;
             self.generate_clauses(&program.clauses)?;
+        } else {
+            // Even with no clauses, we need the basic KB structure
+            self.generate_empty_kb()?;
         }
         
         // Generate function definitions
@@ -281,6 +286,19 @@ impl CodeGenerator {
         Ok(())
     }
     
+    fn generate_empty_kb(&mut self) -> Result<(), std::fmt::Error> {
+        writeln!(self.output, "// Linear Knowledge Base (empty)")?;
+        writeln!(self.output, "linear_kb_t* kb;")?;
+        writeln!(self.output)?;
+        
+        writeln!(self.output, "void initialize_kb() {{")?;
+        writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+    
     fn generate_clauses(&mut self, clauses: &[Clause]) -> Result<(), std::fmt::Error> {
         writeln!(self.output, "// Linear Knowledge Base")?;
         writeln!(self.output, "linear_kb_t* kb;")?;
@@ -344,11 +362,11 @@ impl CodeGenerator {
         
         Ok(())
     }
-    
+
     fn generate_term_creation(&mut self, term: &Term) -> Result<String, std::fmt::Error> {
         match term {
-            Term::Atom(name) => Ok(format!("create_atom(\"{}\")", name)),
-            Term::Var(name) => Ok(format!("create_var(\"{}\")", name)),
+            Term::Atom { name, .. } => Ok(format!("create_atom(\"{}\")", name)),
+            Term::Var { name, .. } => Ok(format!("create_var(\"{}\")", name)),
             Term::Integer(value) => Ok(format!("create_integer({})", value)),
             Term::Compound { functor, args } => {
                 if args.is_empty() {
@@ -388,8 +406,8 @@ impl CodeGenerator {
     
     fn term_to_string(&self, term: &Term) -> String {
         match term {
-            Term::Atom(name) => name.clone(),
-            Term::Var(name) => name.clone(),
+            Term::Atom { name, .. } => name.clone(),
+            Term::Var { name, .. } => name.clone(),
             Term::Integer(value) => value.to_string(),
             Term::Compound { functor, args } => {
                 format!("{}({})", functor, 
@@ -434,7 +452,7 @@ impl CodeGenerator {
         writeln!(self.output, "int main() {{")?;
         writeln!(self.output, "    initialize_kb();")?;
         writeln!(self.output, "    printf(\"\\n=== LINEAR LOGIC KNOWLEDGE BASE ===\\n\");")?;
-        writeln!(self.output, "    printf(\"Linear knowledge base initialized with {} clauses\\n\", {});", clauses.len(), clauses.len())?;
+        writeln!(self.output, "    printf(\"Linear knowledge base initialized with {} clauses\\n\");", clauses.len())?;
         writeln!(self.output, "    printf(\"Ready for linear logic queries.\\n\");")?;
         writeln!(self.output)?;
         writeln!(self.output, "    // Clean up")?;
