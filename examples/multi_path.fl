@@ -1,0 +1,19 @@
+// Simple test with multiple paths
+type resource.
+type processed.
+type final.
+
+// Initial resources
+r1 :: resource.
+r2 :: resource.
+
+// Processing rule
+process :: resource -> type.
+process :- resource => processed.
+
+// Final rule
+finish :: processed -> type.
+finish :- processed => final.
+
+// Query
+?- process, finish.

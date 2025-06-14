@@ -78,6 +78,23 @@ typedef struct union_mapping {
     struct union_mapping* next;
 } union_mapping_t;
 
+// Linear path tracking for showing resource consumption chains
+typedef struct path_step {
+    enum {
+        PATH_CONSUME,    // Consumed a resource: "turkey1"
+        PATH_RULE_APPLY, // Applied a rule: "eat"
+        PATH_PRODUCE     // Produced a resource: "=> satisfied"
+    } type;
+    char* item_name;           // Name of resource or rule
+    char* produced_name;       // For PATH_PRODUCE, what was produced
+    struct path_step* next;
+} path_step_t;
+
+typedef struct linear_path {
+    path_step_t* steps;        // Linked list of path steps
+    path_step_t* last_step;    // For easy appending
+} linear_path_t;
+
 // Consumed state for backtracking
 typedef struct consumed_state {
     linear_resource_t* resource;
@@ -130,6 +147,15 @@ int string_equal(const char* s1, const char* s2);
 term_t* copy_term(term_t* term);
 void free_term(term_t* term);
 
+// Linear path tracking functions
+linear_path_t* create_linear_path();
+void add_path_consume(linear_path_t* path, const char* resource_name);
+void add_path_rule_apply(linear_path_t* path, const char* rule_name);
+void add_path_produce(linear_path_t* path, const char* rule_name, const char* produced_name);
+void print_linear_path(linear_path_t* path);
+void free_linear_path(linear_path_t* path);
+linear_path_t* copy_linear_path(linear_path_t* path);
+
 // Linear logic functions
 linear_kb_t* create_linear_kb();
 void add_linear_fact(linear_kb_t* kb, term_t* fact);
@@ -141,6 +167,7 @@ const char* get_term_type(linear_kb_t* kb, const char* term_name);
 int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact);
 int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count);
 int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst);
+int linear_resolve_query_with_path(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst, linear_path_t* path);
 void compose_substitutions(substitution_t* dest, substitution_t* src);
 void free_linear_kb(linear_kb_t* kb);
 void reset_consumed_resources(linear_kb_t* kb);

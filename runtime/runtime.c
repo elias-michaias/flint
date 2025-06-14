@@ -4,6 +4,102 @@
 
 // #define DEBUG 1
 
+// Linear path tracking functions
+linear_path_t* create_linear_path() {
+    linear_path_t* path = malloc(sizeof(linear_path_t));
+    path->steps = NULL;
+    path->last_step = NULL;
+    return path;
+}
+
+void add_path_consume(linear_path_t* path, const char* resource_name) {
+    path_step_t* step = malloc(sizeof(path_step_t));
+    step->type = PATH_CONSUME;
+    step->item_name = malloc(strlen(resource_name) + 1);
+    strcpy(step->item_name, resource_name);
+    step->produced_name = NULL;
+    step->next = NULL;
+    
+    if (path->last_step) {
+        path->last_step->next = step;
+    } else {
+        path->steps = step;
+    }
+    path->last_step = step;
+}
+
+void add_path_rule_apply(linear_path_t* path, const char* rule_name) {
+    path_step_t* step = malloc(sizeof(path_step_t));
+    step->type = PATH_RULE_APPLY;
+    step->item_name = malloc(strlen(rule_name) + 1);
+    strcpy(step->item_name, rule_name);
+    step->produced_name = NULL;
+    step->next = NULL;
+    
+    if (path->last_step) {
+        path->last_step->next = step;
+    } else {
+        path->steps = step;
+    }
+    path->last_step = step;
+}
+
+void add_path_produce(linear_path_t* path, const char* rule_name, const char* produced_name) {
+    path_step_t* step = malloc(sizeof(path_step_t));
+    step->type = PATH_PRODUCE;
+    step->item_name = malloc(strlen(rule_name) + 1);
+    strcpy(step->item_name, rule_name);
+    step->produced_name = malloc(strlen(produced_name) + 1);
+    strcpy(step->produced_name, produced_name);
+    step->next = NULL;
+    
+    if (path->last_step) {
+        path->last_step->next = step;
+    } else {
+        path->steps = step;
+    }
+    path->last_step = step;
+}
+
+void print_linear_path(linear_path_t* path) {
+    printf("true.\n");
+}
+
+void free_linear_path(linear_path_t* path) {
+    path_step_t* step = path->steps;
+    while (step) {
+        path_step_t* next = step->next;
+        free(step->item_name);
+        if (step->produced_name) {
+            free(step->produced_name);
+        }
+        free(step);
+        step = next;
+    }
+    free(path);
+}
+
+linear_path_t* copy_linear_path(linear_path_t* path) {
+    linear_path_t* new_path = create_linear_path();
+    path_step_t* step = path->steps;
+    
+    while (step) {
+        switch (step->type) {
+            case PATH_CONSUME:
+                add_path_consume(new_path, step->item_name);
+                break;
+            case PATH_RULE_APPLY:
+                add_path_rule_apply(new_path, step->item_name);
+                break;
+            case PATH_PRODUCE:
+                add_path_produce(new_path, step->item_name, step->produced_name);
+                break;
+        }
+        step = step->next;
+    }
+    return new_path;
+}
+
 // Linear memory allocation
 linear_ptr_t linear_alloc(size_t size) {
     linear_ptr_t lptr;
@@ -753,6 +849,167 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     return solutions;
 }
 
+// Forward declarations for forward chaining helper functions
+int build_solution_path(linear_kb_t* kb, linear_resource_t* start_resource, term_t** goals, int goal_count, linear_path_t* path);
+int consume_resource_and_apply_rules(linear_kb_t* kb, linear_resource_t* resource, term_t** goals, int goal_count, int* remaining_goals, int* unsatisfied_count, linear_path_t* path);
+
+// Forward chaining linear resolution - follows distinct linear paths
+int linear_resolve_forward_chaining(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path) {
+    if (goal_count == 0) {
+        // All goals satisfied - this is a complete solution
+        printf("true.\n");
+        return 1;
+    }
+    
+    int solutions = 0;
+    
+    // For each initial resource, try to build a complete solution path
+    linear_resource_t* resource = kb->resources;
+    while (resource) {
+        if (!resource->consumed) {
+            // Save the current state for backtracking
+            consumed_state_t* saved_state = save_consumed_state(kb);
+            
+            // Try to build a solution starting from this resource
+            linear_path_t* new_path = copy_linear_path(path);
+            
+            if (build_solution_path(kb, resource, goals, goal_count, new_path)) {
+                solutions++;
+                printf("true.\n");
+            }
+            
+            free_linear_path(new_path);
+            restore_consumed_state(saved_state);
+        }
+        resource = resource->next;
+    }
+    
+    return solutions;
+}
+
+// Build a complete solution path starting from a specific resource
+int build_solution_path(linear_kb_t* kb, linear_resource_t* start_resource, term_t** goals, int goal_count, linear_path_t* path) {
+    // Keep track of goals that still need to be satisfied
+    int remaining_goals[goal_count];
+    for (int i = 0; i < goal_count; i++) {
+        remaining_goals[i] = 1; // 1 means goal still needs to be satisfied
+    }
+    int unsatisfied_count = goal_count;
+    
+    // Start the forward chaining process with the initial resource
+    if (!consume_resource_and_apply_rules(kb, start_resource, goals, goal_count, remaining_goals, &unsatisfied_count, path)) {
+        return 0; // Failed to make progress
+    }
+    
+    // Continue applying rules until all goals are satisfied or no more progress can be made
+    int made_progress = 1;
+    while (unsatisfied_count > 0 && made_progress) {
+        made_progress = 0;
+        
+        // Look for any available resource that can make progress on remaining goals
+        linear_resource_t* resource = kb->resources;
+        while (resource && unsatisfied_count > 0) {
+            if (!resource->consumed) {
+                if (consume_resource_and_apply_rules(kb, resource, goals, goal_count, remaining_goals, &unsatisfied_count, path)) {
+                    made_progress = 1;
+                }
+            }
+            resource = resource->next;
+        }
+    }
+    
+    return (unsatisfied_count == 0); // Success if all goals are satisfied
+}
+
+// Try to consume a resource and apply rules to make progress toward goals
+int consume_resource_and_apply_rules(linear_kb_t* kb, linear_resource_t* resource, term_t** goals, int goal_count, int* remaining_goals, int* unsatisfied_count, linear_path_t* path) {
+    int made_progress = 0;
+    
+    // First check if this resource directly satisfies any goal
+    for (int g = 0; g < goal_count; g++) {
+        if (remaining_goals[g]) {
+            substitution_t direct_subst = {0};
+            if (unify(goals[g], resource->fact, &direct_subst)) {
+                // Direct satisfaction
+                term_t* actual_fact = get_inner_term(resource->fact);
+                int is_persistent = is_persistent_resource(resource->fact);
+                
+                if (!is_persistent) {
+                    resource->consumed = 1;
+                }
+                
+                add_path_consume(path, actual_fact->data.atom);
+                remaining_goals[g] = 0;
+                (*unsatisfied_count)--;
+                made_progress = 1;
+                
+#ifdef DEBUG
+                printf("Forward chaining: directly consumed %s to satisfy goal %s\n", 
+                       actual_fact->data.atom, goals[g]->data.atom);
+#endif
+                return made_progress;
+            }
+        }
+    }
+    
+    // Try to find a rule that can consume this resource
+    for (int rule_idx = 0; rule_idx < kb->rule_count; rule_idx++) {
+        clause_t* rule = &kb->rules[rule_idx];
+        
+        if (rule->body_size == 1) { // Handle single-body rules
+            substitution_t rule_subst = {0};
+            
+            // Check if this rule can consume our resource
+            if (can_unify_with_type(kb, rule->body[0], resource->fact)) {
+                // Consume the resource
+                term_t* actual_fact = get_inner_term(resource->fact);
+                int is_persistent = is_persistent_resource(resource->fact);
+                
+                if (!is_persistent) {
+                    resource->consumed = 1;
+                }
+                
+                add_path_consume(path, actual_fact->data.atom);
+                add_path_rule_apply(path, rule->head->data.atom);
+                
+                // Check if the rule head directly satisfies any remaining goal
+                for (int g = 0; g < goal_count; g++) {
+                    if (remaining_goals[g]) {
+                        substitution_t goal_subst = {0};
+                        if (unify(goals[g], rule->head, &goal_subst)) {
+                            remaining_goals[g] = 0;
+                            (*unsatisfied_count)--;
+                            made_progress = 1;
+                            
+#ifdef DEBUG
+                            printf("Forward chaining: consumed %s, applied rule %s, satisfied goal %s\n", 
+                                   actual_fact->data.atom, rule->head->data.atom, goals[g]->data.atom);
+#endif
+                        }
+                    }
+                }
+                
+                // If rule produces a fact, add it to the knowledge base
+                if (rule->production) {
+                    term_t* produced_fact = apply_substitution(rule->production, &rule_subst);
+                    add_linear_fact(kb, produced_fact);
+                    add_path_produce(path, rule->head->data.atom, produced_fact->data.atom);
+                    made_progress = 1;
+                    
+#ifdef DEBUG
+                    printf("Forward chaining: consumed %s, applied rule %s, produced %s\n", 
+                           actual_fact->data.atom, rule->head->data.atom, produced_fact->data.atom);
+#endif
+                }
+                
+                return made_progress;
+            }
+        }
+    }
+    
+    return made_progress;
+}
+
 // Wrapper function for the original interface
 int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count) {
     if (goal_count == 0) {
@@ -760,12 +1017,14 @@ int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count) {
         return 1;
     }
     
-    // For the substitution version, we need the original query
-    // This is a simplified version that doesn't handle substitutions properly
-    // It should be replaced by the caller using linear_resolve_query_with_substitution
-    term_t* goal = goals[0];
-    substitution_t empty_subst = {0};
-    return linear_resolve_query_with_substitution(kb, goals, goal_count, goal, &empty_subst);
+    // Create an empty path for tracking
+    linear_path_t* path = create_linear_path();
+    
+    // Use forward chaining approach
+    int result = linear_resolve_forward_chaining(kb, goals, goal_count, path);
+    
+    free_linear_path(path);
+    return result;
 }
 
 // Free linear knowledge base

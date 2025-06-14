@@ -592,15 +592,9 @@ impl CodeGenerator {
                 writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
             }
             
-            // Create original query for substitution tracking
-            let original_query_var = format!("original_query_{}", query_index);
-            let first_goal_code = self.generate_term_creation(&query.goals[0])?;
-            writeln!(self.output, "    term_t* {} = {};", original_query_var, first_goal_code)?;
-            
-            // Execute the query
-            writeln!(self.output, "    substitution_t empty_subst_{} = {{0}};", query_index)?;
-            writeln!(self.output, "    int success_{} = linear_resolve_query_with_substitution(kb, {}, {}, {}, &empty_subst_{});", 
-                     query_index, goals_var, query.goals.len(), original_query_var, query_index)?;
+            // Execute the query with path tracking
+            writeln!(self.output, "    int success_{} = linear_resolve_query(kb, {}, {});", 
+                     query_index, goals_var, query.goals.len())?;
             writeln!(self.output, "    if (success_{} == 0) {{", query_index)?;
             writeln!(self.output, "        printf(\"false.\\n\");")?;
             writeln!(self.output, "    }}")?;
@@ -610,7 +604,6 @@ impl CodeGenerator {
             writeln!(self.output, "        free({}[i]);", goals_var)?;
             writeln!(self.output, "    }}")?;
             writeln!(self.output, "    free({});", goals_var)?;
-            writeln!(self.output, "    free({});", original_query_var)?;
         }
         
         writeln!(self.output)?;
