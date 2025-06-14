@@ -127,6 +127,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "flint"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "nom",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -155,16 +165,6 @@ name = "libc"
 version = "0.2.173"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8cfeafaffdbc32176b64fb251369d52ea9f0a8fbc6f8759edffef7b525d64bb"
-
-[[package]]
-name = "linear-logic"
-version = "0.1.0"
-dependencies = [
- "clap",
- "nom",
- "tempfile",
- "thiserror",
-]
 
 [[package]]
 name = "linux-raw-sys"

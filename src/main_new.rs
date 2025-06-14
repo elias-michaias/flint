@@ -54,6 +54,8 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
+    /// Print help information
+    Help,
 }
 
 /// Result of the parsing pipeline
@@ -75,6 +77,10 @@ fn main() {
         }
         Commands::Check { input, debug } => {
             check_command(input, debug)
+        }
+        Commands::Help => {
+            print_help();
+            Ok(())
         }
     };
     
@@ -184,8 +190,8 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
     let mut resource_manager = resource::LinearResourceManager::new();
     for clause in &program.clauses {
         match clause {
-            Clause::Fact { predicate, args, persistent: _ } => {
-                resource_manager.add_fact(predicate.clone(), args.clone());
+            Clause::Fact { predicate, args, persistent } => {
+                resource_manager.add_fact(predicate.clone(), args.clone(), *persistent);
             }
             Clause::Rule { head, body, produces } => {
                 resource_manager.add_rule(head.clone(), body.clone());
@@ -268,7 +274,7 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
         .arg(&c_file)
         .arg("runtime/runtime.c")
         .arg("-I")
-        .arg("runtime")
+        .arg(".")
         .arg("-o")
         .arg(&exe_file)
         .status()?;
@@ -356,7 +362,7 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
             .arg(&output_path)
             .arg("runtime/runtime.c")
             .arg("-I")
-            .arg("runtime")
+            .arg(".")
             .arg("-o")
             .arg(&exe_path)
             .status()?;
@@ -377,6 +383,27 @@ fn check_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::
     println!("✓ Type checking passed!");
     println!("Program is well-typed");
     Ok(())
+}
+
+/// Help command: print detailed usage information
+fn print_help() {
+    println!("Flint - Linear Logic Programming Language Compiler");
+    println!();
+    println!("USAGE:");
+    println!("    flint <COMMAND> [OPTIONS] <INPUT>");
+    println!();
+    println!("COMMANDS:");
+    println!("    run      Run a linear logic program with full resource tracking");
+    println!("    compile  Compile to C code (and optionally to executable)");
+    println!("    check    Check syntax, types, and linear resource usage");
+    println!("    help     Show this help message");
+    println!();
+    println!("EXAMPLES:");
+    println!("    flint run program.fl           # Run program with linear logic");
+    println!("    flint compile program.fl       # Generate C code");
+    println!("    flint compile -e program.fl    # Generate C code and compile");
+    println!("    flint check program.fl         # Validate program");
+    println!("    flint run --debug program.fl   # Run with debug output");
 }
 
 #[cfg(test)]

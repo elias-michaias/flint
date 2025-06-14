@@ -8,6 +8,7 @@ pub struct Parser {
     current: usize,
     file_path: String,
     source_text: String,
+    debug: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,11 +30,17 @@ enum TypeDeclaration {
     Predicate(PredicateType),
     Term(TermType),
     BatchTerms(Vec<String>, LogicType),
+    TypeDefinition(TypeDefinition),  // New type definition
 }
 
 impl Parser {
     pub fn new(tokens: Vec<TokenSpan>, file_path: String, source_text: String) -> Self {
-        Self { tokens, current: 0, file_path, source_text }
+        Self { tokens, current: 0, file_path, source_text, debug: false }
+    }
+    
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
     }
     
     fn current_token(&self) -> &Token {
@@ -103,11 +110,12 @@ impl Parser {
     }
     
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+        let mut type_definitions = Vec::new();
         let mut type_declarations = Vec::new();
         let mut term_types = Vec::new();
         let mut functions = Vec::new();
         let mut clauses = Vec::new();
-        let mut query = None;
+        let mut queries = Vec::new();
         let mut main = None;
         
         // Parse type declarations, clauses, functions, and queries
@@ -115,7 +123,19 @@ impl Parser {
             match self.current_token() {
                 Token::Query => {
                     // Parse query: ?- goal1, goal2.
-                    query = Some(self.parse_query()?);
+                    queries.push(self.parse_query()?);
+                }
+                Token::Bang => {
+                    // Persistent fact: !fact(args).
+                    clauses.push(self.parse_clause()?);
+                }
+                Token::Type => {
+                    // New type definition: type name [(variants)] [is supertype].
+                    let type_decl = self.parse_type_declaration()?;
+                    self.expect(Token::Dot)?; // Expect period after type definition
+                    if let TypeDeclaration::TypeDefinition(type_def) = type_decl {
+                        type_definitions.push(type_def);
+                    }
                 }
                 Token::Identifier(_) => {
                     // Check if this is a type declaration (name :: type_signature.)
@@ -127,13 +147,40 @@ impl Parser {
                                 type_declarations.push(pred_type);
                             }
                             TypeDeclaration::Term(term_type) => {
-                                term_types.push(term_type);
+                                term_types.push(term_type.clone());
+                                
+                                // If this is a Named type (not a function), create a nullary fact
+                                if let LogicType::Named(_) = term_type.term_type {
+                                    let nullary_fact = Clause::Fact {
+                                        predicate: term_type.name.clone(),
+                                        args: vec![], // Nullary fact (no arguments)  
+                                        persistent: false, // Default to linear consumption
+                                    };
+                                    clauses.push(nullary_fact);
+                                }
                             }
                             TypeDeclaration::BatchTerms(names, logic_type) => {
                                 // Create individual TermType entries for each name
-                                for name in names {
-                                    term_types.push(TermType { name, term_type: logic_type.clone() });
+                                for name in &names {
+                                    term_types.push(TermType { name: name.clone(), term_type: logic_type.clone() });
                                 }
+                                
+                                // If this is a Named type (not a function), create nullary facts
+                                if let LogicType::Named(_) = logic_type {
+                                    for name in names {
+                                        // Create a nullary fact for each name
+                                        let nullary_fact = Clause::Fact {
+                                            predicate: name,
+                                            args: vec![], // Nullary fact (no arguments)
+                                            persistent: false, // Default to linear consumption
+                                        };
+                                        clauses.push(nullary_fact);
+                                    }
+                                }
+                            }
+                            TypeDeclaration::TypeDefinition(_) => {
+                                // This shouldn't happen since we handle Token::Type separately now
+                                unreachable!("TypeDefinition should be handled by Token::Type case")
                             }
                         }
                     } else if self.peek_function_def() {
@@ -161,11 +208,12 @@ impl Parser {
         self.expect(Token::Eof)?;
         
         Ok(Program { 
+            type_definitions,
             type_declarations, 
             term_types, 
             functions, 
             clauses, 
-            query, 
+            queries, 
             main 
         })
     }
@@ -184,7 +232,7 @@ impl Parser {
     }
     
     fn peek_clause(&self) -> bool {
-        // Look for patterns like: pred(args) :- body. or pred(args).
+        // Look for patterns like: pred(args) :- body. or pred(args). or !pred(args).
         for i in self.current..self.tokens.len() {
             match &self.tokens[i].token {
                 Token::Dot => return true,
@@ -519,6 +567,14 @@ impl Parser {
     }
     
     fn parse_clause(&mut self) -> Result<Clause, ParseError> {
+        // Check for persistent fact prefix
+        let persistent = if matches!(self.current_token(), Token::Bang) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        
         let head_term = self.parse_term()?;
         
         match self.current_token() {
@@ -527,15 +583,21 @@ impl Parser {
                 self.advance();
                 match head_term {
                     Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args })
+                        Ok(Clause::Fact { predicate: functor, args, persistent })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
             }
             Token::Rule => {
-                // Rule
+                // Rule (persistent flag only applies to facts)
+                if persistent {
+                    return Err(ParseError::InvalidExpression); // Can't have !rule
+                }
                 self.advance();
                 let mut body = Vec::new();
+                let mut produces = None;
+                
+                // Parse the body goals
                 body.push(self.parse_term()?);
                 
                 while matches!(self.current_token(), Token::Comma) {
@@ -543,8 +605,14 @@ impl Parser {
                     body.push(self.parse_term()?);
                 }
                 
+                // Check for production syntax: => produced_term
+                if matches!(self.current_token(), Token::FatArrow) {
+                    self.advance();
+                    produces = Some(self.parse_term()?);
+                }
+                
                 self.expect(Token::Dot)?;
-                Ok(Clause::Rule { head: head_term, body })
+                Ok(Clause::Rule { head: head_term, body, produces })
             }
             _ => Err(ParseError::InvalidExpression),
         }
@@ -552,6 +620,12 @@ impl Parser {
     
     fn parse_term(&mut self) -> Result<Term, ParseError> {
         match self.current_token() {
+            Token::Bang => {
+                // Clone operator: !term
+                self.advance();
+                let inner_term = self.parse_term()?;
+                Ok(Term::Clone(Box::new(inner_term)))
+            }
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
@@ -674,6 +748,95 @@ impl Parser {
     }
 
     fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
+        // Check if this is the new syntax: "type name ..." 
+        if matches!(self.current_token(), Token::Type) {
+            return self.parse_new_type_definition();
+        }
+        
+        // Otherwise, parse the old syntax: "name(s) :: type"
+        self.parse_old_type_declaration()
+    }
+    
+    fn parse_new_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
+        // Parse: type name [(variant1 | variant2)] [is supertype]
+        self.expect(Token::Type)?;
+        
+        let name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(self.create_error_diagnostic("Expected type name after 'type'".to_string())),
+        };
+        
+        // Check for union variants: (apple | orange) or complex nested unions
+        let union_variants = if matches!(self.current_token(), Token::LeftParen) {
+            Some(self.parse_union_variants()?)
+        } else {
+            None
+        };
+        
+        Ok(TypeDeclaration::TypeDefinition(TypeDefinition {
+            name,
+            union_variants,
+        }))
+    }
+    
+    fn parse_union_variants(&mut self) -> Result<UnionVariants, ParseError> {
+        self.expect(Token::LeftParen)?;
+        
+        let mut variants = Vec::new();
+        
+        // Parse first variant
+        let first_variant = self.parse_union_variant()?;
+        variants.push(first_variant);
+        
+        // Parse additional variants
+        while matches!(self.current_token(), Token::Pipe) {
+            self.advance(); // consume |
+            let variant = self.parse_union_variant()?;
+            variants.push(variant);
+        }
+        
+        self.expect(Token::RightParen)?;
+        
+        // Check if this is a simple list or if any have sub-variants
+        let has_nested = variants.iter().any(|v| v.sub_variants.is_some());
+        
+        if has_nested {
+            Ok(UnionVariants::Nested(variants))
+        } else {
+            // Convert to simple list
+            let simple_names = variants.into_iter().map(|v| v.name).collect();
+            Ok(UnionVariants::Simple(simple_names))
+        }
+    }
+    
+    fn parse_union_variant(&mut self) -> Result<UnionVariant, ParseError> {
+        let name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(self.create_error_diagnostic("Expected variant name".to_string())),
+        };
+        
+        // Check for nested union: fruit (apple | orange)
+        let sub_variants = if matches!(self.current_token(), Token::LeftParen) {
+            Some(self.parse_union_variants()?)
+        } else {
+            None
+        };
+        
+        Ok(UnionVariant {
+            name,
+            sub_variants,
+        })
+    }
+    
+    fn parse_old_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
         // Parse name(s) :: type_signature.
         // This can be either "name :: type" or "name1, name2, name3 :: type"
         let mut names = Vec::new();
@@ -724,7 +887,9 @@ impl Parser {
                 if names.len() == 1 {
                     Ok(TypeDeclaration::Term(TermType { name: names[0].clone(), term_type: signature }))
                 } else {
-                    eprintln!("DEBUG: Creating BatchTerms for {} names", names.len());
+                    if self.debug {
+                        eprintln!("DEBUG: Creating BatchTerms for {} names", names.len());
+                    }
                     Ok(TypeDeclaration::BatchTerms(names, signature))
                 }
             }

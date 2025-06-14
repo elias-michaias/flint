@@ -62,24 +62,31 @@ impl TypeChecker {
         
         // Check all clauses
         for clause in &program.clauses {
-            self.check_clause(clause)?;
+            self.check_clause(clause, program)?;
         }
         
-        // Check query if present
-        if let Some(query) = &program.query {
+        // Check queries if present
+        for query in &program.queries {
             self.check_query(query)?;
         }
         
         Ok(())
     }
     
-    fn check_clause(&self, clause: &Clause) -> Result<(), TypeCheckError> {
+    fn check_clause(&self, clause: &Clause, program: &Program) -> Result<(), TypeCheckError> {
         match clause {
-            Clause::Fact { predicate, args } => {
-                // Check the fact predicate
-                self.check_predicate_call(predicate, args)?;
+            Clause::Fact { predicate, args, .. } => {
+                // Check if this is a nullary fact from a term type
+                if args.is_empty() && self.term_types.contains_key(predicate) {
+                    // This is a nullary fact like "c1" - it's valid if it's in term_types
+                    return Ok(());
+                } else {
+                    // Regular predicate fact - check as usual
+                    self.check_predicate_call(predicate, args)?;
+                    return Ok(());
+                }
             }
-            Clause::Rule { head, body } => {
+            Clause::Rule { head, body, produces } => {
                 // Check head
                 match head {
                     Term::Compound { functor, args } => {
@@ -100,6 +107,11 @@ impl TypeChecker {
                             // Single atom - infer as 0-arity predicate
                         }
                     }
+                }
+                
+                // Check production if present
+                if let Some(production) = produces {
+                    self.check_production(production, program)?;
                 }
                 
                 // Check variable consistency between head and body
@@ -187,6 +199,10 @@ impl TypeChecker {
                 // For compound terms, we need to look up the predicate type
                 // This is a simplified approach - in practice you'd want more sophisticated inference
                 Err(TypeCheckError::UnknownTerm { term: functor.clone() })
+            }
+            Term::Clone(inner) => {
+                // Cloned terms have the same type as their inner term
+                self.infer_term_type(inner)
             }
         }
     }
@@ -282,10 +298,20 @@ impl TypeChecker {
         defined_types.insert("string".to_string());
         defined_types.insert("type".to_string());
         
-        // Find all user-defined types
+        // Find all user-defined types from term_types (old syntax: name :: type.)
         for term_type in &program.term_types {
             if let LogicType::Type = term_type.term_type {
                 defined_types.insert(term_type.name.clone());
+            }
+        }
+        
+        // Find all user-defined types from type_definitions (new syntax: type name.)
+        for type_def in &program.type_definitions {
+            defined_types.insert(type_def.name.clone());
+            
+            // Also add union variants as types if they exist
+            if let Some(ref variants) = type_def.union_variants {
+                self.add_union_variants_to_set(&mut defined_types, variants);
             }
         }
         
@@ -340,6 +366,69 @@ impl TypeChecker {
             }
         }
         
+        Ok(())
+    }
+    
+    fn add_union_variants_to_set(&self, defined_types: &mut std::collections::HashSet<String>, variants: &UnionVariants) {
+        match variants {
+            UnionVariants::Simple(names) => {
+                for name in names {
+                    defined_types.insert(name.clone());
+                }
+            }
+            UnionVariants::Nested(variant_list) => {
+                for variant in variant_list {
+                    defined_types.insert(variant.name.clone());
+                    if let Some(ref sub_variants) = variant.sub_variants {
+                        self.add_union_variants_to_set(defined_types, sub_variants);
+                    }
+                }
+            }
+        }
+    }
+    
+    fn check_production(&self, production: &Term, program: &Program) -> Result<(), TypeCheckError> {
+        match production {
+            Term::Atom { name, .. } => {
+                // Build the same set of defined types as in check_program
+                let mut defined_types = std::collections::HashSet::new();
+                
+                // Add built-in types
+                defined_types.insert("type".to_string());
+                
+                // Find all user-defined types from term_types (old syntax: name :: type.)
+                for term_type in &program.term_types {
+                    if let LogicType::Type = term_type.term_type {
+                        defined_types.insert(term_type.name.clone());
+                    }
+                }
+                
+                // Find all user-defined types from type_definitions (new syntax: type name.)
+                for type_def in &program.type_definitions {
+                    defined_types.insert(type_def.name.clone());
+                    
+                    // Also add union variants as types if they exist
+                    if let Some(ref variants) = type_def.union_variants {
+                        self.add_union_variants_to_set(&mut defined_types, variants);
+                    }
+                }
+                
+                // Check if the production name is a defined type
+                if !defined_types.contains(name) {
+                    return Err(TypeCheckError::UnknownTerm { term: name.clone() });
+                }
+            }
+            Term::Compound { functor, args } => {
+                // For compound productions, check the functor as a predicate
+                self.check_predicate_call(functor, args)?;
+            }
+            _ => {
+                // Other term types (variables, integers) are not valid productions
+                return Err(TypeCheckError::UnknownTerm { 
+                    term: format!("{:?}", production) 
+                });
+            }
+        }
         Ok(())
     }
 }

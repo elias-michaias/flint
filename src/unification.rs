@@ -134,7 +134,7 @@ impl UnificationEngine {
                 let renamed_clause = self.rename_clause(clause, &mut var_mapping);
                 
                 match &renamed_clause {
-                    Clause::Fact { predicate, args } => {
+                    Clause::Fact { predicate, args, .. } => {
                         let fact_term = Term::Compound {
                             functor: predicate.clone(),
                             args: args.clone(),
@@ -152,7 +152,7 @@ impl UnificationEngine {
                         }
                     }
                     
-                    Clause::Rule { head, body } => {
+                    Clause::Rule { head, body, .. } => {
                         if let Some(new_subst) = self.unify(goal, head) {
                             let mut combined_subst = subst.clone();
                             self.compose_substitutions(&mut combined_subst, &new_subst);
@@ -177,16 +177,18 @@ impl UnificationEngine {
     /// Rename variables in a clause
     fn rename_clause(&mut self, clause: &Clause, mapping: &mut HashMap<String, String>) -> Clause {
         match clause {
-            Clause::Fact { predicate, args } => {
+            Clause::Fact { predicate, args, .. } => {
                 Clause::Fact {
                     predicate: predicate.clone(),
                     args: args.iter().map(|arg| self.rename_variables(arg, mapping)).collect(),
+                    persistent: false, // Default for renamed clauses
                 }
             }
-            Clause::Rule { head, body } => {
+            Clause::Rule { head, body, .. } => {
                 Clause::Rule {
                     head: self.rename_variables(head, mapping),
                     body: body.iter().map(|term| self.rename_variables(term, mapping)).collect(),
+                    produces: None, // TODO: Handle produces in renaming
                 }
             }
         }

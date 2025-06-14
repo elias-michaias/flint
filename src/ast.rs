@@ -17,10 +17,35 @@ pub enum LogicType {
     String,
     /// User-defined type (e.g., person)
     Named(TypeName),
+    /// Union type (e.g., fruit = apple | orange)
+    Union(Vec<LogicType>),
     /// Function type (for predicates): A -> B -> ... -> type
     Arrow(Vec<LogicType>),
     /// The special "type" type for predicates
     Type,
+}
+
+/// Type definition with optional nested union types
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDefinition {
+    pub name: String,
+    pub union_variants: Option<UnionVariants>, // for complex union structures
+}
+
+/// Union variants can be nested and complex
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnionVariants {
+    /// Simple list of variants: (apple | orange)
+    Simple(Vec<String>),
+    /// Nested unions: fruit (apple | orange) | meat (pork | poultry (chicken | turkey))
+    Nested(Vec<UnionVariant>),
+}
+
+/// A single variant in a union, which can itself have sub-variants
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnionVariant {
+    pub name: String,
+    pub sub_variants: Option<UnionVariants>,
 }
 
 /// Type declaration for predicates
@@ -166,11 +191,12 @@ pub struct Function {
 /// Top-level program
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub type_definitions: Vec<TypeDefinition>,  // New syntax: type fruit (apple | orange)
     pub type_declarations: Vec<PredicateType>,
     pub term_types: Vec<TermType>,
     pub functions: Vec<Function>,
     pub clauses: Vec<Clause>,
-    pub query: Option<Query>,
+    pub queries: Vec<Query>,
     pub main: Option<Expr>,
 }
 
@@ -251,21 +277,41 @@ pub enum Term {
     
     /// Integer
     Integer(i64),
+    
+    /// Cloned term: !term (creates a copy for linear consumption)
+    Clone(Box<Term>),
+}
+
+/// Resource state for linear logic
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceState {
+    Available,
+    Consumed,
+}
+
+/// Linear resource with unique ID and consumption state
+#[derive(Debug, Clone)]
+pub struct LinearResource {
+    pub id: usize,
+    pub clause: Clause,
+    pub state: ResourceState,
 }
 
 /// Logical clause (fact or rule)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Clause {
     /// Fact: predicate(args).
     Fact {
         predicate: String,
         args: Vec<Term>,
+        persistent: bool,  // true for !fact, false for fact
     },
     
     /// Rule: head :- body.
     Rule {
         head: Term,
         body: Vec<Term>,
+        produces: Option<Term>,  // Optional production after =>
     },
 }
 
@@ -298,7 +344,7 @@ impl Substitution {
     
     pub fn apply(&self, term: &Term) -> Term {
         match term {
-            Term::Var { name, type_name } => {
+            Term::Var { name, type_name: _ } => {
                 if let Some(binding) = self.lookup(name) {
                     self.apply(binding)
                 } else {

@@ -11,6 +11,8 @@ pub struct CodeGenerator {
     functions: HashMap<String, Function>,
     /// Generated C code
     output: String,
+    /// Enable debug output
+    debug: bool,
 }
 
 impl CodeGenerator {
@@ -20,7 +22,13 @@ impl CodeGenerator {
             label_counter: 0,
             functions: HashMap::new(),
             output: String::new(),
+            debug: false,
         }
+    }
+    
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
     }
     
     fn fresh_var(&mut self) -> String {
@@ -33,6 +41,12 @@ impl CodeGenerator {
         let label = format!("L{}", self.label_counter);
         self.label_counter += 1;
         label
+    }
+    
+    pub fn generate_unique_var(&mut self, prefix: &str) -> String {
+        let var = format!("{}_{}", prefix, self.var_counter);
+        self.var_counter += 1;
+        var
     }
     
     pub fn generate(&mut self, program: &Program) -> Result<String, std::fmt::Error> {
@@ -55,7 +69,11 @@ impl CodeGenerator {
         self.generate_logical_runtime()?;
         
         // Generate logical programming structures
-        if !program.clauses.is_empty() {
+        if !program.queries.is_empty() {
+            // When we have queries, we'll generate clauses inline in the main function
+            // so we just need the basic KB structure
+            self.generate_empty_kb()?;
+        } else if !program.clauses.is_empty() {
             self.generate_clauses(&program.clauses)?;
         } else {
             // Even with no clauses, we need the basic KB structure
@@ -70,8 +88,9 @@ impl CodeGenerator {
         // Generate main function
         if let Some(ref main_expr) = program.main {
             self.generate_main(main_expr)?;
-        } else if let Some(ref query) = program.query {
-            self.generate_query_main(&program.clauses, query)?;
+        } else if !program.queries.is_empty() {
+            // Use the multiple queries version which we'll need to implement
+            self.generate_multiple_queries_main(&program.clauses, &program.queries, &program.term_types, &program.type_definitions)?;
         } else {
             // Default main for logic programs
             self.generate_logic_main(&program.clauses)?;
@@ -85,7 +104,7 @@ impl CodeGenerator {
         writeln!(self.output, "#include <stdlib.h>")?;
         writeln!(self.output, "#include <stdint.h>")?;
         writeln!(self.output, "#include <string.h>")?;
-        writeln!(self.output, "#include \"linear_runtime.h\"")?;
+        writeln!(self.output, "#include \"runtime.h\"")?;
         writeln!(self.output)?;
         Ok(())
     }
@@ -310,7 +329,7 @@ impl CodeGenerator {
         
         for (i, clause) in clauses.iter().enumerate() {
             match clause {
-                Clause::Fact { predicate, args } => {
+                Clause::Fact { predicate, args, persistent, .. } => {
                     writeln!(self.output, "    // Linear Fact: {}({})", 
                         predicate, 
                         args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
@@ -327,7 +346,7 @@ impl CodeGenerator {
                     writeln!(self.output)?;
                 }
                 
-                Clause::Rule { head, body } => {
+                Clause::Rule { head, body, produces, .. } => {
                     writeln!(self.output, "    // Rule: {} :- {}", 
                         self.term_to_string(head), 
                         body.iter().map(|t| self.term_to_string(t)).collect::<Vec<_>>().join(", "))?;
@@ -384,6 +403,11 @@ impl CodeGenerator {
                     Ok(format!("create_compound(\"{}\", {}, {})", functor, args_var, args.len()))
                 }
             }
+            Term::Clone(inner) => {
+                // For C generation, we'll create a cloned term using the runtime function
+                let inner_code = self.generate_term_creation(inner)?;
+                Ok(format!("create_clone({})", inner_code))
+            }
         }
     }
     
@@ -412,6 +436,9 @@ impl CodeGenerator {
             Term::Compound { functor, args } => {
                 format!("{}({})", functor, 
                     args.iter().map(|t| self.term_to_string(t)).collect::<Vec<_>>().join(", "))
+            }
+            Term::Clone(inner) => {
+                format!("!{}", self.term_to_string(inner))
             }
         }
     }
@@ -460,6 +487,167 @@ impl CodeGenerator {
         writeln!(self.output, "    return 0;")?;
         writeln!(self.output, "}}")?;
         
+        Ok(())
+    }
+
+    fn generate_multiple_queries_main(&mut self, clauses: &[Clause], queries: &[Query], term_types: &[TermType], type_definitions: &[TypeDefinition]) -> Result<(), std::fmt::Error> {
+        writeln!(self.output, "int main() {{")?;
+        writeln!(self.output, "    // Initialize linear knowledge base")?;
+        writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output)?;
+        
+        // Add union type hierarchy mappings
+        for type_def in type_definitions {
+            self.generate_union_hierarchy_mappings(type_def)?;
+        }
+        
+        // Add type mappings for all terms
+        for term_type in term_types {
+            if let LogicType::Named(type_name) = &term_type.term_type {
+                writeln!(self.output, "    add_type_mapping(kb, \"{}\", \"{}\");", term_type.name, type_name)?;
+            }
+        }
+        writeln!(self.output)?;
+
+        // Add all clauses to the knowledge base
+        for clause in clauses {
+            match clause {
+                Clause::Fact { predicate, args, persistent, .. } => {
+                    // Create appropriate term for the fact
+                    let mut fact_term = if args.is_empty() {
+                        // Nullary fact: create an atom
+                        Term::Atom { 
+                            name: predicate.clone(),
+                            type_name: None,
+                        }
+                    } else {
+                        // Regular fact: create a compound term
+                        Term::Compound { 
+                            functor: predicate.clone(), 
+                            args: args.clone() 
+                        }
+                    };
+                    
+                    // If persistent, wrap in clone
+                    if *persistent {
+                        fact_term = Term::Clone(Box::new(fact_term));
+                    }
+                    
+                    let term_creation = self.generate_term_creation(&fact_term)?;
+                    writeln!(self.output, "    add_linear_fact(kb, {});", term_creation)?;
+                }
+                Clause::Rule { head, body, produces } => {
+                    // Generate code to add the rule to the knowledge base
+                    let head_code = self.generate_term_creation(head)?;
+                    if body.is_empty() {
+                        // Rule with no body - treat as a fact
+                        writeln!(self.output, "    add_linear_fact(kb, {});", head_code)?;
+                    } else {
+                        // Generate body array
+                        let body_array_var = self.generate_unique_var("body_array");
+                        writeln!(self.output, "    term_t** {} = malloc(sizeof(term_t*) * {});", body_array_var, body.len())?;
+                        for (i, body_term) in body.iter().enumerate() {
+                            let body_code = self.generate_term_creation(body_term)?;
+                            writeln!(self.output, "    {}[{}] = {};", body_array_var, i, body_code)?;
+                        }
+                        
+                        // Handle production (if any)
+                        let production_code = if let Some(prod_term) = produces {
+                            self.generate_term_creation(prod_term)?
+                        } else {
+                            "NULL".to_string()
+                        };
+                        
+                        writeln!(self.output, "    add_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
+                    }
+                }
+            }
+        }
+        
+        writeln!(self.output)?;
+        
+        // Execute each query
+        for (query_index, query) in queries.iter().enumerate() {
+            if query_index > 0 {
+                writeln!(self.output)?; // Add blank line between queries
+            }
+            
+            // Generate query term and print it
+            writeln!(self.output, "    // Query {}: ", query_index + 1)?;
+            writeln!(self.output, "    printf(\"?- \");")?;
+            for (i, goal) in query.goals.iter().enumerate() {
+                if i > 0 {
+                    writeln!(self.output, "    printf(\", \");")?;
+                }
+                let goal_code = self.generate_term_creation(goal)?;
+                writeln!(self.output, "    print_term({});", goal_code)?;
+            }
+            writeln!(self.output, "    printf(\".\\n\");")?;
+            
+            // Create goals array
+            let goals_var = format!("goals_{}", query_index);
+            writeln!(self.output, "    term_t** {} = malloc({} * sizeof(term_t*));", goals_var, query.goals.len())?;
+            for (i, goal) in query.goals.iter().enumerate() {
+                let goal_code = self.generate_term_creation(goal)?;
+                writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
+            }
+            
+            // Create original query for substitution tracking
+            let original_query_var = format!("original_query_{}", query_index);
+            let first_goal_code = self.generate_term_creation(&query.goals[0])?;
+            writeln!(self.output, "    term_t* {} = {};", original_query_var, first_goal_code)?;
+            
+            // Execute the query
+            writeln!(self.output, "    substitution_t empty_subst_{} = {{0}};", query_index)?;
+            writeln!(self.output, "    int success_{} = linear_resolve_query_with_substitution(kb, {}, {}, {}, &empty_subst_{});", 
+                     query_index, goals_var, query.goals.len(), original_query_var, query_index)?;
+            writeln!(self.output, "    if (success_{} == 0) {{", query_index)?;
+            writeln!(self.output, "        printf(\"false.\\n\");")?;
+            writeln!(self.output, "    }}")?;
+            
+            // Clean up
+            writeln!(self.output, "    for (int i = 0; i < {}; i++) {{", query.goals.len())?;
+            writeln!(self.output, "        free({}[i]);", goals_var)?;
+            writeln!(self.output, "    }}")?;
+            writeln!(self.output, "    free({});", goals_var)?;
+            writeln!(self.output, "    free({});", original_query_var)?;
+        }
+        
+        writeln!(self.output)?;
+        writeln!(self.output, "    // Clean up")?;
+        writeln!(self.output, "    free_linear_kb(kb);")?;
+        writeln!(self.output, "    return 0;  // Always return success - false is a valid result")?;
+        writeln!(self.output, "}}")?;
+        
+        Ok(())
+    }
+    
+    fn generate_union_hierarchy_mappings(&mut self, type_def: &TypeDefinition) -> Result<(), std::fmt::Error> {
+        if let Some(ref union_variants) = type_def.union_variants {
+            self.generate_variant_mappings(&type_def.name, union_variants)?;
+        }
+        Ok(())
+    }
+    
+    fn generate_variant_mappings(&mut self, parent_type: &str, variants: &UnionVariants) -> Result<(), std::fmt::Error> {
+        match variants {
+            UnionVariants::Simple(names) => {
+                for name in names {
+                    writeln!(self.output, "    add_union_mapping(kb, \"{}\", \"{}\");", name, parent_type)?;
+                }
+            }
+            UnionVariants::Nested(variant_list) => {
+                for variant in variant_list {
+                    // Map the variant to the parent type
+                    writeln!(self.output, "    add_union_mapping(kb, \"{}\", \"{}\");", variant.name, parent_type)?;
+                    
+                    // If this variant has sub-variants, recursively map them
+                    if let Some(ref sub_variants) = variant.sub_variants {
+                        self.generate_variant_mappings(&variant.name, sub_variants)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

@@ -47,6 +47,7 @@ pub enum Token {
     
     // Operators
     Arrow,      // ->
+    FatArrow,   // =>
     LinearArrow, // -o (linear implication)
     Tensor,     // *
     Plus,       // +
@@ -59,6 +60,8 @@ pub enum Token {
     Greater,    // >
     And,        // &&
     Or,         // ||
+    Bang,       // ! (clone operator)
+    Pipe,       // | (for union types)
     
     // Punctuation
     LeftParen,   // (
@@ -140,6 +143,7 @@ fn parse_keywords(input: &str) -> IResult<&str, Token> {
 /// Parse operators
 fn parse_operators(input: &str) -> IResult<&str, Token> {
     alt((
+        map(tag("=>"), |_| Token::FatArrow),
         map(tag("-o"), |_| Token::LinearArrow),
         map(tag("->"), |_| Token::Arrow),
         map(tag("=="), |_| Token::EqualEqual),
@@ -152,6 +156,8 @@ fn parse_operators(input: &str) -> IResult<&str, Token> {
         map(tag("="), |_| Token::Equal),
         map(tag("<"), |_| Token::Less),
         map(tag(">"), |_| Token::Greater),
+        map(tag("!"), |_| Token::Bang),
+        map(tag("|"), |_| Token::Pipe),
     ))(input)
 }
 
