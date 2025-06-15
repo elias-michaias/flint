@@ -31,8 +31,15 @@ mood :- satisfied => happy.
 
 ## Usage
 Run files directly:
-`cargo run -- run flint_file.fn`
+```bash
+cargo run -- run flint_file.fn
+```
 Build files:
-`cargo run -- build flint_file.fn`
+```bash
+cargo run -- build flint_file.fn
+```
 Check files:
-`cargo run -- check flint_file.fn`
+```bash
+cargo run -- check flint_file.fn
+```
+Use the `--debug` flag on any command for more details.
