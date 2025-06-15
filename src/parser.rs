@@ -22,6 +22,9 @@ pub enum ParseError {
     #[error("Invalid expression")]
     InvalidExpression,
     
+    #[error("Invalid syntax: {0}")]
+    InvalidSyntax(String),
+    
     #[error("Diagnostic error")]
     Diagnostic(Diagnostic),
 }
@@ -126,8 +129,8 @@ impl Parser {
                     queries.push(self.parse_query()?);
                 }
                 Token::Bang => {
-                    // Persistent fact: !fact(args).
-                    clauses.push(self.parse_clause()?);
+                    // Persistent fact: !fact(args). or !name :: predicate(args).
+                    clauses.push(self.parse_persistent_clause()?);
                 }
                 Token::Type => {
                     // New type definition: type name [(variants)] [is supertype].
@@ -246,6 +249,7 @@ impl Parser {
     
     fn peek_type_declaration(&self) -> bool {
         // Look for pattern: identifier [, identifier]* :: ...
+        // But exclude Celf-style rules which have: identifier :: ... => ...
         if !matches!(self.current_token(), Token::Identifier(_)) {
             return false;
         }
@@ -254,7 +258,31 @@ impl Parser {
         let mut i = 1;
         loop {
             match self.peek_token_at(i) {
-                Some(Token::ColonColon) => return true,
+                Some(Token::ColonColon) => {
+                    // Found ::, now check if this is a Celf-style rule by looking for =>
+                    // Scan ahead after :: to see if we find a FatArrow
+                    let mut j = i + 1;
+                    while j < 20 { // reasonable lookahead limit
+                        match self.peek_token_at(j) {
+                            Some(Token::FatArrow) => {
+                                // Found =>, this is a Celf-style rule, not a type declaration
+                                return false;
+                            }
+                            Some(Token::Dot) => {
+                                // Found ., this is a type declaration
+                                return true;
+                            }
+                            Some(Token::Eof) => {
+                                return false;
+                            }
+                            _ => {
+                                j += 1;
+                            }
+                        }
+                    }
+                    // If we didn't find either => or . within reasonable distance, assume type declaration
+                    return true;
+                }
                 Some(Token::Comma) => {
                     // Check if next token after comma is identifier
                     if let Some(Token::Identifier(_)) = self.peek_token_at(i + 1) {
@@ -555,17 +583,90 @@ impl Parser {
         self.expect(Token::Query)?; // For ?-
         
         let mut goals = Vec::new();
+        let mut is_disjunctive = None; // None means not yet determined
         goals.push(self.parse_term()?);
         
-        while matches!(self.current_token(), Token::Comma) {
+        // Check for connectives and ensure consistency
+        while matches!(self.current_token(), Token::Comma | Token::Ampersand | Token::Pipe) {
+            let new_connective = match self.current_token() {
+                Token::Pipe => true,  // disjunctive
+                Token::Ampersand | Token::Comma => false,  // conjunctive
+                _ => unreachable!(),
+            };
+            
+            // Set the query type on first connective, or check consistency
+            match is_disjunctive {
+                None => is_disjunctive = Some(new_connective),
+                Some(current) => {
+                    if current != new_connective {
+                        return Err(ParseError::InvalidSyntax("Cannot mix conjunctive (&, ,) and disjunctive (|) operators in the same query".to_string()));
+                    }
+                }
+            }
+            
             self.advance();
             goals.push(self.parse_term()?);
         }
         
         self.expect(Token::Dot)?;
-        Ok(Query { goals })
+        Ok(Query { 
+            goals, 
+            is_disjunctive: is_disjunctive.unwrap_or(false) // Default to conjunctive for single goals
+        })
     }
     
+    fn parse_persistent_clause(&mut self) -> Result<Clause, ParseError> {
+        // Expect and consume the bang token
+        self.expect(Token::Bang)?;
+        
+        // Parse the identifier (either predicate name or fact name)
+        let first_identifier = if let Token::Identifier(name) = self.current_token() {
+            let name = name.clone();
+            self.advance();
+            name
+        } else {
+            return Err(self.create_error_diagnostic("Expected identifier after '!'".to_string()));
+        };
+        
+        // Check if this is a typed persistent fact (name :: predicate(args)) or simple persistent fact
+        if matches!(self.current_token(), Token::ColonColon) {
+            // This is !name :: predicate(args).
+            self.advance(); // consume ::
+            
+            // Parse the predicate term
+            let predicate_term = self.parse_term()?;
+            self.expect(Token::Dot)?;
+            
+            match predicate_term {
+                Term::Compound { functor, args } => {
+                    Ok(Clause::Fact { predicate: functor, args, persistent: true })
+                }
+                _ => Err(ParseError::InvalidExpression),
+            }
+        } else if matches!(self.current_token(), Token::LeftParen) {
+            // This is !predicate(args).
+            self.advance(); // consume (
+            let mut args = Vec::new();
+            
+            if !matches!(self.current_token(), Token::RightParen) {
+                args.push(self.parse_term()?);
+                
+                while matches!(self.current_token(), Token::Comma) {
+                    self.advance();
+                    args.push(self.parse_term()?);
+                }
+            }
+            
+            self.expect(Token::RightParen)?;
+            self.expect(Token::Dot)?;
+            Ok(Clause::Fact { predicate: first_identifier, args, persistent: true })
+        } else {
+            // This is a simple !fact.
+            self.expect(Token::Dot)?;
+            Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true })
+        }
+    }
+
     fn parse_clause(&mut self) -> Result<Clause, ParseError> {
         // Check for persistent fact prefix
         let persistent = if matches!(self.current_token(), Token::Bang) {
@@ -575,27 +676,70 @@ impl Parser {
             false
         };
         
-        let head_term = self.parse_term()?;
+        // Parse the first identifier/term
+        let first_term = self.parse_term()?;
         
         match self.current_token() {
             Token::Dot => {
-                // Fact
+                // Simple fact: predicate(args).
                 self.advance();
-                match head_term {
+                match first_term {
                     Term::Compound { functor, args } => {
                         Ok(Clause::Fact { predicate: functor, args, persistent })
+                    }
+                    Term::Atom { name, .. } => {
+                        Ok(Clause::Fact { predicate: name, args: vec![], persistent })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
             }
+            Token::ColonColon => {
+                // Celf-style rule: goal_name :: condition => result
+                if persistent {
+                    return Err(ParseError::InvalidExpression); // Can't have !rule
+                }
+                
+                // The first_term should be the goal name (convert to atom if it's an identifier)
+                let goal_name = match first_term {
+                    Term::Atom { name, .. } => name,
+                    Term::Compound { functor, .. } if functor == "atom" => {
+                        return Err(ParseError::InvalidExpression);
+                    }
+                    _ => return Err(ParseError::InvalidExpression),
+                };
+                
+                self.advance(); // consume ::
+                
+                // Parse the body (conditions)
+                let mut body = Vec::new();
+                body.push(self.parse_term()?);
+                
+                // Handle conjunction with & (instead of comma)
+                while matches!(self.current_token(), Token::Ampersand) {
+                    self.advance();
+                    body.push(self.parse_term()?);
+                }
+                
+                // Expect => for the result
+                self.expect(Token::FatArrow)?;
+                
+                // Parse the result/head
+                let produces = Some(self.parse_term()?);
+                
+                self.expect(Token::Dot)?;
+                
+                // Create the goal name as the head term
+                let head = Term::Atom { name: goal_name, type_name: None };
+                Ok(Clause::Rule { head, body, produces })
+            }
             Token::Rule => {
-                // Rule (persistent flag only applies to facts)
+                // Old Prolog-style rule: head :- body (for backward compatibility)
                 if persistent {
                     return Err(ParseError::InvalidExpression); // Can't have !rule
                 }
                 self.advance();
                 let mut body = Vec::new();
-                let mut produces = None;
+                let produces = None;
                 
                 // Parse the body goals
                 body.push(self.parse_term()?);
@@ -605,14 +749,8 @@ impl Parser {
                     body.push(self.parse_term()?);
                 }
                 
-                // Check for production syntax: => produced_term
-                if matches!(self.current_token(), Token::FatArrow) {
-                    self.advance();
-                    produces = Some(self.parse_term()?);
-                }
-                
                 self.expect(Token::Dot)?;
-                Ok(Clause::Rule { head: head_term, body, produces })
+                Ok(Clause::Rule { head: first_term, body, produces })
             }
             _ => Err(ParseError::InvalidExpression),
         }
@@ -625,6 +763,12 @@ impl Parser {
                 self.advance();
                 let inner_term = self.parse_term()?;
                 Ok(Term::Clone(Box::new(inner_term)))
+            }
+            Token::Variable(name) => {
+                // Variable: $name
+                let name = name.clone();
+                self.advance();
+                Ok(Term::Var { name, type_name: None })
             }
             Token::Identifier(name) => {
                 let name = name.clone();
@@ -647,18 +791,11 @@ impl Parser {
                     self.expect(Token::RightParen)?;
                     Ok(Term::Compound { functor: name, args })
                 } else {
-                    // Check if it's a variable (starts with uppercase) or atom
-                    if name.chars().next().unwrap().is_uppercase() {
-                        Ok(Term::Var { 
-                            name, 
-                            type_name: None 
-                        })
-                    } else {
-                        Ok(Term::Atom { 
-                            name, 
-                            type_name: None 
-                        })
-                    }
+                    // Simple atom/identifier
+                    Ok(Term::Atom { 
+                        name, 
+                        type_name: None 
+                    })
                 }
             }
             Token::Integer(n) => {

@@ -385,7 +385,7 @@ impl CodeGenerator {
     fn generate_term_creation(&mut self, term: &Term) -> Result<String, std::fmt::Error> {
         match term {
             Term::Atom { name, .. } => Ok(format!("create_atom(\"{}\")", name)),
-            Term::Var { name, .. } => Ok(format!("create_var(\"{}\")", name)),
+            Term::Var { name, .. } => Ok(format!("create_var(\"${}\")", name)),
             Term::Integer(value) => Ok(format!("create_integer({})", value)),
             Term::Compound { functor, args } => {
                 if args.is_empty() {
@@ -577,7 +577,11 @@ impl CodeGenerator {
             writeln!(self.output, "    printf(\"?- \");")?;
             for (i, goal) in query.goals.iter().enumerate() {
                 if i > 0 {
-                    writeln!(self.output, "    printf(\", \");")?;
+                    if query.is_disjunctive {
+                        writeln!(self.output, "    printf(\" | \");")?;
+                    } else {
+                        writeln!(self.output, "    printf(\" & \");")?;
+                    }
                 }
                 let goal_code = self.generate_term_creation(goal)?;
                 writeln!(self.output, "    print_term({});", goal_code)?;
@@ -592,12 +596,16 @@ impl CodeGenerator {
                 writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
             }
             
-            // Execute the query with path tracking
-            writeln!(self.output, "    int success_{} = linear_resolve_query(kb, {}, {});", 
-                     query_index, goals_var, query.goals.len())?;
-            writeln!(self.output, "    if (success_{} == 0) {{", query_index)?;
+            // Execute the query with backtracking to find all solutions
+            writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
+            writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
+                     query_index, goals_var, query.goals.len(), query_index)?;
+            writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
+            writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
+            writeln!(self.output, "    }} else {{")?;
             writeln!(self.output, "        printf(\"false.\\n\");")?;
             writeln!(self.output, "    }}")?;
+            writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
             
             // Clean up
             writeln!(self.output, "    for (int i = 0; i < {}; i++) {{", query.goals.len())?;

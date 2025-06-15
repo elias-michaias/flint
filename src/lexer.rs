@@ -44,10 +44,13 @@ pub enum Token {
     
     // Identifiers
     Identifier(String),
+    Variable(String),  // $variable
     
     // Operators
     Arrow,      // ->
     FatArrow,   // =>
+    Ampersand,  // &
+    Pipe,       // |
     LinearArrow, // -o (linear implication)
     Tensor,     // *
     Plus,       // +
@@ -61,7 +64,6 @@ pub enum Token {
     And,        // &&
     Or,         // ||
     Bang,       // ! (clone operator)
-    Pipe,       // | (for union types)
     
     // Punctuation
     LeftParen,   // (
@@ -96,6 +98,20 @@ fn identifier(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
+/// Parse a variable (prefixed with $)
+fn variable(input: &str) -> IResult<&str, String> {
+    map(
+        recognize(pair(
+            char('$'),
+            pair(
+                alt((alpha1, tag("_"))),
+                many0(alt((alphanumeric1, tag("_")))),
+            ),
+        )),
+        |s: &str| s[1..].to_string(), // Remove the $ prefix
+    )(input)
+}
+
 /// Parse an integer literal
 fn integer(input: &str) -> IResult<&str, i64> {
     map(
@@ -117,6 +133,7 @@ fn token(input: &str) -> IResult<&str, Token> {
         parse_operators,
         parse_punctuation,
         parse_literals,
+        map(variable, Token::Variable),
         map(identifier, Token::Identifier),
     ))(input)
 }
@@ -149,6 +166,7 @@ fn parse_operators(input: &str) -> IResult<&str, Token> {
         map(tag("=="), |_| Token::EqualEqual),
         map(tag("&&"), |_| Token::And),
         map(tag("||"), |_| Token::Or),
+        map(tag("&"), |_| Token::Ampersand),
         map(tag("+"), |_| Token::Plus),
         map(tag("-"), |_| Token::Minus),
         map(tag("*"), |_| Token::Multiply),

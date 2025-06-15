@@ -114,6 +114,7 @@ typedef struct {
     int rule_count;
     type_mapping_t* type_mappings; // Maps terms to their types
     union_mapping_t* union_mappings; // Maps variant types to parent types
+    int* applied_rules;            // Bitmap tracking which rules have been applied
 } linear_kb_t;
 
 // Runtime function declarations
@@ -166,17 +167,50 @@ int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_
 const char* get_term_type(linear_kb_t* kb, const char* term_name);
 int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact);
 int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count);
+int linear_resolve_query_with_type(linear_kb_t* kb, term_t** goals, int goal_count, int is_disjunctive);
+int linear_resolve_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path);
+int build_solution_path_single_goal(linear_kb_t* kb, linear_resource_t* start_resource, term_t** goals, int goal_count, linear_path_t* path);
 int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst);
 int linear_resolve_query_with_path(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst, linear_path_t* path);
+int linear_resolve_forward_chaining(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path);
 void compose_substitutions(substitution_t* dest, substitution_t* src);
 void free_linear_kb(linear_kb_t* kb);
 void reset_consumed_resources(linear_kb_t* kb);
 consumed_state_t* save_consumed_state(linear_kb_t* kb);
 void restore_consumed_state(consumed_state_t* state);
+int consume_resource_and_apply_rules_with_subst(linear_kb_t* kb, linear_resource_t* resource, term_t** goals, int goal_count, int* remaining_goals, int* unsatisfied_count, linear_path_t* path, substitution_t* global_subst);
+
+// Solution list for backtracking
+typedef struct solution_list {
+    int count;
+    int capacity;
+    substitution_t* solutions;
+} solution_list_t;
+
+// Function declarations for backtracking
+solution_list_t* create_solution_list();
+void add_solution(solution_list_t* list, substitution_t* solution);
+void free_solution_list(solution_list_t* list);
+int linear_resolve_query_all_solutions(linear_kb_t* kb, term_t** goals, int goal_count, solution_list_t* solutions);
+int linear_resolve_query_with_substitution_backtrack(linear_kb_t* kb, term_t** goals, int goal_count, 
+                                                   term_t* original_query, substitution_t* global_subst, 
+                                                   solution_list_t* solutions);
+int try_rule_with_backtracking(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
+                              term_t* original_query, substitution_t* global_subst, solution_list_t* solutions);
 
 // Helper functions
 int has_variables(term_t* term);
 int is_persistent_resource(term_t* fact);
 term_t* get_inner_term(term_t* term);
+int terms_equal(term_t* t1, term_t* t2);
+int substitutions_equal(substitution_t* s1, substitution_t* s2);
+int fact_exists(linear_kb_t* kb, term_t* fact);
+void apply_rule_exhaustively(linear_kb_t* kb, clause_t* rule, int* made_progress);
+void apply_rule_combinations(linear_kb_t* kb, clause_t* rule, int body_index, 
+                           linear_resource_t** used_resources, 
+                           substitution_t* current_subst, int* made_progress);
+int can_apply_rule(linear_kb_t* kb, clause_t* rule);
+int can_satisfy_body_conditions(linear_kb_t* kb, clause_t* rule, int body_index, 
+                               linear_resource_t** used_resources);
 
 #endif // RUNTIME_H

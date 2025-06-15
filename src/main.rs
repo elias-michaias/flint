@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a linear logic program with full linear resource tracking
+    /// Run a program
     Run {
         /// Input source file
         input: PathBuf,
@@ -32,7 +32,7 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Compile a linear logic source file to C (and optionally to executable)
+    /// Compile a program
     Compile {
         /// Input source file
         input: PathBuf,
@@ -46,7 +46,7 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Check syntax and types without generating code
+    /// Check syntax and types
     Check {
         /// Input source file
         input: PathBuf,

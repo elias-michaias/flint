@@ -1,0 +1,5 @@
+#!/bin/bash
+# Flint linear logic inference engine alias script
+# This script runs the cargo-built binary with all arguments passed through
+
+exec "$(dirname "$0")/target/debug/flint" "$@"

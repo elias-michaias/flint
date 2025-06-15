@@ -319,6 +319,7 @@ pub enum Clause {
 #[derive(Debug, Clone)]
 pub struct Query {
     pub goals: Vec<Term>,
+    pub is_disjunctive: bool, // true for OR queries, false for AND queries
 }
 
 /// Unification substitution

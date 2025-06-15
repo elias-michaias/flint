@@ -6,43 +6,6 @@
 
 // Forward declarations
 int find_matching_resources(linear_kb_t* kb, clause_t* rule, linear_resource_t** resources, substitution_t* subst);
-void init_substitution(substitution_t* subst);
-void free_substitution(substitution_t* subst);
-
-// Terms equality function - check if two terms are equal
-int terms_equal(term_t* t1, term_t* t2) {
-    if (t1 == NULL && t2 == NULL) return 1;
-    if (t1 == NULL || t2 == NULL) return 0;
-    
-    if (t1->type != t2->type) return 0;
-    
-    switch (t1->type) {
-        case TERM_ATOM:
-            return strcmp(t1->data.atom, t2->data.atom) == 0;
-        case TERM_VAR:
-            return strcmp(t1->data.var, t2->data.var) == 0;
-        case TERM_COMPOUND:
-            if (strcmp(t1->data.compound.functor, t2->data.compound.functor) != 0) return 0;
-            if (t1->data.compound.arity != t2->data.compound.arity) return 0;
-            for (int i = 0; i < t1->data.compound.arity; i++) {
-                if (!terms_equal(t1->data.compound.args[i], t2->data.compound.args[i])) {
-                    return 0;
-                }
-            }
-            return 1;
-        case TERM_INTEGER:
-            return t1->data.integer == t2->data.integer;
-        case TERM_CLONE:
-            return terms_equal(t1->data.cloned, t2->data.cloned);
-    }
-    return 0;
-}
-
-// Linear resolve query
-int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count) {
-    substitution_t global_subst = {0};
-    return linear_resolve_query_with_substitution(kb, goals, goal_count, goals[0], &global_subst);
-}
 
 // Linear path tracking functions
 linear_path_t* create_linear_path() {
@@ -696,111 +659,308 @@ void restore_consumed_state(consumed_state_t* state) {
     }
 }
 
-// Check if a fact exists in the knowledge base
-int fact_exists(linear_kb_t* kb, term_t* fact) {
-    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed && terms_equal(resource->fact, fact)) {
-            return 1;
+// Linear resolution - resources are consumed when used
+// original_query is the query as typed by the user (with variables)
+int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst) {
+    if (goal_count == 0) {
+        // Success - check if original query has variables
+        if (has_variables(original_query)) {
+            // Print the result with substitutions applied
+            term_t* result = apply_substitution(original_query, global_subst);
+            print_term(result);
+            printf(".\n");
+            free_term(result);
+        } else {
+            // No variables - just print true
+            printf("true.\n");
+        }
+        return 1;
+    }
+    
+    term_t* goal = goals[0];
+    
+#ifdef DEBUG
+    printf("Linear resolving: ");
+    print_term(goal);
+    printf("\n");
+#endif
+    
+    int solutions = 0;
+    
+    // First, try to match against available (unconsumed) linear facts
+    linear_resource_t* resource = kb->resources;
+    while (resource) {
+        if (!resource->consumed) {
+            substitution_t subst = {0};
+            
+            if (can_unify_with_type(kb, goal, resource->fact)) {
+                // Save current state for backtracking
+                consumed_state_t* saved_state = save_consumed_state(kb);
+                
+                // Handle cloned vs regular facts
+                term_t* actual_fact = get_inner_term(resource->fact);
+                int is_persistent = is_persistent_resource(resource->fact);
+                
+                // For type-based matching, we need to create a proper substitution
+                if (goal->type == TERM_ATOM && actual_fact->type == TERM_ATOM) {
+                    const char* fact_type = get_term_type(kb, actual_fact->data.atom);
+                    if (fact_type && strcmp(goal->data.atom, fact_type) == 0) {
+                        // This is a type match - goal "coin" matches fact "c1" of type "coin"
+                        // No variable substitution needed for this case
+                    } else {
+                        // Direct unification 
+                        unify(goal, actual_fact, &subst);
+                    }
+                } else {
+                    unify(goal, actual_fact, &subst);
+                }
+                
+#ifdef DEBUG
+                printf("Unified with %s fact: ", is_persistent ? "persistent" : "linear");
+                print_term(resource->fact);
+                if (!is_persistent) printf(" (consuming resource)");
+                printf("\n");
+#endif
+                
+                // Mark the resource as consumed (only if it's not persistent)
+                if (!is_persistent) {
+                    resource->consumed = 1;
+                }
+                
+                // Compose the substitution with the global substitution
+                substitution_t composed_subst = *global_subst;
+                compose_substitutions(&composed_subst, &subst);
+                
+                // Apply substitution to remaining goals
+                term_t** remaining_goals = NULL;
+                int remaining_count = goal_count - 1;
+                
+                if (remaining_count > 0) {
+                    remaining_goals = malloc(sizeof(term_t*) * remaining_count);
+                    for (int i = 0; i < remaining_count; i++) {
+                        remaining_goals[i] = apply_substitution(goals[i + 1], &subst);
+                    }
+                }
+                
+                // Recursively resolve remaining goals
+                int success = linear_resolve_query_with_substitution(kb, remaining_goals, remaining_count, original_query, &composed_subst);
+                
+                if (success) {
+                    solutions += success;
+                }
+                
+                // Clean up remaining goals
+                if (remaining_goals) {
+                    for (int i = 0; i < remaining_count; i++) {
+                        free_term(remaining_goals[i]);
+                    }
+                    free(remaining_goals);
+                }
+                
+                // RESTORE the resource state for backtracking to find more solutions
+                restore_consumed_state(saved_state);
+            }
+        }
+        resource = resource->next;
+    }
+    
+    // Second, try to match against rules
+    for (int i = 0; i < kb->rule_count; i++) {
+        clause_t* rule = &kb->rules[i];
+        substitution_t rule_subst = {0};
+        
+        // Try to unify the goal with the head of the rule
+        if (unify(goal, rule->head, &rule_subst)) {
+#ifdef DEBUG
+            printf("Rule matches: ");
+            print_term(rule->head);
+            printf(" :- ");
+            for (int j = 0; j < rule->body_size; j++) {
+                if (j > 0) printf(", ");
+                print_term(rule->body[j]);
+            }
+            printf("\n");
+#endif
+            
+            // Save current state for backtracking
+            consumed_state_t* saved_state = save_consumed_state(kb);
+            
+            // Compose the rule substitution with the global substitution
+            substitution_t composed_subst = *global_subst;
+            compose_substitutions(&composed_subst, &rule_subst);
+            
+            // First, resolve just the rule body
+            int body_success = 0;
+            if (rule->body_size > 0) {
+                term_t** body_goals = malloc(sizeof(term_t*) * rule->body_size);
+                for (int j = 0; j < rule->body_size; j++) {
+                    body_goals[j] = apply_substitution(rule->body[j], &rule_subst);
+                }
+                body_success = linear_resolve_query_with_substitution(kb, body_goals, rule->body_size, original_query, &composed_subst);
+                
+                // Clean up body goals
+                for (int j = 0; j < rule->body_size; j++) {
+                    free_term(body_goals[j]);
+                }
+                free(body_goals);
+            } else {
+                // Rule with empty body always succeeds
+                body_success = 1;
+            }
+            
+            // If the rule body succeeded and there's a production, add it to the KB
+            // But only add one production per rule match, not per body success
+            if (body_success > 0 && rule->production) {
+                term_t* produced_fact = apply_substitution(rule->production, &rule_subst);
+#ifdef DEBUG
+                printf("Rule fired, producing fact: ");
+                print_term(produced_fact);
+                printf("\n");
+#endif
+                add_linear_fact(kb, produced_fact);
+            }
+            
+            // Now resolve the remaining goals (if the body succeeded)
+            int remaining_success = 0;
+            if (body_success && goal_count > 1) {
+                int remaining_count = goal_count - 1;
+                term_t** remaining_goals = malloc(sizeof(term_t*) * remaining_count);
+                for (int j = 1; j < goal_count; j++) {
+                    remaining_goals[j - 1] = apply_substitution(goals[j], &rule_subst);
+                }
+                remaining_success = linear_resolve_query_with_substitution(kb, remaining_goals, remaining_count, original_query, &composed_subst);
+                
+                // Clean up remaining goals
+                for (int j = 0; j < remaining_count; j++) {
+                    free_term(remaining_goals[j]);
+                }
+                free(remaining_goals);
+            } else if (body_success) {
+                // No remaining goals, so success
+                remaining_success = 1;
+            }
+            
+            if (body_success && remaining_success) {
+                solutions += remaining_success;
+            }
+            
+            // Restore the resource state for backtracking
+            restore_consumed_state(saved_state);
         }
     }
-    return 0;
+    
+    return solutions;
 }
 
-// Linear resolve disjunctive query
+// Disjunctive query resolution - succeeds if ANY goal is satisfied
 int linear_resolve_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path) {
-    // Try to satisfy any one of the goals (OR logic)
     for (int i = 0; i < goal_count; i++) {
-        // Create a single-goal array
-        term_t* single_goal[1] = { goals[i] };
-        
-        // Save the consumed state before trying this goal
-        consumed_state_t* saved_state = save_consumed_state(kb);
-        
-        // Try to resolve this single goal
-        int result = linear_resolve_query_with_path(kb, single_goal, 1, goals[i], NULL, path);
-        
-        if (result) {
-            // Success! This goal was satisfied
-            return 1;
+        // Try to satisfy this goal
+        linear_resource_t* resource = kb->resources;
+        while (resource) {
+            term_t* actual_fact = get_inner_term(resource->fact);
+            substitution_t subst = {0};
+            
+            if (unify(goals[i], actual_fact, &subst)) {
+                // Found a solution for this goal
+                if (subst.count > 0) {
+                    // Print the substitution
+                    print_substitution(&subst);
+                    printf(".\n");
+                } else {
+                    printf("true.\n");
+                }
+                return 1; // Success - at least one goal satisfied
+            }
+            resource = resource->next;
         }
-        
-        // Failed, restore state and try next goal
-        restore_consumed_state(saved_state);
     }
     
-    // None of the goals could be satisfied
+    printf("false.\n");
+    return 0; // No goals could be satisfied
+}
+
+// Check if a fact already exists in the knowledge base
+int fact_exists(linear_kb_t* kb, term_t* fact) {
+    linear_resource_t* resource = kb->resources;
+    while (resource) {
+        term_t* existing_fact = get_inner_term(resource->fact);
+        if (terms_equal(fact, existing_fact)) {
+            return 1;
+        }
+        resource = resource->next;
+    }
     return 0;
 }
 
-// Find matching resources for a rule
+// Try to apply a rule if its conditions are satisfied
+void apply_rule_if_possible(linear_kb_t* kb, clause_t* rule, int* made_progress) {
+    if (rule->body_size == 0) {
+        // Rule with no body conditions - can always apply once
+        if (rule->production && !fact_exists(kb, rule->production)) {
+            add_linear_fact(kb, copy_term(rule->production));
+            *made_progress = 1;
+        }
+        return;
+    }
+    
+    // For rules with body conditions, try to find matching resources
+    // This is a simplified implementation - find first matching combination
+    linear_resource_t* resources[rule->body_size];
+    substitution_t subst = {0};
+    
+    if (find_matching_resources(kb, rule, resources, &subst)) {
+        // Apply the rule with the found substitution
+        term_t* produced_fact = apply_substitution(rule->production, &subst);
+        if (produced_fact && !fact_exists(kb, produced_fact)) {
+            add_linear_fact(kb, produced_fact);
+            *made_progress = 1;
+            
+            // Mark non-persistent resources as consumed
+            for (int i = 0; i < rule->body_size; i++) {
+                if (resources[i] && !is_persistent_resource(resources[i]->fact)) {
+                    resources[i]->consumed = 1;
+                }
+            }
+        } else if (produced_fact) {
+            free_term(produced_fact);
+        }
+    }
+}
+
+// Find resources that match a rule's body conditions
 int find_matching_resources(linear_kb_t* kb, clause_t* rule, linear_resource_t** resources, substitution_t* subst) {
-    // This is a simplified implementation
-    // In practice, this would need to find all combinations of resources
-    // that can unify with the rule's body terms
+    if (!rule || rule->body_size == 0) {
+        return 1; // Rules with no body are always applicable
+    }
     
-    int matched_count = 0;
-    
-    for (int i = 0; i < rule->body_size && matched_count < 10; i++) {
-        term_t* body_term = rule->body[i];
+    // For simplicity, try to find one resource for each body condition
+    for (int i = 0; i < rule->body_size; i++) {
+        term_t* body_condition = rule->body[i];
+        linear_resource_t* resource = kb->resources;
+        int found = 0;
         
-        // Find a resource that matches this body term
-        for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-            if (!resource->consumed) {
-                substitution_t temp_subst = {0};
-                if (unify(body_term, resource->fact, &temp_subst)) {
-                    resources[matched_count++] = resource;
-                    // In a full implementation, we'd compose substitutions here
+        while (resource) {
+            if (!resource->consumed || is_persistent_resource(resource->fact)) {
+                term_t* actual_fact = get_inner_term(resource->fact);
+                substitution_t temp_subst = *subst;
+                
+                if (unify(body_condition, actual_fact, &temp_subst)) {
+                    resources[i] = resource;
+                    *subst = temp_subst;
+                    found = 1;
                     break;
                 }
             }
+            resource = resource->next;
         }
-    }
-    
-    return matched_count == rule->body_size;
-}
-
-// Check if body conditions can be satisfied
-int can_satisfy_body_conditions(linear_kb_t* kb, clause_t* rule, int body_index, 
-                               linear_resource_t** used_resources) {
-    // Simplified implementation
-    if (body_index >= rule->body_size) {
-        return 1; // All body terms satisfied
-    }
-    
-    term_t* body_term = rule->body[body_index];
-    
-    // Find an available resource that matches this body term
-    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed && terms_equal(resource->fact, body_term)) {
-            used_resources[body_index] = resource;
-            return can_satisfy_body_conditions(kb, rule, body_index + 1, used_resources);
-        }
-    }
-    
-    return 0;
-}
-
-// Check if substitutions are equal
-int substitutions_equal(substitution_t* s1, substitution_t* s2) {
-    if (s1->count != s2->count) {
-        return 0;
-    }
-    
-    for (int i = 0; i < s1->count; i++) {
-        int found = 0;
-        for (int j = 0; j < s2->count; j++) {
-            if (strcmp(s1->bindings[i].var, s2->bindings[j].var) == 0 &&
-                terms_equal(s1->bindings[i].term, s2->bindings[j].term)) {
-                found = 1;
-                break;
-            }
-        }
+        
         if (!found) {
-            return 0;
+            return 0; // Could not find matching resource for this condition
         }
     }
     
-    return 1;
+    return 1; // All conditions satisfied
 }
 
 // Free linear knowledge base
@@ -811,362 +971,85 @@ void free_linear_kb(linear_kb_t* kb) {
     linear_resource_t* resource = kb->resources;
     while (resource) {
         linear_resource_t* next = resource->next;
-        if (resource->fact) {
-            free_term(resource->fact);
-        }
+        free_term(resource->fact);
         free(resource);
         resource = next;
     }
     
     // Free rules
     for (int i = 0; i < kb->rule_count; i++) {
-        if (kb->rules[i].head) {
-            free_term(kb->rules[i].head);
-        }
-        for (int j = 0; j < kb->rules[i].body_size; j++) {
-            if (kb->rules[i].body[j]) {
+        free_term(kb->rules[i].head);
+        if (kb->rules[i].body) {
+            for (int j = 0; j < kb->rules[i].body_size; j++) {
                 free_term(kb->rules[i].body[j]);
             }
-        }
-        if (kb->rules[i].body) {
             free(kb->rules[i].body);
         }
-        if (kb->rules[i].production) {
-            free_term(kb->rules[i].production);
-        }
     }
+    free(kb->rules);
     
     // Free type mappings
-    type_mapping_t* type_mapping = kb->type_mappings;
-    while (type_mapping) {
-        type_mapping_t* next = type_mapping->next;
-        free(type_mapping->term_name);
-        free(type_mapping->type_name);
-        free(type_mapping);
-        type_mapping = next;
+    type_mapping_t* mapping = kb->type_mappings;
+    while (mapping) {
+        type_mapping_t* next = mapping->next;
+        free(mapping->term_name);
+        free(mapping->type_name);
+        free(mapping);
+        mapping = next;
     }
     
-    // Free union mappings  
-    union_mapping_t* union_mapping = kb->union_mappings;
-    while (union_mapping) {
-        union_mapping_t* next = union_mapping->next;
-        free(union_mapping->variant_type);
-        free(union_mapping->parent_type);
-        free(union_mapping);
-        union_mapping = next;
+    // Free union mappings
+    union_mapping_t* umapping = kb->union_mappings;
+    while (umapping) {
+        union_mapping_t* next = umapping->next;
+        free(umapping->variant_type);
+        free(umapping->parent_type);
+        free(umapping);
+        umapping = next;
     }
     
     free(kb);
 }
 
-// Linear resolve query with path
-int linear_resolve_query_with_path(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst, linear_path_t* path) {
-    // This is a more advanced version that tracks the path of resource consumption
-    // For now, delegate to the simpler version
-    return linear_resolve_query_with_substitution(kb, goals, goal_count, original_query, global_subst);
+// Helper function to check if a term contains variables
+int has_variables(term_t* term) {
+    if (!term) return 0;
+    
+    switch (term->type) {
+        case TERM_VAR:
+            return 1;
+        case TERM_ATOM:
+        case TERM_INTEGER:
+            return 0;
+        case TERM_COMPOUND:
+            for (int i = 0; i < term->data.compound.arity; i++) {
+                if (has_variables(term->data.compound.args[i])) {
+                    return 1;
+                }
+            }
+            return 0;
+        case TERM_CLONE:
+            return has_variables(term->data.cloned);
+        default:
+            return 0;
+    }
 }
 
-// Linear resolve query with type checking
 int linear_resolve_query_with_type(linear_kb_t* kb, term_t** goals, int goal_count, int is_disjunctive) {
-    if (is_disjunctive) {
-        linear_path_t* path = create_linear_path();
-        int result = linear_resolve_disjunctive(kb, goals, goal_count, path);
-        free_linear_path(path);
-        return result;
-    } else {
-        return linear_resolve_query(kb, goals, goal_count);
-    }
-}
-
-// Linear resolve query with substitution - FIXED for forward chaining
-int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst) {
-    // This is the core query resolution function
-    // It tries to satisfy all goals using available resources
-    // For conjunctive queries, KB state changes persist between goals (forward chaining)
-    
-    #ifdef DEBUG
-    printf("DEBUG: Resolving query with %d goals\n", goal_count);
-    for (int i = 0; i < goal_count; i++) {
-        printf("DEBUG: Goal %d: ", i);
-        print_term(goals[i]);
-        printf("\n");
-    }
-    printf("DEBUG: Knowledge base has %d rules and resources:\n", kb->rule_count);
-    for (linear_resource_t* r = kb->resources; r != NULL; r = r->next) {
-        printf("DEBUG: Resource: ");
-        print_term(r->fact);
-        printf(" (consumed: %d)\n", r->consumed);
-    }
-    for (int i = 0; i < kb->rule_count; i++) {
-        printf("DEBUG: Rule %d head: ", i);
-        print_term(kb->rules[i].head);
-        printf(" body_size: %d\n", kb->rules[i].body_size);
-    }
-    #endif
-    
     if (goal_count == 0) {
-        return 1; // All goals satisfied
-    }
-    
-    // Try to satisfy the first goal
-    term_t* current_goal = goals[0];
-    
-    // First, check if the goal is a rule name and try to apply that specific rule
-    if (current_goal->type == TERM_ATOM) {
-        for (int rule_idx = 0; rule_idx < kb->rule_count; rule_idx++) {
-            clause_t* rule = &kb->rules[rule_idx];
-            
-            // Check if this rule's head matches the goal (rule name)
-            if (rule->head && rule->head->type == TERM_ATOM && 
-                strcmp(rule->head->data.atom, current_goal->data.atom) == 0) {
-                
-                #ifdef DEBUG
-                printf("DEBUG: Attempting to apply rule '%s'\n", current_goal->data.atom);
-                #endif
-                
-                // Check if we can consume all the rule's body requirements
-                int can_apply = 1;
-                linear_resource_t* consumed_resources[10] = {0};
-                int consumed_count = 0;
-                
-                for (int body_idx = 0; body_idx < rule->body_size; body_idx++) {
-                    term_t* body_term = rule->body[body_idx];
-                    int found = 0;
-                    
-                    // Try to find a resource that matches this body term (with type compatibility)
-                    // For now, we still take the first match, but we could implement backtracking here
-                    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-                        if (!resource->consumed && can_unify_with_type(kb, body_term, resource->fact)) {
-                            resource->consumed = 1;
-                            consumed_resources[consumed_count++] = resource;
-                            found = 1;
-                            #ifdef DEBUG
-                            printf("DEBUG: Consuming resource: ");
-                            print_term(resource->fact);
-                            printf("\n");
-                            #endif
-                            break; // TODO: For full backtracking, we'd need to try all alternatives
-                        }
-                    }
-                    
-                    if (!found) {
-                        #ifdef DEBUG
-                        printf("DEBUG: Cannot find resource for: ");
-                        print_term(body_term);
-                        printf("\n");
-                        #endif
-                        can_apply = 0;
-                        break;
-                    }
-                }
-                
-                if (can_apply && rule->production) {
-                    // Rule can be applied, add its production as a new fact
-                    linear_resource_t* new_resource = malloc(sizeof(linear_resource_t));
-                    new_resource->fact = copy_term(rule->production);
-                    new_resource->consumed = 0;
-                    new_resource->next = kb->resources;
-                    kb->resources = new_resource;
-                    
-                    #ifdef DEBUG
-                    printf("DEBUG: Rule applied successfully, produced: ");
-                    print_term(new_resource->fact);
-                    printf("\n");
-                    #endif
-                    
-                    // Try to satisfy remaining goals WITHOUT backtracking
-                    // This allows forward chaining to work properly
-                    if (goal_count > 1) {
-                        int result = linear_resolve_query_with_substitution(kb, goals + 1, goal_count - 1, original_query, global_subst);
-                        if (result) {
-                            return 1; // Success - keep all state changes
-                        }
-                        // If remaining goals fail, we still don't backtrack individual rule applications
-                        // This is the key change for forward chaining
-                    } else {
-                        return 1; // This was the last goal and rule applied successfully
-                    }
-                } else if (!can_apply) {
-                    // Restore consumed resources for this failed attempt
-                    for (int i = 0; i < consumed_count; i++) {
-                        consumed_resources[i]->consumed = 0;
-                    }
-                }
-            }
-        }
-    }
-    
-    // Check if we have a direct fact that matches this goal
-    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed) {
-            substitution_t temp_subst = {0};
-            if (unify(current_goal, resource->fact, &temp_subst)) {
-                #ifdef DEBUG
-                printf("DEBUG: Found direct fact match: ");
-                print_term(resource->fact);
-                printf("\n");
-                #endif
-                
-                // Found a matching fact, consume it and continue with remaining goals
-                resource->consumed = 1;
-                
-                // Compose the substitution
-                if (global_subst) {
-                    compose_substitutions(global_subst, &temp_subst);
-                }
-                
-                // Try to satisfy remaining goals
-                if (goal_count > 1) {
-                    int result = linear_resolve_query_with_substitution(kb, goals + 1, goal_count - 1, original_query, global_subst);
-                    if (result) {
-                        return 1; // Success - keep the consumed state
-                    }
-                    // Don't backtrack here for forward chaining
-                } else {
-                    return 1; // This was the last goal and it matched
-                }
-                
-                // Only restore if no remaining goals or they all failed
-                resource->consumed = 0;
-            }
-        }
-    }
-    
-    return 0; // Failed to satisfy all goals
-}
-
-// Create a solution list
-solution_list_t* create_solution_list() {
-    solution_list_t* list = malloc(sizeof(solution_list_t));
-    list->count = 0;
-    list->capacity = 10;
-    list->solutions = malloc(sizeof(substitution_t) * list->capacity);
-    return list;
-}
-
-void add_solution(solution_list_t* list, substitution_t* solution) {
-    if (list->count >= list->capacity) {
-        list->capacity *= 2;
-        list->solutions = realloc(list->solutions, sizeof(substitution_t) * list->capacity);
-    }
-    // Copy the solution
-    list->solutions[list->count] = *solution;
-    list->count++;
-}
-
-void free_solution_list(solution_list_t* list) {
-    if (list) {
-        free(list->solutions);
-        free(list);
-    }
-}
-
-// Find all solutions to a query (with backtracking)
-int linear_resolve_query_all_solutions(linear_kb_t* kb, term_t** goals, int goal_count, solution_list_t* solutions) {
-    substitution_t empty_subst = {0};
-    return linear_resolve_query_with_substitution_backtrack(kb, goals, goal_count, goals[0], &empty_subst, solutions);
-}
-
-// Backtracking version that finds all solutions
-int linear_resolve_query_with_substitution_backtrack(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                   term_t* original_query, substitution_t* global_subst, 
-                                                   solution_list_t* solutions) {
-    
-    #ifdef DEBUG
-    printf("DEBUG: Backtracking resolve with %d goals\n", goal_count);
-    #endif
-    
-    if (goal_count == 0) {
-        // Found a solution
-        add_solution(solutions, global_subst);
-        #ifdef DEBUG
-        printf("DEBUG: Found solution #%d\n", solutions->count);
-        #endif
+        printf("true.\n");
         return 1;
     }
-    
-    term_t* current_goal = goals[0];
-    int found_any = 0;
-    
-    // Try rule application
-    if (current_goal->type == TERM_ATOM) {
-        for (int rule_idx = 0; rule_idx < kb->rule_count; rule_idx++) {
-            clause_t* rule = &kb->rules[rule_idx];
-            
-            if (rule->head && rule->head->type == TERM_ATOM && 
-                strcmp(rule->head->data.atom, current_goal->data.atom) == 0) {
-                
-                // Try all possible resource combinations for this rule
-                if (try_rule_with_backtracking(kb, rule, goals, goal_count, original_query, global_subst, solutions)) {
-                    found_any = 1;
-                }
-            }
-        }
-    }
-    
-    return found_any;
-}
 
-// Try a rule with all possible resource combinations
-int try_rule_with_backtracking(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                              term_t* original_query, substitution_t* global_subst, solution_list_t* solutions) {
-    
-    if (rule->body_size == 0) return 0;
-    
-    // For simplicity, handle single-body rules first
-    if (rule->body_size == 1) {
-        term_t* body_term = rule->body[0];
-        int found_any = 0;
-        
-        // Try each compatible resource
-        for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-            if (!resource->consumed && can_unify_with_type(kb, body_term, resource->fact)) {
-                
-                #ifdef DEBUG
-                printf("DEBUG: Trying rule with resource: ");
-                print_term(resource->fact);
-                printf("\n");
-                #endif
-                
-                // Consume the resource
-                resource->consumed = 1;
-                
-                // Add the rule's production
-                linear_resource_t* new_resource = NULL;
-                if (rule->production) {
-                    new_resource = malloc(sizeof(linear_resource_t));
-                    new_resource->fact = copy_term(rule->production);
-                    new_resource->consumed = 0;
-                    new_resource->next = kb->resources;
-                    kb->resources = new_resource;
-                }
-                
-                // Try remaining goals
-                if (goal_count > 1) {
-                    if (linear_resolve_query_with_substitution_backtrack(kb, goals + 1, goal_count - 1, original_query, global_subst, solutions)) {
-                        found_any = 1;
-                    }
-                } else {
-                    // This was the last goal, record solution
-                    add_solution(solutions, global_subst);
-                    found_any = 1;
-                    #ifdef DEBUG
-                    printf("DEBUG: Found solution #%d\n", solutions->count);
-                    #endif
-                }
-                
-                // Backtrack: remove production and restore resource
-                if (new_resource) {
-                    kb->resources = new_resource->next;
-                    free_term(new_resource->fact);
-                    free(new_resource);
-                }
-                resource->consumed = 0;
-            }
-        }
-        
-        return found_any;
+    linear_path_t* path = create_linear_path();
+    int result;
+
+    if (is_disjunctive) {
+        result = linear_resolve_disjunctive(kb, goals, goal_count, path);
+    } else {
+        result = linear_resolve_forward_chaining(kb, goals, goal_count, path);
     }
-    
-    return 0; // Multi-body rules not implemented yet
+
+    free_linear_path(path);
+    return result;
 }

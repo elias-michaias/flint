@@ -1,4 +1,3 @@
-// Test nested union types with proper type declarations
 type food (fruit (apple | orange) | meat (pork | poultry (chicken | turkey))).
 type satisfied.
 type happy.
@@ -7,13 +6,7 @@ apple1 :: apple.
 chicken1 :: chicken.
 turkey1 :: turkey.
 
-// Rule
-eat :: food -> type.
-eat :- food => satisfied.
+eat_rule :: food => satisfied.
+mood_rule :: satisfied => happy.
 
-mood :: satisfied -> type.
-mood :- satisfied => happy.
-
-// Query
-?- eat, mood.
-// returns "true. true. true."
+?- eat_rule & mood_rule.
