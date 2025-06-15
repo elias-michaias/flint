@@ -49,6 +49,7 @@ typedef struct term {
 typedef struct linear_resource {
     term_t* fact;
     int consumed;  // 0 = available, 1 = consumed
+    int persistent; // 0 = linear (consumable), 1 = persistent (non-consumable)
     struct linear_resource* next;
 } linear_resource_t;
 
@@ -107,6 +108,12 @@ typedef struct {
     int count;
 } substitution_t;
 
+// Forward declaration for persistent facts
+typedef struct persistent_fact {
+    term_t* fact;
+    struct persistent_fact* next;
+} persistent_fact_t;
+
 // Linear knowledge base
 typedef struct {
     linear_resource_t* resources;  // Linear facts
@@ -114,6 +121,7 @@ typedef struct {
     int rule_count;
     type_mapping_t* type_mappings; // Maps terms to their types
     union_mapping_t* union_mappings; // Maps variant types to parent types
+    persistent_fact_t* persistent_facts; // Persistent facts (not consumed)
     int* applied_rules;            // Bitmap tracking which rules have been applied
 } linear_kb_t;
 
@@ -197,6 +205,40 @@ int linear_resolve_query_with_substitution_backtrack(linear_kb_t* kb, term_t** g
                                                    solution_list_t* solutions);
 int try_rule_with_backtracking(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
                               term_t* original_query, substitution_t* global_subst, solution_list_t* solutions);
+int try_rule_with_backtracking_simple(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
+                                     term_t* original_query, substitution_t* global_subst, solution_list_t* solutions);
+
+// Enhanced solution structures for variable binding support
+typedef struct variable_binding {
+    char* var_name;
+    term_t* value;
+} variable_binding_t;
+
+typedef struct enhanced_solution {
+    substitution_t substitution;
+    variable_binding_t* bindings;
+    int binding_count;
+} enhanced_solution_t;
+
+typedef struct enhanced_solution_list {
+    int count;
+    int capacity;
+    enhanced_solution_t* solutions;
+} enhanced_solution_list_t;
+
+// Enhanced solution functions
+enhanced_solution_list_t* create_enhanced_solution_list();
+void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst);
+void print_enhanced_solution(enhanced_solution_t* solution);
+void free_enhanced_solution_list(enhanced_solution_list_t* list);
+void add_persistent_fact(linear_kb_t* kb, term_t* fact);
+int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
+int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
+int linear_resolve_query_with_substitution_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, 
+                                                  term_t* original_query, substitution_t* global_subst, 
+                                                  enhanced_solution_list_t* solutions);
+int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
+                                       term_t* original_query, substitution_t* global_subst, enhanced_solution_list_t* solutions);
 
 // Helper functions
 int has_variables(term_t* term);

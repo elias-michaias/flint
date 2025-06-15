@@ -1,0 +1,23 @@
+type person.
+type food.
+
+alice :: person.
+bob :: person.
+charlie :: person.
+
+parent :: person -> person -> type.
+likes :: person -> food -> type.
+
+// Persistent facts - can be reused
+!p1 :: parent(alice, bob).
+!p2 :: parent(bob, charlie).
+
+// Linear facts - consumed when used
+apple :: food.
+banana :: food.
+likes(alice, apple).
+likes(bob, banana).
+
+?- parent(alice, $x).
+?- likes(alice, $y).
+?- parent(alice, $x) & likes($x, $y).

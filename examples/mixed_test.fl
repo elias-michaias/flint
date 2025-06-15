@@ -1,0 +1,15 @@
+type person.
+type food.
+
+alice :: person.
+bob :: person.
+charlie :: person.
+apple :: food.
+banana :: food.
+
+parent :: person -> person -> type.
+
+// Persistent fact (reusable)
+!p1 :: parent(alice, bob).
+
+?- parent(alice, $x).

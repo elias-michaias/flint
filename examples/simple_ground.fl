@@ -1,0 +1,12 @@
+type person.
+
+alice :: person.
+bob :: person.
+
+parent :: person -> person -> type.
+tall :: person -> type.
+
+!p1 :: parent(alice, bob).
+!t1 :: tall(bob).
+
+?- parent(alice, bob) & tall(bob).

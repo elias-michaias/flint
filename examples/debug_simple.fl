@@ -1,0 +1,9 @@
+type person.
+
+alice :: person.
+
+parent :: person -> person -> type.
+
+!p1 :: parent(alice, bob).
+
+?- parent($x, bob).

@@ -330,19 +330,37 @@ impl CodeGenerator {
         for (i, clause) in clauses.iter().enumerate() {
             match clause {
                 Clause::Fact { predicate, args, persistent, .. } => {
-                    writeln!(self.output, "    // Linear Fact: {}({})", 
-                        predicate, 
-                        args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
-                    
-                    // Generate code to create the fact
-                    let args_code = self.generate_term_array(args)?;
-                    writeln!(self.output, "    term_t** args_{} = {}; ", i, args_code)?;
-                    writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", args_{}, {});", 
-                        i, predicate, i, args.len())?;
-                    writeln!(self.output, "    add_linear_fact(kb, fact_{});", i)?;
-                    writeln!(self.output, "    printf(\"Added linear fact: \");");
-                    writeln!(self.output, "    print_term(fact_{});", i)?;
-                    writeln!(self.output, "    printf(\"\\n\");")?;
+                    if *persistent {
+                        writeln!(self.output, "    // Persistent Fact: {}({})", 
+                            predicate, 
+                            args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
+                        
+                        // Generate code to create the persistent fact
+                        if args.is_empty() {
+                            writeln!(self.output, "    add_persistent_fact(kb, create_atom(\"{}\"));", predicate)?;
+                        } else {
+                            let args_code = self.generate_term_array(args)?;
+                            writeln!(self.output, "    term_t** args_{} = {};", i, args_code)?;
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", args_{}, {});", 
+                                i, predicate, i, args.len())?;
+                            writeln!(self.output, "    add_persistent_fact(kb, fact_{});", i)?;
+                        }
+                    } else {
+                        writeln!(self.output, "    // Linear Fact: {}({})", 
+                            predicate, 
+                            args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
+                        
+                        // Generate code to create the linear fact
+                        if args.is_empty() {
+                            writeln!(self.output, "    add_linear_fact(kb, create_atom(\"{}\"));", predicate)?;
+                        } else {
+                            let args_code = self.generate_term_array(args)?;
+                            writeln!(self.output, "    term_t** args_{} = {};", i, args_code)?;
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", args_{}, {});", 
+                                i, predicate, i, args.len())?;
+                            writeln!(self.output, "    add_linear_fact(kb, fact_{});", i)?;
+                        }
+                    }
                     writeln!(self.output)?;
                 }
                 
@@ -534,7 +552,11 @@ impl CodeGenerator {
                     }
                     
                     let term_creation = self.generate_term_creation(&fact_term)?;
-                    writeln!(self.output, "    add_linear_fact(kb, {});", term_creation)?;
+                    if *persistent {
+                        writeln!(self.output, "    add_persistent_fact(kb, {});", term_creation)?;
+                    } else {
+                        writeln!(self.output, "    add_linear_fact(kb, {});", term_creation)?;
+                    }
                 }
                 Clause::Rule { head, body, produces } => {
                     // Generate code to add the rule to the knowledge base
@@ -596,16 +618,39 @@ impl CodeGenerator {
                 writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
             }
             
-            // Execute the query with backtracking to find all solutions
-            writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
-            writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
-                     query_index, goals_var, query.goals.len(), query_index)?;
-            writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
-            writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
-            writeln!(self.output, "    }} else {{")?;
-            writeln!(self.output, "        printf(\"false.\\n\");")?;
-            writeln!(self.output, "    }}")?;
-            writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
+            // Detect if query contains variables or if program has persistent facts
+            let has_variables = query.goals.iter().any(|goal| self.term_has_variables(goal));
+            let has_persistent_facts = clauses.iter().any(|clause| {
+                matches!(clause, Clause::Fact { persistent: true, .. })
+            });
+            
+            if has_variables || has_persistent_facts {
+                // Use enhanced resolution for queries with variables or when persistent facts exist
+                writeln!(self.output, "    enhanced_solution_list_t* enhanced_solutions_{} = create_enhanced_solution_list();", query_index)?;
+                writeln!(self.output, "    int found_enhanced_{} = linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
+                         query_index, goals_var, query.goals.len(), query_index)?;
+                writeln!(self.output, "    if (enhanced_solutions_{}->count > 0) {{", query_index)?;
+                writeln!(self.output, "        for (int sol = 0; sol < enhanced_solutions_{}->count; sol++) {{", query_index)?;
+                writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol]);", query_index)?;
+                writeln!(self.output, "            if (sol < enhanced_solutions_{}->count - 1) printf(\"; \");", query_index)?;
+                writeln!(self.output, "        }}")?;
+                writeln!(self.output, "        printf(\".\\n\");")?;
+                writeln!(self.output, "    }} else {{")?;
+                writeln!(self.output, "        printf(\"false.\\n\");")?;
+                writeln!(self.output, "    }}")?;
+                writeln!(self.output, "    free_enhanced_solution_list(enhanced_solutions_{});", query_index)?;
+            } else {
+                // Use simple linear resolution for queries without variables (linear logic mode)
+                writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
+                writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
+                         query_index, goals_var, query.goals.len(), query_index)?;
+                writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
+                writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
+                writeln!(self.output, "    }} else {{")?;
+                writeln!(self.output, "        printf(\"false.\\n\");")?;
+                writeln!(self.output, "    }}")?;
+                writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
+            }
             
             // Clean up
             writeln!(self.output, "    for (int i = 0; i < {}; i++) {{", query.goals.len())?;
@@ -650,6 +695,15 @@ impl CodeGenerator {
             }
         }
         Ok(())
+    }
+    
+    // Helper function to check if a term contains variables
+    fn term_has_variables(&self, term: &Term) -> bool {
+        match term {
+            Term::Var { .. } => true,
+            Term::Compound { args, .. } => args.iter().any(|arg| self.term_has_variables(arg)),
+            _ => false,
+        }
     }
 }
 
