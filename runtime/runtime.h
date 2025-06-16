@@ -235,10 +235,19 @@ void add_persistent_fact(linear_kb_t* kb, term_t* fact);
 int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
 int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
 int linear_resolve_query_with_substitution_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                  term_t* original_query, substitution_t* global_subst, 
+                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
                                                   enhanced_solution_list_t* solutions);
+int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
+                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
+                                                  enhanced_solution_list_t* solutions, int is_top_level);
 int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                       term_t* original_query, substitution_t* global_subst, enhanced_solution_list_t* solutions);
+                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth);
+int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
+                              term_t** original_goals, int original_goal_count, substitution_t* rule_subst,
+                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body);
+int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
+                                substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
+                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth);
 
 // Helper functions
 int has_variables(term_t* term);
@@ -254,5 +263,11 @@ void apply_rule_combinations(linear_kb_t* kb, clause_t* rule, int body_index,
 int can_apply_rule(linear_kb_t* kb, clause_t* rule);
 int can_satisfy_body_conditions(linear_kb_t* kb, clause_t* rule, int body_index, 
                                linear_resource_t** used_resources);
+
+// Variable extraction and binding checking functions
+void extract_variables_from_term(term_t* term, char** vars, int* var_count, int max_vars);
+void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, int* var_count, int max_vars);
+int all_variables_bound(char** vars, int var_count, substitution_t* subst);
+void free_variable_list(char** vars, int var_count);
 
 #endif // RUNTIME_H

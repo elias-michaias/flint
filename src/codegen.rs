@@ -618,23 +618,37 @@ impl CodeGenerator {
                 writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
             }
             
-            // Detect if query contains variables or if program has persistent facts
+            // Detect if query contains variables or if program has persistent facts or production rules
             let has_variables = query.goals.iter().any(|goal| self.term_has_variables(goal));
             let has_persistent_facts = clauses.iter().any(|clause| {
                 matches!(clause, Clause::Fact { persistent: true, .. })
             });
+            let has_production_rules = clauses.iter().any(|clause| {
+                matches!(clause, Clause::Rule { produces: Some(_), .. })
+            });
             
-            if has_variables || has_persistent_facts {
+            if has_variables || has_persistent_facts || has_production_rules {
                 // Use enhanced resolution for queries with variables or when persistent facts exist
                 writeln!(self.output, "    enhanced_solution_list_t* enhanced_solutions_{} = create_enhanced_solution_list();", query_index)?;
-                writeln!(self.output, "    int found_enhanced_{} = linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
-                         query_index, goals_var, query.goals.len(), query_index)?;
+                writeln!(self.output, "    (void)linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
+                         goals_var, query.goals.len(), query_index)?;
                 writeln!(self.output, "    if (enhanced_solutions_{}->count > 0) {{", query_index)?;
-                writeln!(self.output, "        for (int sol = 0; sol < enhanced_solutions_{}->count; sol++) {{", query_index)?;
-                writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol]);", query_index)?;
-                writeln!(self.output, "            if (sol < enhanced_solutions_{}->count - 1) printf(\"; \");", query_index)?;
-                writeln!(self.output, "        }}")?;
-                writeln!(self.output, "        printf(\".\\n\");")?;
+                
+                if has_variables {
+                    // For queries with variables, print variable bindings
+                    writeln!(self.output, "        for (int sol = 0; sol < enhanced_solutions_{}->count; sol++) {{", query_index)?;
+                    writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol]);", query_index)?;
+                    writeln!(self.output, "            if (sol < enhanced_solutions_{}->count - 1) {{", query_index)?;
+                    writeln!(self.output, "                printf(\";\\n\");")?;
+                    writeln!(self.output, "            }} else {{")?;
+                    writeln!(self.output, "                printf(\".\\n\");")?;
+                    writeln!(self.output, "            }}")?;
+                    writeln!(self.output, "        }}")?;
+                } else {
+                    // For ground queries, just report true/false with solution count
+                    writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", enhanced_solutions_{}->count, enhanced_solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
+                }
+                
                 writeln!(self.output, "    }} else {{")?;
                 writeln!(self.output, "        printf(\"false.\\n\");")?;
                 writeln!(self.output, "    }}")?;
