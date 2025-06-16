@@ -8,8 +8,12 @@ The goal is to utilize a resource-consumption model of data processing that allo
 ## Examples
 
 ```prolog
-// Test nested union types with proper type declarations
-type food (fruit (apple | orange) | meat (pork | poultry (chicken | turkey))).
+type food (
+    fruit (apple | orange) 
+    | meat (pork | poultry (
+        chicken | turkey)
+    )
+).
 type satisfied.
 type happy.
 
@@ -17,16 +21,11 @@ apple1 :: apple.
 chicken1 :: chicken.
 turkey1 :: turkey.
 
-// Rule
-eat :: food -> type.
-eat :- food => satisfied.
+eat_rule :: food => satisfied.
+mood_rule :: satisfied => happy.
 
-mood :: satisfied -> type.
-mood :- satisfied => happy.
-
-// Query
-?- eat, mood.
-// returns "true. true. true."
+?- eat_rule & mood_rule.
+// true (3 solutions found).
 ```
 
 ## Usage

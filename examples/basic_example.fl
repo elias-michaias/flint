@@ -1,4 +1,9 @@
-type food (fruit (apple | orange) | meat (pork | poultry (chicken | turkey))).
+type food (
+    fruit (apple | orange) 
+    | meat (pork | poultry (
+        chicken | turkey)
+    )
+).
 type satisfied.
 type happy.
 
