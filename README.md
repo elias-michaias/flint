@@ -8,6 +8,7 @@ The goal is to utilize a resource-consumption model of data processing that allo
 ## Examples
 
 ```prolog
+// shopping.fl
 // Shopping example - A store selling bread and milk for $1 each
 // Demonstrates linear logic resources being consumed during transactions
 
