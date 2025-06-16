@@ -1247,6 +1247,29 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     return 0; // Failed to satisfy all goals
 }
 
+// Check if an enhanced solution is equivalent to a substitution
+int enhanced_solutions_are_equivalent(enhanced_solution_t* solution, substitution_t* subst) {
+    if (solution->binding_count != subst->count) {
+        return 0;
+    }
+    
+    for (int i = 0; i < subst->count; i++) {
+        int found = 0;
+        for (int j = 0; j < solution->binding_count; j++) {
+            if (string_equal(subst->bindings[i].var, solution->bindings[j].var_name) &&
+                terms_equal(subst->bindings[i].term, solution->bindings[j].value)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            return 0;
+        }
+    }
+    
+    return 1;
+}
+
 // Simple solution list for backward compatibility
 solution_list_t* create_solution_list() {
     solution_list_t* list = malloc(sizeof(solution_list_t));
@@ -1302,7 +1325,7 @@ int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
     for (int i = 0; i < s1->count; i++) {
         int found = 0;
         for (int j = 0; j < s2->count; j++) {
-            if (string_equal(s1->bindings[i].var, s2->bindings[j].var) &&
+            if (strcmp(s1->bindings[i].var, s2->bindings[j].var) == 0 &&
                 terms_equal(s1->bindings[i].term, s2->bindings[j].term)) {
                 found = 1;
                 break;
@@ -1319,13 +1342,17 @@ int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
 void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst) {
     // Check for duplicate solutions before adding
     for (int i = 0; i < list->count; i++) {
-        if (solutions_are_equivalent(&list->solutions[i].substitution, subst)) {
+        if (enhanced_solutions_are_equivalent(&list->solutions[i], subst)) {
 #ifdef DEBUG
             printf("DEBUG: Skipping duplicate solution\n");
 #endif
             return; // Skip duplicate
         }
     }
+    
+#ifdef DEBUG
+    printf("DEBUG: No duplicate found, adding new solution\n");
+#endif
     
     if (list->count >= list->capacity) {
         list->capacity *= 2;
@@ -1859,7 +1886,7 @@ int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_c
         
         // Try to resolve this single goal - if it succeeds, continue with next body goal
         if (linear_resolve_query_with_substitution_enhanced_internal(kb, body_goal_array, 1, 
-                                                                    body_goal_array, 1, current_subst, 
+                                                                    original_goals, original_goal_count, current_subst, 
                                                                     solutions, rule_depth + 1, stack)) {
 #ifdef DEBUG
             printf("DEBUG: Body goal resolved successfully via rules, continuing with next body goal\n");
@@ -1918,21 +1945,18 @@ void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, i
     }
 }
 
-// Check if all variables are bound in the substitution
+// Check if all variables are bound to concrete values (not just other variables)
 int all_variables_bound(char** vars, int var_count, substitution_t* subst) {
     for (int i = 0; i < var_count; i++) {
-        int found = 0;
-        for (int j = 0; j < subst->count; j++) {
-            if (strcmp(vars[i], subst->bindings[j].var) == 0) {
-                found = 1;
-                break;
-            }
+        term_t* final_value = resolve_variable_chain(subst, vars[i]);
+        if (!final_value || final_value->type == TERM_VAR) {
+            // Variable is not bound or is bound to another variable
+            if (final_value) free_term(final_value);
+            return 0;
         }
-        if (!found) {
-            return 0; // Variable not bound
-        }
+        free_term(final_value);
     }
-    return 1; // All variables bound
+    return 1; // All variables bound to concrete values
 }
 
 // Free variable list

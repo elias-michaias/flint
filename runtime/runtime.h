@@ -195,6 +195,9 @@ void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_s
 void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name);
 void add_union_mapping(linear_kb_t* kb, const char* variant_type, const char* parent_type);
 
+// Function for adding persistent facts
+void add_persistent_fact(linear_kb_t* kb, term_t* fact);
+
 // Goal stack functions for recursion detection
 void init_goal_stack(goal_stack_t* stack);
 int push_goal(goal_stack_t* stack, term_t* goal);
@@ -281,6 +284,9 @@ int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, i
 int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
                                 substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
                                 term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
+
+// Enhanced solution comparison
+int enhanced_solutions_are_equivalent(enhanced_solution_t* solution, substitution_t* subst);
 
 // Helper functions
 int has_variables(term_t* term);
