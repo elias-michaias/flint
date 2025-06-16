@@ -630,8 +630,13 @@ impl CodeGenerator {
             if has_variables || has_persistent_facts || has_production_rules {
                 // Use enhanced resolution for queries with variables or when persistent facts exist
                 writeln!(self.output, "    enhanced_solution_list_t* enhanced_solutions_{} = create_enhanced_solution_list();", query_index)?;
-                writeln!(self.output, "    (void)linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
-                         goals_var, query.goals.len(), query_index)?;
+                if query.is_disjunctive {
+                    writeln!(self.output, "    (void)linear_resolve_query_enhanced_disjunctive(kb, {}, {}, enhanced_solutions_{});", 
+                             goals_var, query.goals.len(), query_index)?;
+                } else {
+                    writeln!(self.output, "    (void)linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
+                             goals_var, query.goals.len(), query_index)?;
+                }
                 writeln!(self.output, "    if (enhanced_solutions_{}->count > 0) {{", query_index)?;
                 
                 if has_variables {
@@ -655,15 +660,25 @@ impl CodeGenerator {
                 writeln!(self.output, "    free_enhanced_solution_list(enhanced_solutions_{});", query_index)?;
             } else {
                 // Use simple linear resolution for queries without variables (linear logic mode)
-                writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
-                writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
-                         query_index, goals_var, query.goals.len(), query_index)?;
-                writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
-                writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
-                writeln!(self.output, "    }} else {{")?;
-                writeln!(self.output, "        printf(\"false.\\n\");")?;
-                writeln!(self.output, "    }}")?;
-                writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
+                if query.is_disjunctive {
+                    writeln!(self.output, "    int found_{} = linear_resolve_query_with_type(kb, {}, {}, 1);", 
+                             query_index, goals_var, query.goals.len())?;
+                    writeln!(self.output, "    if (found_{}) {{", query_index)?;
+                    writeln!(self.output, "        printf(\"true.\\n\");")?;
+                    writeln!(self.output, "    }} else {{")?;
+                    writeln!(self.output, "        printf(\"false.\\n\");")?;
+                    writeln!(self.output, "    }}")?;
+                } else {
+                    writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
+                    writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
+                             query_index, goals_var, query.goals.len(), query_index)?;
+                    writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
+                    writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
+                    writeln!(self.output, "    }} else {{")?;
+                    writeln!(self.output, "        printf(\"false.\\n\");")?;
+                    writeln!(self.output, "    }}")?;
+                    writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
+                }
             }
             
             // Clean up

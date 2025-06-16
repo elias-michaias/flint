@@ -234,12 +234,7 @@ void free_enhanced_solution_list(enhanced_solution_list_t* list);
 void add_persistent_fact(linear_kb_t* kb, term_t* fact);
 int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
 int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
-int linear_resolve_query_with_substitution_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions);
-int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions, int is_top_level);
+int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
 int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
                                        term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth);
 int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
