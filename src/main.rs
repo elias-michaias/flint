@@ -184,7 +184,7 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
     let mut resource_manager = resource::LinearResourceManager::new();
     for clause in &program.clauses {
         match clause {
-            Clause::Fact { predicate, args, persistent: _ } => {
+            Clause::Fact { predicate, args, persistent: _, .. } => {
                 resource_manager.add_fact(predicate.clone(), args.clone());
             }
             Clause::Rule { head, body, produces } => {

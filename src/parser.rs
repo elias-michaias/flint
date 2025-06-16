@@ -132,6 +132,10 @@ impl Parser {
                     // Persistent fact: !fact(args). or !name :: predicate(args).
                     clauses.push(self.parse_persistent_clause()?);
                 }
+                Token::Persistent => {
+                    // New persistent syntax: persistent name :: fact
+                    clauses.push(self.parse_persistent_clause()?);
+                }
                 Token::Type => {
                     // New type definition: type name [(variants)] [is supertype].
                     let type_decl = self.parse_type_declaration()?;
@@ -141,8 +145,16 @@ impl Parser {
                     }
                 }
                 Token::Identifier(_) => {
-                    // Check if this is a type declaration (name :: type_signature.)
-                    if self.peek_type_declaration() {
+                    // Check if this is a new-style type definition (name :: [distinct] type [of supertype].)
+                    if self.peek_new_type_definition() {
+                        let type_def = self.parse_new_type_definition()?;
+                        if let TypeDeclaration::TypeDefinition(td) = type_def {
+                            type_definitions.push(td);
+                        }
+                        self.expect(Token::Dot)?;
+                    }
+                    // Check if this is an old-style type declaration (name :: type_signature.)
+                    else if self.peek_type_declaration() {
                         // Parse the type declaration and decide if it's a predicate or term
                         let type_decl = self.parse_type_declaration()?;
                         match type_decl {
@@ -152,15 +164,8 @@ impl Parser {
                             TypeDeclaration::Term(term_type) => {
                                 term_types.push(term_type.clone());
                                 
-                                // If this is a Named type (not a function), create a nullary fact
-                                if let LogicType::Named(_) = term_type.term_type {
-                                    let nullary_fact = Clause::Fact {
-                                        predicate: term_type.name.clone(),
-                                        args: vec![], // Nullary fact (no arguments)  
-                                        persistent: false, // Default to linear consumption
-                                    };
-                                    clauses.push(nullary_fact);
-                                }
+                                // REMOVED: No longer create nullary facts for singleton resources
+                                // The new syntax requires all resources to be relational predicates
                             }
                             TypeDeclaration::BatchTerms(names, logic_type) => {
                                 // Create individual TermType entries for each name
@@ -168,18 +173,7 @@ impl Parser {
                                     term_types.push(TermType { name: name.clone(), term_type: logic_type.clone() });
                                 }
                                 
-                                // If this is a Named type (not a function), create nullary facts
-                                if let LogicType::Named(_) = logic_type {
-                                    for name in names {
-                                        // Create a nullary fact for each name
-                                        let nullary_fact = Clause::Fact {
-                                            predicate: name,
-                                            args: vec![], // Nullary fact (no arguments)
-                                            persistent: false, // Default to linear consumption
-                                        };
-                                        clauses.push(nullary_fact);
-                                    }
-                                }
+                                // REMOVED: No longer create nullary facts for singleton resources
                             }
                             TypeDeclaration::TypeDefinition(_) => {
                                 // This shouldn't happen since we handle Token::Type separately now
@@ -235,7 +229,36 @@ impl Parser {
     }
     
     fn peek_clause(&self) -> bool {
-        // Look for patterns like: pred(args) :- body. or pred(args). or !pred(args).
+        // Look for patterns like: 
+        // - pred(args) :- body.
+        // - pred(args).
+        // - !pred(args).
+        // - name :: pred(args).  (named facts)
+        
+        // Check for named fact pattern: identifier :: identifier(args).
+        if matches!(self.current_token(), Token::Identifier(_)) {
+            if let Some(Token::ColonColon) = self.peek_token_at(1) {
+                // Look ahead to see if this is a named fact
+                let mut i = 2;
+                while let Some(token) = self.peek_token_at(i) {
+                    match token {
+                        Token::Identifier(_) => {
+                            // Check if followed by left paren (predicate call)
+                            if let Some(Token::LeftParen) = self.peek_token_at(i + 1) {
+                                return true; // This is a named fact: name :: pred(args)
+                            }
+                            i += 1;
+                        }
+                        Token::Dot => return false, // name :: type.
+                        Token::Arrow => return false, // name :: type -> type.
+                        Token::Type => return false, // name :: type
+                        _ => i += 1,
+                    }
+                }
+            }
+        }
+        
+        // Check for other clause patterns
         for i in self.current..self.tokens.len() {
             match &self.tokens[i].token {
                 Token::Dot => return true,
@@ -248,8 +271,10 @@ impl Parser {
     }
     
     fn peek_type_declaration(&self) -> bool {
-        // Look for pattern: identifier [, identifier]* :: ...
-        // But exclude Celf-style rules which have: identifier :: ... => ...
+        // Look for pattern: identifier [, identifier]* :: type_signature.
+        // But exclude fact declarations which have: identifier :: predicate_call.
+        // Type signatures typically contain 'type', '->', or basic type keywords
+        // Predicate calls contain parentheses and concrete arguments
         if !matches!(self.current_token(), Token::Identifier(_)) {
             return false;
         }
@@ -259,8 +284,7 @@ impl Parser {
         loop {
             match self.peek_token_at(i) {
                 Some(Token::ColonColon) => {
-                    // Found ::, now check if this is a Celf-style rule by looking for =>
-                    // Scan ahead after :: to see if we find a FatArrow
+                    // Found ::, now check what comes after to distinguish type decl from fact decl
                     let mut j = i + 1;
                     while j < 20 { // reasonable lookahead limit
                         match self.peek_token_at(j) {
@@ -268,8 +292,27 @@ impl Parser {
                                 // Found =>, this is a Celf-style rule, not a type declaration
                                 return false;
                             }
+                            Some(Token::Type) | Some(Token::Arrow) => {
+                                // Found type keyword or arrow, this is a type declaration
+                                return true;
+                            }
+                            Some(Token::LeftParen) => {
+                                // Found left paren, this is likely a predicate call (fact), not type decl
+                                return false;
+                            }
+                            Some(Token::Identifier(name)) => {
+                                // Check if this identifier is followed by parentheses (predicate call)
+                                // or if it's a type name
+                                if let Some(Token::LeftParen) = self.peek_token_at(j + 1) {
+                                    // predicate_name(args) - this is a fact declaration
+                                    return false;
+                                }
+                                // Could be a type name, continue looking
+                                j += 1;
+                            }
                             Some(Token::Dot) => {
-                                // Found ., this is a type declaration
+                                // Found ., assume this is a type declaration if we haven't found
+                                // clear evidence of a predicate call
                                 return true;
                             }
                             Some(Token::Eof) => {
@@ -280,8 +323,9 @@ impl Parser {
                             }
                         }
                     }
-                    // If we didn't find either => or . within reasonable distance, assume type declaration
-                    return true;
+                    // If we didn't find clear evidence either way within reasonable distance,
+                    // be conservative and assume it's not a type declaration
+                    return false;
                 }
                 Some(Token::Comma) => {
                     // Check if next token after comma is identifier
@@ -325,6 +369,33 @@ impl Parser {
         }
     }
     
+    fn peek_new_type_definition(&self) -> bool {
+        // Look for pattern: identifier :: [distinct] type [of supertype] .
+        if !matches!(self.current_token(), Token::Identifier(_)) {
+            return false;
+        }
+        
+        // Check for :: after identifier
+        if !matches!(self.peek_token_at(1), Some(Token::ColonColon)) {
+            return false;
+        }
+        
+        // Look for type keyword (possibly after distinct)
+        let mut i = 2; // Start after ::
+        
+        // Skip optional 'distinct' keyword
+        if matches!(self.peek_token_at(i), Some(Token::Distinct)) {
+            i += 1;
+        }
+        
+        // Look for 'type' keyword
+        if matches!(self.peek_token_at(i), Some(Token::Type)) {
+            return true;
+        }
+        
+        false
+    }
+
     fn parse_function(&mut self) -> Result<Function, ParseError> {
         // Parse: name(param: param_type): return_type = body
         let name = match self.current_token() {
@@ -616,22 +687,23 @@ impl Parser {
     }
     
     fn parse_persistent_clause(&mut self) -> Result<Clause, ParseError> {
-        // Expect and consume the bang token
-        self.expect(Token::Bang)?;
+        // Handle both old and new persistent syntax
+        let is_new_syntax = matches!(self.current_token(), Token::Persistent);
         
-        // Parse the identifier (either predicate name or fact name)
-        let first_identifier = if let Token::Identifier(name) = self.current_token() {
-            let name = name.clone();
-            self.advance();
-            name
-        } else {
-            return Err(self.create_error_diagnostic("Expected identifier after '!'".to_string()));
-        };
-        
-        // Check if this is a typed persistent fact (name :: predicate(args)) or simple persistent fact
-        if matches!(self.current_token(), Token::ColonColon) {
-            // This is !name :: predicate(args).
-            self.advance(); // consume ::
+        if is_new_syntax {
+            // New syntax: persistent name :: predicate(args).
+            self.expect(Token::Persistent)?;
+            
+            // Parse the name
+            let name = if let Token::Identifier(name) = self.current_token() {
+                let name = name.clone();
+                self.advance();
+                Some(name)
+            } else {
+                return Err(self.create_error_diagnostic("Expected name after 'persistent'".to_string()));
+            };
+            
+            self.expect(Token::ColonColon)?;
             
             // Parse the predicate term
             let predicate_term = self.parse_term()?;
@@ -639,31 +711,63 @@ impl Parser {
             
             match predicate_term {
                 Term::Compound { functor, args } => {
-                    Ok(Clause::Fact { predicate: functor, args, persistent: true })
+                    Ok(Clause::Fact { predicate: functor, args, persistent: true, name })
+                }
+                Term::Atom { name: pred_name, .. } => {
+                    Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: true, name })
                 }
                 _ => Err(ParseError::InvalidExpression),
             }
-        } else if matches!(self.current_token(), Token::LeftParen) {
-            // This is !predicate(args).
-            self.advance(); // consume (
-            let mut args = Vec::new();
-            
-            if !matches!(self.current_token(), Token::RightParen) {
-                args.push(self.parse_term()?);
-                
-                while matches!(self.current_token(), Token::Comma) {
-                    self.advance();
-                    args.push(self.parse_term()?);
-                }
-            }
-            
-            self.expect(Token::RightParen)?;
-            self.expect(Token::Dot)?;
-            Ok(Clause::Fact { predicate: first_identifier, args, persistent: true })
         } else {
-            // This is a simple !fact.
-            self.expect(Token::Dot)?;
-            Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true })
+            // Old syntax: !fact or !name :: fact
+            self.expect(Token::Bang)?;
+            
+            // Parse the identifier (either predicate name or fact name)
+            let first_identifier = if let Token::Identifier(name) = self.current_token() {
+                let name = name.clone();
+                self.advance();
+                name
+            } else {
+                return Err(self.create_error_diagnostic("Expected identifier after '!'".to_string()));
+            };
+            
+            // Check if this is a typed persistent fact (name :: predicate(args)) or simple persistent fact
+            if matches!(self.current_token(), Token::ColonColon) {
+                // This is !name :: predicate(args).
+                self.advance(); // consume ::
+                
+                // Parse the predicate term
+                let predicate_term = self.parse_term()?;
+                self.expect(Token::Dot)?;
+                
+                match predicate_term {
+                    Term::Compound { functor, args } => {
+                        Ok(Clause::Fact { predicate: functor, args, persistent: true, name: None })
+                    }
+                    _ => Err(ParseError::InvalidExpression),
+                }
+            } else if matches!(self.current_token(), Token::LeftParen) {
+                // This is !predicate(args).
+                self.advance(); // consume (
+                let mut args = Vec::new();
+                
+                if !matches!(self.current_token(), Token::RightParen) {
+                    args.push(self.parse_term()?);
+                    
+                    while matches!(self.current_token(), Token::Comma) {
+                        self.advance();
+                        args.push(self.parse_term()?);
+                    }
+                }
+                
+                self.expect(Token::RightParen)?;
+                self.expect(Token::Dot)?;
+                Ok(Clause::Fact { predicate: first_identifier, args, persistent: true, name: None })
+            } else {
+                // This is a simple !fact.
+                self.expect(Token::Dot)?;
+                Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true, name: None })
+            }
         }
     }
 
@@ -685,52 +789,95 @@ impl Parser {
                 self.advance();
                 match first_term {
                     Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args, persistent })
+                        Ok(Clause::Fact { predicate: functor, args, persistent, name: None })
                     }
                     Term::Atom { name, .. } => {
-                        Ok(Clause::Fact { predicate: name, args: vec![], persistent })
+                        Ok(Clause::Fact { predicate: name, args: vec![], persistent, name: None })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
             }
             Token::ColonColon => {
-                // Celf-style rule: goal_name :: condition => result
+                // Could be either:
+                // 1. Celf-style rule: goal_name :: condition => result
+                // 2. Named fact: name :: predicate(args).
+                
                 if persistent {
                     return Err(ParseError::InvalidExpression); // Can't have !rule
                 }
                 
-                // The first_term should be the goal name (convert to atom if it's an identifier)
-                let goal_name = match first_term {
+                // The first_term should be the name
+                let name = match first_term {
                     Term::Atom { name, .. } => name,
-                    Term::Compound { functor, .. } if functor == "atom" => {
-                        return Err(ParseError::InvalidExpression);
-                    }
                     _ => return Err(ParseError::InvalidExpression),
                 };
                 
                 self.advance(); // consume ::
                 
-                // Parse the body (conditions)
-                let mut body = Vec::new();
-                body.push(self.parse_term()?);
+                // Parse what comes after ::
+                let second_term = self.parse_term()?;
                 
-                // Handle conjunction with & (instead of comma)
-                while matches!(self.current_token(), Token::Ampersand) {
-                    self.advance();
-                    body.push(self.parse_term()?);
+                // Check if this is followed by => (Celf-style rule) or . (named fact)
+                match self.current_token() {
+                    Token::FatArrow => {
+                        // Celf-style rule: goal_name :: condition => result
+                        let mut body = vec![second_term];
+                        
+                        // Handle conjunction with & (instead of comma)
+                        while matches!(self.current_token(), Token::Ampersand) {
+                            self.advance();
+                            body.push(self.parse_term()?);
+                        }
+                        
+                        // Expect => for the result
+                        self.expect(Token::FatArrow)?;
+                        
+                        // Parse the result/head
+                        let produces = Some(self.parse_term()?);
+                        
+                        self.expect(Token::Dot)?;
+                        
+                        // Create the goal name as the head term
+                        let head = Term::Atom { name, type_name: None };
+                        Ok(Clause::Rule { head, body, produces })
+                    }
+                    Token::Dot => {
+                        // Named fact: name :: predicate(args).
+                        self.advance(); // consume .
+                        match second_term {
+                            Term::Compound { functor, args } => {
+                                Ok(Clause::Fact { predicate: functor, args, persistent: false, name: Some(name) })
+                            }
+                            Term::Atom { name: pred_name, .. } => {
+                                Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: false, name: Some(name) })
+                            }
+                            _ => Err(ParseError::InvalidExpression),
+                        }
+                    }
+                    Token::Ampersand => {
+                        // Celf-style rule with conjunction: goal_name :: condition & condition => result
+                        let mut body = vec![second_term];
+                        
+                        // Handle conjunction with &
+                        while matches!(self.current_token(), Token::Ampersand) {
+                            self.advance();
+                            body.push(self.parse_term()?);
+                        }
+                        
+                        // Expect => for the result
+                        self.expect(Token::FatArrow)?;
+                        
+                        // Parse the result/head
+                        let produces = Some(self.parse_term()?);
+                        
+                        self.expect(Token::Dot)?;
+                        
+                        // Create the goal name as the head term
+                        let head = Term::Atom { name, type_name: None };
+                        Ok(Clause::Rule { head, body, produces })
+                    }
+                    _ => Err(ParseError::InvalidExpression),
                 }
-                
-                // Expect => for the result
-                self.expect(Token::FatArrow)?;
-                
-                // Parse the result/head
-                let produces = Some(self.parse_term()?);
-                
-                self.expect(Token::Dot)?;
-                
-                // Create the goal name as the head term
-                let head = Term::Atom { name: goal_name, type_name: None };
-                Ok(Clause::Rule { head, body, produces })
             }
             Token::Rule => {
                 // Old Prolog-style rule: head :- body (for backward compatibility)
@@ -833,6 +980,7 @@ impl Parser {
                 match type_name.as_str() {
                     "int" => Ok(LogicType::Integer),
                     "string" => Ok(LogicType::String),
+                    "atom" => Ok(LogicType::Atom),
                     _ => Ok(LogicType::Named(type_name)),
                 }
             }
@@ -887,15 +1035,15 @@ impl Parser {
     fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
         // Check if this is the new syntax: "type name ..." 
         if matches!(self.current_token(), Token::Type) {
-            return self.parse_new_type_definition();
+            return self.parse_old_style_type_definition();
         }
         
         // Otherwise, parse the old syntax: "name(s) :: type"
         self.parse_old_type_declaration()
     }
     
-    fn parse_new_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
-        // Parse: type name [(variant1 | variant2)] [is supertype]
+    fn parse_old_style_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
+        // Parse: type name [(variant1 | variant2)]
         self.expect(Token::Type)?;
         
         let name = match self.current_token() {
@@ -917,6 +1065,50 @@ impl Parser {
         Ok(TypeDeclaration::TypeDefinition(TypeDefinition {
             name,
             union_variants,
+            supertype: None, // Old syntax doesn't support subtyping
+            distinct: false, // Old syntax doesn't support distinct
+        }))
+    }
+    
+    fn parse_new_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
+        // Parse: name :: [distinct] type [of supertype]
+        
+        // Parse the type name
+        let name = match self.current_token() {
+            Token::Identifier(n) => {
+                let name = n.clone();
+                self.advance();
+                name
+            }
+            _ => return Err(self.create_error_diagnostic("Expected type name".to_string())),
+        };
+        
+        self.expect(Token::ColonColon)?;
+        
+        // Check for optional 'distinct' keyword
+        let distinct = if matches!(self.current_token(), Token::Distinct) {
+            self.advance(); // consume 'distinct'
+            true
+        } else {
+            false
+        };
+        
+        // Expect 'type' keyword
+        self.expect(Token::Type)?;
+        
+        // Check for optional 'of supertype' clause
+        let supertype = if matches!(self.current_token(), Token::Of) {
+            self.advance(); // consume 'of'
+            Some(self.parse_logic_type()?)
+        } else {
+            None
+        };
+        
+        Ok(TypeDeclaration::TypeDefinition(TypeDefinition {
+            name,
+            union_variants: None, // New syntax doesn't support union variants directly
+            supertype,
+            distinct,
         }))
     }
     

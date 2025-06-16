@@ -126,7 +126,7 @@ impl LinearResourceManager {
     
     /// Add a linear fact (becomes a consumable resource)
     pub fn add_fact(&mut self, predicate: String, args: Vec<Term>) {
-        let clause = Clause::Fact { predicate, args, persistent: false };
+        let clause = Clause::Fact { predicate, args, persistent: false, name: None };
         let resource = LinearResource {
             id: self.next_id,
             clause,

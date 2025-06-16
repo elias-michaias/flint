@@ -182,6 +182,7 @@ impl UnificationEngine {
                     predicate: predicate.clone(),
                     args: args.iter().map(|arg| self.rename_variables(arg, mapping)).collect(),
                     persistent: false, // Default for renamed clauses
+                    name: None,
                 }
             }
             Clause::Rule { head, body, .. } => {

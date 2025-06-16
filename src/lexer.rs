@@ -2,9 +2,9 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{alpha1, alphanumeric1, char, digit1, multispace0},
-    combinator::{map, opt, recognize},
+    combinator::{map, opt, recognize, not},
     multi::many0,
-    sequence::{delimited, pair},
+    sequence::{delimited, pair, preceded},
     IResult,
 };
 
@@ -37,6 +37,7 @@ pub enum Token {
     Free,
     Load,
     Store,
+    Persistent,  // persistent
     
     // Literals
     Integer(i64),
@@ -83,6 +84,8 @@ pub enum Token {
     
     // Types
     Type,       // type
+    Of,         // of
+    Distinct,   // distinct
     Colon,      // :
     ColonColon, // ::
 }
@@ -96,6 +99,21 @@ fn identifier(input: &str) -> IResult<&str, String> {
         )),
         |s: &str| s.to_string(),
     )(input)
+}
+
+/// Helper function to parse a keyword followed by a word boundary
+fn keyword_with_boundary(keyword: &str) -> impl Fn(&str) -> IResult<&str, &str> + '_ {
+    move |input: &str| {
+        let (rest, matched) = tag(keyword)(input)?;
+        // Check that the next character is not alphanumeric or underscore (word boundary)
+        if !rest.is_empty() {
+            let next_char = rest.chars().next().unwrap();
+            if next_char.is_alphanumeric() || next_char == '_' {
+                return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+            }
+        }
+        Ok((rest, matched))
+    }
 }
 
 /// Parse a variable (prefixed with $)
@@ -141,19 +159,22 @@ fn token(input: &str) -> IResult<&str, Token> {
 /// Parse keywords
 fn parse_keywords(input: &str) -> IResult<&str, Token> {
     alt((
-        map(tag("match"), |_| Token::Match),
-        map(tag("alloc"), |_| Token::Alloc),
-        map(tag("store"), |_| Token::Store),
-        map(tag("free"), |_| Token::Free),
-        map(tag("load"), |_| Token::Load),
-        map(tag("then"), |_| Token::Then),
-        map(tag("else"), |_| Token::Else),
-        map(tag("with"), |_| Token::With),
-        map(tag("let"), |_| Token::Let),
-        map(tag("lam"), |_| Token::Lam),
-        map(tag("in"), |_| Token::In),
-        map(tag("if"), |_| Token::If),
-        map(tag("type"), |_| Token::Type),
+        map(keyword_with_boundary("persistent"), |_| Token::Persistent),
+        map(keyword_with_boundary("distinct"), |_| Token::Distinct),
+        map(keyword_with_boundary("match"), |_| Token::Match),
+        map(keyword_with_boundary("alloc"), |_| Token::Alloc),
+        map(keyword_with_boundary("store"), |_| Token::Store),
+        map(keyword_with_boundary("free"), |_| Token::Free),
+        map(keyword_with_boundary("load"), |_| Token::Load),
+        map(keyword_with_boundary("then"), |_| Token::Then),
+        map(keyword_with_boundary("else"), |_| Token::Else),
+        map(keyword_with_boundary("with"), |_| Token::With),
+        map(keyword_with_boundary("let"), |_| Token::Let),
+        map(keyword_with_boundary("lam"), |_| Token::Lam),
+        map(keyword_with_boundary("in"), |_| Token::In),
+        map(keyword_with_boundary("if"), |_| Token::If),
+        map(keyword_with_boundary("type"), |_| Token::Type),
+        map(keyword_with_boundary("of"), |_| Token::Of),
     ))(input)
 }
 

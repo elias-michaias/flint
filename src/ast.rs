@@ -15,6 +15,7 @@ pub enum LogicType {
     /// Built-in types
     Integer,
     String,
+    Atom,  // New built-in atom type
     /// User-defined type (e.g., person)
     Named(TypeName),
     /// Union type (e.g., fruit = apple | orange)
@@ -25,11 +26,13 @@ pub enum LogicType {
     Type,
 }
 
-/// Type definition with optional nested union types
+/// Type definition with optional nested union types and subtyping
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDefinition {
     pub name: String,
     pub union_variants: Option<UnionVariants>, // for complex union structures
+    pub supertype: Option<LogicType>, // for subtyping: person :: type of atom
+    pub distinct: bool, // whether this is a distinct subtype (affects subtyping rules)
 }
 
 /// Union variants can be nested and complex
@@ -304,7 +307,8 @@ pub enum Clause {
     Fact {
         predicate: String,
         args: Vec<Term>,
-        persistent: bool,  // true for !fact, false for fact
+        persistent: bool,  // true for persistent fact, false for linear fact
+        name: Option<String>, // optional name for persistent facts (persistent name :: fact)
     },
     
     /// Rule: head :- body.

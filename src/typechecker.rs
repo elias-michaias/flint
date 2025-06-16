@@ -29,6 +29,7 @@ pub enum TypeCheckError {
 pub struct TypeChecker {
     predicate_types: HashMap<String, PredicateType>,
     term_types: HashMap<String, LogicType>,
+    type_definitions: HashMap<String, TypeDefinition>, // New: track type definitions
 }
 
 impl TypeChecker {
@@ -36,6 +37,7 @@ impl TypeChecker {
         Self {
             predicate_types: HashMap::new(),
             term_types: HashMap::new(),
+            type_definitions: HashMap::new(),
         }
     }
     
@@ -47,7 +49,16 @@ impl TypeChecker {
         self.term_types.insert(term_type.name.clone(), term_type.term_type);
     }
     
+    pub fn add_type_definition(&mut self, type_def: TypeDefinition) {
+        self.type_definitions.insert(type_def.name.clone(), type_def);
+    }
+    
     pub fn check_program(&mut self, program: &Program) -> Result<(), TypeCheckError> {
+        // Load type definitions first
+        for type_def in &program.type_definitions {
+            self.add_type_definition(type_def.clone());
+        }
+        
         // Load type declarations
         for pred_type in &program.type_declarations {
             self.add_predicate_type(pred_type.clone());
@@ -208,13 +219,47 @@ impl TypeChecker {
     }
     
     fn types_compatible(&self, actual: &LogicType, expected: &LogicType) -> bool {
+        // Direct type match
+        if actual == expected {
+            return true;
+        }
+        
         match (actual, expected) {
-            (LogicType::Named(a), LogicType::Named(e)) => a == e || a == "any" || e == "any",
+            (LogicType::Named(a), LogicType::Named(e)) => {
+                a == e || a == "any" || e == "any" || self.is_subtype_compatible(actual, expected)
+            }
+            (LogicType::Named(_), expected) => {
+                // Check if the named type is a subtype of expected
+                self.is_subtype_compatible(actual, expected)
+            }
             (LogicType::Integer, LogicType::Integer) => true,
             (LogicType::String, LogicType::String) => true,
+            (LogicType::Atom, LogicType::Atom) => true,
             (LogicType::Type, LogicType::Type) => true,
             _ => false,
         }
+    }
+    
+    /// Check if `subtype` is compatible with `supertype` according to subtyping rules
+    fn is_subtype_compatible(&self, subtype: &LogicType, expected_type: &LogicType) -> bool {
+        match (subtype, expected_type) {
+            (LogicType::Named(sub_name), expected) => {
+                // Check if sub_name is a subtype of expected
+                if let Some(type_def) = self.type_definitions.get(sub_name) {
+                    if let Some(supertype) = &type_def.supertype {
+                        // If distinct is true, do not allow subtyping
+                        if type_def.distinct {
+                            return false;
+                        }
+                        // If distinct is false, allow subtyping - recurse to check the chain
+                        return self.types_compatible(supertype, expected);
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        false
     }
     
     fn check_variable_consistency(&self, head: &Term, body: &[Term]) -> Result<(), TypeCheckError> {
