@@ -405,20 +405,26 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     }
     // Variable unification
     else if (term1->type == TERM_VAR) {
-        if (subst->count < MAX_VARS) {
-            subst->bindings[subst->count].var = malloc(strlen(term1->data.var) + 1);
-            strcpy(subst->bindings[subst->count].var, term1->data.var);
-            subst->bindings[subst->count].term = copy_term(term2);
-            subst->count++;
-            result = 1;
+        // Occurs check: don't bind a variable to a term containing itself
+        if (!occurs_in_term(term1->data.var, term2)) {
+            if (subst->count < MAX_VARS) {
+                subst->bindings[subst->count].var = malloc(strlen(term1->data.var) + 1);
+                strcpy(subst->bindings[subst->count].var, term1->data.var);
+                subst->bindings[subst->count].term = copy_term(term2);
+                subst->count++;
+                result = 1;
+            }
         }
     } else if (term2->type == TERM_VAR) {
-        if (subst->count < MAX_VARS) {
-            subst->bindings[subst->count].var = malloc(strlen(term2->data.var) + 1);
-            strcpy(subst->bindings[subst->count].var, term2->data.var);
-            subst->bindings[subst->count].term = copy_term(term1);
-            subst->count++;
-            result = 1;
+        // Occurs check: don't bind a variable to a term containing itself
+        if (!occurs_in_term(term2->data.var, term1)) {
+            if (subst->count < MAX_VARS) {
+                subst->bindings[subst->count].var = malloc(strlen(term2->data.var) + 1);
+                strcpy(subst->bindings[subst->count].var, term2->data.var);
+                subst->bindings[subst->count].term = copy_term(term1);
+                subst->count++;
+                result = 1;
+            }
         }
     }
     // Atom unification
@@ -443,6 +449,68 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     free_term(term1);
     free_term(term2);
     return result;
+}
+
+// Check if a variable occurs in a term (occurs check for unification)
+int occurs_in_term(const char* var, term_t* term) {
+    if (!term || !var) return 0;
+    
+    switch (term->type) {
+        case TERM_VAR:
+            return string_equal(var, term->data.var);
+            
+        case TERM_COMPOUND:
+            for (int i = 0; i < term->data.compound.arity; i++) {
+                if (occurs_in_term(var, term->data.compound.args[i])) {
+                    return 1;
+                }
+            }
+            return 0;
+            
+        case TERM_CLONE:
+            return occurs_in_term(var, term->data.cloned);
+            
+        case TERM_ATOM:
+        case TERM_INTEGER:
+            return 0;
+    }
+    return 0;
+}
+
+// Rename variables in a term to avoid conflicts (for rule instances)
+term_t* rename_variables_in_term(term_t* term, int instance_id) {
+    if (!term) return NULL;
+    
+    switch (term->type) {
+        case TERM_VAR: {
+            // Create a new variable name by appending the instance ID
+            int new_name_len = strlen(term->data.var) + 20; // Extra space for _inst_N
+            char* new_name = malloc(new_name_len);
+            snprintf(new_name, new_name_len, "%s_inst_%d", term->data.var, instance_id);
+            term_t* renamed = create_var(new_name);
+            free(new_name);
+            return renamed;
+        }
+        
+        case TERM_COMPOUND: {
+            term_t** new_args = NULL;
+            if (term->data.compound.arity > 0) {
+                new_args = malloc(sizeof(term_t*) * term->data.compound.arity);
+                for (int i = 0; i < term->data.compound.arity; i++) {
+                    new_args[i] = rename_variables_in_term(term->data.compound.args[i], instance_id);
+                }
+            }
+            return create_compound(term->data.compound.functor, new_args, term->data.compound.arity);
+        }
+        
+        case TERM_CLONE:
+            return create_clone(rename_variables_in_term(term->data.cloned, instance_id));
+            
+        case TERM_ATOM:
+        case TERM_INTEGER:
+            return copy_term(term);
+    }
+    return NULL;
 }
 
 void print_term(term_t* term) {
@@ -679,6 +747,77 @@ int is_goal_in_stack(goal_stack_t* stack, term_t* goal) {
         }
     }
     return 0;
+}
+
+// Check if a goal is recursively related to any goal in the stack
+// This checks for same functor/arity pattern to catch recursive calls with different variables
+int is_goal_pattern_in_stack(goal_stack_t* stack, term_t* goal) {
+    for (int i = 0; i < stack->depth; i++) {
+        if (goals_have_same_pattern(stack->goals[i], goal)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Check if two goals have the same pattern for recursion detection
+// For compound terms: same functor, same arity, and same ground arguments in key positions
+int goals_have_same_pattern(term_t* goal1, term_t* goal2) {
+    if (goal1->type != goal2->type) return 0;
+    
+    if (goal1->type == TERM_COMPOUND && goal2->type == TERM_COMPOUND) {
+        // Must have same functor and arity
+        if (strcmp(goal1->data.compound.functor, goal2->data.compound.functor) != 0) return 0;
+        if (goal1->data.compound.arity != goal2->data.compound.arity) return 0;
+        
+        // For recursion detection, check if the first ground argument is the same
+        // This handles cases like ancestor(alice, $y) vs ancestor(alice, $z)
+        if (goal1->data.compound.arity > 0) {
+            term_t* arg1_1 = goal1->data.compound.args[0];
+            term_t* arg1_2 = goal2->data.compound.args[0];
+            
+            // If both first arguments are ground (atoms), they must be equal
+            if (arg1_1->type == TERM_ATOM && arg1_2->type == TERM_ATOM) {
+                return strcmp(arg1_1->data.atom, arg1_2->data.atom) == 0;
+            }
+            
+            // If one is ground and one is variable, consider them different patterns
+            if ((arg1_1->type == TERM_ATOM && arg1_2->type == TERM_VAR) ||
+                (arg1_1->type == TERM_VAR && arg1_2->type == TERM_ATOM)) {
+                return 0;
+            }
+        }
+        
+        return 1; // Same pattern for recursion purposes
+    }
+    
+    if (goal1->type == TERM_ATOM && goal2->type == TERM_ATOM) {
+        return strcmp(goal1->data.atom, goal2->data.atom) == 0;
+    }
+    
+    return terms_equal(goal1, goal2);
+}
+
+// Goal cache functions for memoization
+void init_goal_cache(goal_cache_t* cache) {
+    cache->count = 0;
+}
+
+int check_goal_cache(goal_cache_t* cache, term_t* goal) {
+    for (int i = 0; i < cache->count; i++) {
+        if (terms_equal(cache->goals[i], goal)) {
+            return cache->results[i];
+        }
+    }
+    return 0; // Not found in cache
+}
+
+void add_goal_cache(goal_cache_t* cache, term_t* goal, int result) {
+    if (cache->count < MAX_GOAL_CACHE) {
+        cache->goals[cache->count] = copy_term(goal);
+        cache->results[cache->count] = result;
+        cache->count++;
+    }
 }
 
 // Check if a resource is persistent (cloned)
@@ -1154,7 +1293,40 @@ enhanced_solution_list_t* create_enhanced_solution_list() {
     return list;
 }
 
+// Check if two solutions are equivalent (same variable bindings)
+int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
+    if (s1->count != s2->count) {
+        return 0;
+    }
+    
+    for (int i = 0; i < s1->count; i++) {
+        int found = 0;
+        for (int j = 0; j < s2->count; j++) {
+            if (string_equal(s1->bindings[i].var, s2->bindings[j].var) &&
+                terms_equal(s1->bindings[i].term, s2->bindings[j].term)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            return 0;
+        }
+    }
+    
+    return 1;
+}
+
 void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst) {
+    // Check for duplicate solutions before adding
+    for (int i = 0; i < list->count; i++) {
+        if (solutions_are_equivalent(&list->solutions[i].substitution, subst)) {
+#ifdef DEBUG
+            printf("DEBUG: Skipping duplicate solution\n");
+#endif
+            return; // Skip duplicate
+        }
+    }
+    
     if (list->count >= list->capacity) {
         list->capacity *= 2;
         list->solutions = realloc(list->solutions, sizeof(enhanced_solution_t) * list->capacity);
@@ -1257,6 +1429,16 @@ int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, i
 int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
                                                   term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
                                                   enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
+    static int total_iterations = 0;
+    total_iterations++;
+    
+    // Prevent excessive recursion depth or total iterations
+    if (rule_depth > 10 || total_iterations > 500) {
+#ifdef DEBUG
+        printf("DEBUG: Maximum recursion depth or iterations reached (depth=%d, iterations=%d), terminating\n", rule_depth, total_iterations);
+#endif
+        return 0;
+    }
     if (goal_count == 0) {
         // Add solution when all original goals are satisfied (regardless of rule depth)
         char* original_vars[MAX_VARS];
@@ -1267,7 +1449,16 @@ int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, te
 #ifdef DEBUG
             printf("DEBUG: Adding solution (rule_depth = %d)\n", rule_depth);
 #endif
-            add_enhanced_solution(solutions, global_subst);
+            // Create a filtered substitution with only original query variables
+            substitution_t filtered_subst = {0};
+            create_filtered_substitution(global_subst, original_vars, original_var_count, &filtered_subst);
+            add_enhanced_solution(solutions, &filtered_subst);
+            
+            // Clean up filtered substitution
+            for (int i = 0; i < filtered_subst.count; i++) {
+                free(filtered_subst.bindings[i].var);
+                free_term(filtered_subst.bindings[i].term);
+            }
         }
         
         free_variable_list(original_vars, original_var_count);
@@ -1347,7 +1538,8 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
     substitution_t rule_subst = *global_subst;
     
     // Check for recursion if this is a recursive rule
-    if (rule->is_recursive && is_goal_in_stack(stack, current_goal)) {
+    // Use improved pattern matching for similar goals with same ground arguments
+    if (rule->is_recursive && is_goal_pattern_in_stack(stack, current_goal)) {
 #ifdef DEBUG
         printf("DEBUG: Recursion detected for goal: ");
         print_term(current_goal);
@@ -1359,14 +1551,35 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
 #ifdef DEBUG
     printf("DEBUG: Trying rule for goal: ");
     print_term(current_goal);
+    printf(" (rule depth: %d)\n", rule_depth);
+#endif
+
+    // Rename variables in the rule to avoid conflicts with existing variables
+    static int rule_instance_counter = 0;
+    rule_instance_counter++;
+    
+    term_t* renamed_head = rename_variables_in_term(rule->head, rule_instance_counter);
+    term_t* renamed_production = rule->production ? rename_variables_in_term(rule->production, rule_instance_counter) : NULL;
+    
+#ifdef DEBUG
+    printf("DEBUG: Original rule head: ");
+    print_term(rule->head);
+    printf("\n");
+    printf("DEBUG: Renamed rule head: ");
+    print_term(renamed_head);
     printf("\n");
 #endif
 
     // For production rules, unify with the production; for regular rules, unify with the head
-    term_t* unify_target = rule->production ? rule->production : rule->head;
+    term_t* unify_target = renamed_production ? renamed_production : renamed_head;
     
     // Try to unify current goal with rule production/head
     if (!unify(current_goal, unify_target, &rule_subst)) {
+#ifdef DEBUG
+        printf("DEBUG: Rule unification failed\n");
+#endif
+        free_term(renamed_head);
+        if (renamed_production) free_term(renamed_production);
         return 0;
     }
 
@@ -1382,15 +1595,50 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
 #ifdef DEBUG
             printf("DEBUG: Goal stack overflow\n");
 #endif
+            free_term(renamed_head);
+            if (renamed_production) free_term(renamed_production);
             return 0;
         }
+#ifdef DEBUG
+        printf("DEBUG: Pushed goal onto recursion stack (depth now: %d)\n", stack->depth);
+#endif
+    } else {
+#ifdef DEBUG
+        printf("DEBUG: Rule is not recursive, skipping goal stack push\n");
+#endif
     }
 
-    // Apply substitution to rule body
+#ifdef DEBUG
+    printf("DEBUG: About to apply substitution to rule body (body_size: %d)\n", rule->body_size);
+#endif
+
+    // Apply substitution to rule body (also rename variables)
     term_t** instantiated_body = malloc(sizeof(term_t*) * rule->body_size);
     for (int i = 0; i < rule->body_size; i++) {
-        instantiated_body[i] = apply_substitution(rule->body[i], &rule_subst);
+        term_t* renamed_body_term = rename_variables_in_term(rule->body[i], rule_instance_counter);
+#ifdef DEBUG
+        printf("DEBUG: Applying substitution to body term %d: ", i);
+        print_term(renamed_body_term);
+        printf("\n");
+        printf("DEBUG: Substitution has %d bindings:\n", rule_subst.count);
+        for (int j = 0; j < rule_subst.count; j++) {
+            printf("DEBUG:   %s = ", rule_subst.bindings[j].var);
+            print_term(rule_subst.bindings[j].term);
+            printf("\n");
+        }
+#endif
+        instantiated_body[i] = apply_substitution(renamed_body_term, &rule_subst);
+        free_term(renamed_body_term);
+#ifdef DEBUG
+        printf("DEBUG: Result: ");
+        print_term(instantiated_body[i]);
+        printf("\n");
+#endif
     }
+
+#ifdef DEBUG
+    printf("DEBUG: Successfully instantiated rule body\n");
+#endif
 
     // Try to satisfy the rule body with depth-first backtracking
     // We need to find each way the body can be satisfied and for each way:
@@ -1402,8 +1650,8 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
     if (rule->body_size == 0) {
         // Empty body - proceed directly to rule completion
         linear_resource_t* produced_resource = NULL;
-        if (rule->production) {
-            term_t* produced_term = apply_substitution(rule->production, &rule_subst);
+        if (renamed_production) {
+            term_t* produced_term = apply_substitution(renamed_production, &rule_subst);
             produced_resource = malloc(sizeof(linear_resource_t));
             produced_resource->fact = produced_term;
             produced_resource->consumed = 0;
@@ -1451,10 +1699,15 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
         free_term(instantiated_body[i]);
     }
     free(instantiated_body);
+    free_term(renamed_head);
+    if (renamed_production) free_term(renamed_production);
 
     // Pop goal from stack
     if (rule->is_recursive) {
         pop_goal(stack);
+#ifdef DEBUG
+        printf("DEBUG: Popped goal from recursion stack (depth now: %d)\n", stack->depth);
+#endif
     }
 
     return found;
@@ -1687,4 +1940,43 @@ void free_variable_list(char** vars, int var_count) {
     for (int i = 0; i < var_count; i++) {
         free(vars[i]);
     }
+}
+
+// Create a filtered substitution containing only the specified variables
+// Also resolves chains of variables to their final values
+void create_filtered_substitution(substitution_t* full_subst, char** target_vars, int target_count, substitution_t* filtered_subst) {
+    filtered_subst->count = 0;
+    
+    for (int i = 0; i < target_count; i++) {
+        char* var = target_vars[i];
+        term_t* final_value = resolve_variable_chain(full_subst, var);
+        
+        if (final_value) {
+            // Add this binding to the filtered substitution
+            if (filtered_subst->count < MAX_VARS) {
+                filtered_subst->bindings[filtered_subst->count].var = malloc(strlen(var) + 1);
+                strcpy(filtered_subst->bindings[filtered_subst->count].var, var);
+                filtered_subst->bindings[filtered_subst->count].term = copy_term(final_value);
+                filtered_subst->count++;
+            }
+            free_term(final_value);
+        }
+    }
+}
+
+// Resolve a variable through a chain of substitutions to get its final value
+term_t* resolve_variable_chain(substitution_t* subst, const char* var) {
+    for (int i = 0; i < subst->count; i++) {
+        if (string_equal(subst->bindings[i].var, var)) {
+            term_t* value = subst->bindings[i].term;
+            
+            // If the value is a variable, recursively resolve it
+            if (value->type == TERM_VAR) {
+                return resolve_variable_chain(subst, value->data.var);
+            } else {
+                return copy_term(value);
+            }
+        }
+    }
+    return NULL; // Variable not found
 }

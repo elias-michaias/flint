@@ -1,0 +1,13 @@
+type person.
+
+alice :: person.
+bob :: person.
+
+parent :: person -> person -> type.
+ancestor :: person -> person -> type.
+
+!p1 :: parent(alice, bob).
+
+simple_rule :: parent($x, $y) => ancestor($x, $y).
+
+?- ancestor(alice, $y).

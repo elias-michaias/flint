@@ -117,10 +117,19 @@ typedef struct persistent_fact {
 
 // Goal stack for recursion detection
 #define MAX_GOAL_STACK_DEPTH 100
+#define MAX_RECURSIVE_DEPTH 10
+#define MAX_GOAL_CACHE 50
 typedef struct goal_stack {
     term_t* goals[MAX_GOAL_STACK_DEPTH];
     int depth;
 } goal_stack_t;
+
+// Goal cache for memoization
+typedef struct goal_cache {
+    term_t* goals[MAX_GOAL_CACHE];
+    int results[MAX_GOAL_CACHE];  // 0 = not resolved, 1 = success, -1 = failure
+    int count;
+} goal_cache_t;
 
 // Linear knowledge base
 typedef struct {
@@ -156,6 +165,11 @@ term_t* create_integer(int64_t value);
 term_t* create_compound(const char* functor, term_t** args, int arity);
 term_t* create_clone(term_t* inner);
 int unify(term_t* t1, term_t* t2, substitution_t* subst);
+int occurs_in_term(const char* var, term_t* term);
+term_t* rename_variables_in_term(term_t* term, int instance_id);
+void create_filtered_substitution(substitution_t* full_subst, char** target_vars, int target_count, substitution_t* filtered_subst);
+term_t* resolve_variable_chain(substitution_t* subst, const char* var);
+int solutions_are_equivalent(substitution_t* s1, substitution_t* s2);
 term_t* apply_substitution(term_t* term, substitution_t* subst);
 void print_term(term_t* term);
 void print_substitution(substitution_t* subst);
@@ -186,6 +200,13 @@ void init_goal_stack(goal_stack_t* stack);
 int push_goal(goal_stack_t* stack, term_t* goal);
 void pop_goal(goal_stack_t* stack);
 int is_goal_in_stack(goal_stack_t* stack, term_t* goal);
+int is_goal_pattern_in_stack(goal_stack_t* stack, term_t* goal);
+int goals_have_same_pattern(term_t* goal1, term_t* goal2);
+
+// Goal cache functions for memoization
+void init_goal_cache(goal_cache_t* cache);
+int check_goal_cache(goal_cache_t* cache, term_t* goal);
+void add_goal_cache(goal_cache_t* cache, term_t* goal, int result);
 
 int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_type);
 const char* get_term_type(linear_kb_t* kb, const char* term_name);
