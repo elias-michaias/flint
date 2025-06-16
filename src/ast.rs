@@ -315,6 +315,48 @@ pub enum Clause {
     },
 }
 
+impl Clause {
+    /// Check if this rule is recursive (produces a predicate that also appears in the body)
+    pub fn is_recursive(&self) -> bool {
+        match self {
+            Clause::Fact { .. } => false,
+            Clause::Rule { body, produces, .. } => {
+                if let Some(production) = produces {
+                    let production_predicate = Self::extract_predicate_name(production);
+                    
+                    // Check if any body term has the same predicate as the production
+                    body.iter().any(|body_term| {
+                        Self::extract_predicate_name(body_term) == production_predicate
+                    })
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    
+    /// Extract the predicate name from a term
+    fn extract_predicate_name(term: &Term) -> String {
+        match term {
+            Term::Atom { name, .. } => name.clone(),
+            Term::Compound { functor, .. } => functor.clone(),
+            Term::Var { name, .. } => name.clone(), // Variables don't have predicates, but return name for completeness
+            Term::Integer(n) => n.to_string(), // Integers don't have predicates, return string representation
+            Term::Clone(inner_term) => Self::extract_predicate_name(inner_term), // Recurse into cloned term
+        }
+    }
+    
+    /// Get the production predicate name if this is a rule with production
+    pub fn get_production_predicate(&self) -> Option<String> {
+        match self {
+            Clause::Rule { produces: Some(production), .. } => {
+                Some(Self::extract_predicate_name(production))
+            }
+            _ => None
+        }
+    }
+}
+
 /// Query to resolve
 #[derive(Debug, Clone)]
 pub struct Query {

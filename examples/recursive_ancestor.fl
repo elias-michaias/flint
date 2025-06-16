@@ -11,5 +11,6 @@ ancestor :: person -> person -> type.
 !p2 :: parent(bob, carol).
 
 ancestor_base :: parent($x, $y) => ancestor($x, $y).
+ancestor_step :: parent($x, $z) & ancestor($z, $y) => ancestor($x, $y).
 
-?- ancestor($x, carol).
+?- ancestor(alice, $y).

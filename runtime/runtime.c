@@ -10,7 +10,7 @@ void init_substitution(substitution_t* subst);
 void free_substitution(substitution_t* subst);
 int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
                                                   term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions, int rule_depth);
+                                                  enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
 
 // Terms equality function - check if two terms are equal
 int terms_equal(term_t* t1, term_t* t2) {
@@ -568,6 +568,26 @@ void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_
             kb->rules[kb->rule_count].body = NULL;
         }
         kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
+        kb->rules[kb->rule_count].is_recursive = 0;  // Default to non-recursive
+        kb->rule_count++;
+    }
+}
+
+// Add a recursive rule (can be reused, marked as recursive)
+void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production) {
+    if (kb->rule_count < MAX_CLAUSES) {
+        kb->rules[kb->rule_count].head = copy_term(head);
+        kb->rules[kb->rule_count].body_size = body_size;
+        if (body_size > 0) {
+            kb->rules[kb->rule_count].body = malloc(sizeof(term_t*) * body_size);
+            for (int i = 0; i < body_size; i++) {
+                kb->rules[kb->rule_count].body[i] = copy_term(body[i]);
+            }
+        } else {
+            kb->rules[kb->rule_count].body = NULL;
+        }
+        kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
+        kb->rules[kb->rule_count].is_recursive = 1;  // Mark as recursive
         kb->rule_count++;
     }
 }
@@ -627,6 +647,36 @@ int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_
             }
         }
         mapping = mapping->next;
+    }
+    return 0;
+}
+
+// Goal stack functions for recursion detection
+void init_goal_stack(goal_stack_t* stack) {
+    stack->depth = 0;
+}
+
+int push_goal(goal_stack_t* stack, term_t* goal) {
+    if (stack->depth >= MAX_GOAL_STACK_DEPTH) {
+        return 0; // Stack overflow
+    }
+    stack->goals[stack->depth] = copy_term(goal);
+    stack->depth++;
+    return 1;
+}
+
+void pop_goal(goal_stack_t* stack) {
+    if (stack->depth > 0) {
+        stack->depth--;
+        free_term(stack->goals[stack->depth]);
+    }
+}
+
+int is_goal_in_stack(goal_stack_t* stack, term_t* goal) {
+    for (int i = 0; i < stack->depth; i++) {
+        if (terms_equal(stack->goals[i], goal)) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -820,7 +870,9 @@ int substitutions_equal(substitution_t* s1, substitution_t* s2) {
 int linear_resolve_query_with_substitution_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, 
                                                   term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
                                                   enhanced_solution_list_t* solutions) {
-    return linear_resolve_query_with_substitution_enhanced_internal(kb, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, 1);
+    goal_stack_t stack;
+    init_goal_stack(&stack);
+    return linear_resolve_query_with_substitution_enhanced_internal(kb, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, 1, &stack);
 }
 
 // Free linear knowledge base
@@ -1160,8 +1212,14 @@ void free_enhanced_solution_list(enhanced_solution_list_t* list) {
 }
 
 int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions) {
+    goal_stack_t stack;
+    init_goal_stack(&stack);
+    return linear_resolve_query_enhanced_with_stack(kb, goals, goal_count, solutions, &stack);
+}
+
+int linear_resolve_query_enhanced_with_stack(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions, goal_stack_t* stack) {
     substitution_t initial_subst = {0};
-    return linear_resolve_query_with_substitution_enhanced(kb, goals, goal_count, goals, goal_count, &initial_subst, solutions);
+    return linear_resolve_query_with_substitution_enhanced_internal(kb, goals, goal_count, goals, goal_count, &initial_subst, solutions, 1, stack);
 }
 
 // Enhanced disjunctive resolution: try to satisfy any one of the goals (OR logic)
@@ -1198,7 +1256,7 @@ int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, i
 
 int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
                                                   term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions, int rule_depth) {
+                                                  enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
     if (goal_count == 0) {
         // Add solution when all original goals are satisfied (regardless of rule depth)
         char* original_vars[MAX_VARS];
@@ -1254,7 +1312,7 @@ int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, te
                 resource->consumed = 1;
             }
             
-            if (linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &local_subst, solutions, 0)) {
+            if (linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &local_subst, solutions, 0, stack)) {
                 found_any = 1;
             }
             
@@ -1275,7 +1333,7 @@ int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, te
     // Try applying rules
     for (int i = 0; i < kb->rule_count; i++) {
         clause_t* rule = &kb->rules[i];
-        if (try_rule_with_backtracking_enhanced(kb, rule, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, rule_depth)) {
+        if (try_rule_with_backtracking_enhanced(kb, rule, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, rule_depth, stack)) {
             found_any = 1;
         }
     }
@@ -1284,9 +1342,19 @@ int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, te
 }
 
 int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth) {
+                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
     term_t* current_goal = goals[0];
     substitution_t rule_subst = *global_subst;
+    
+    // Check for recursion if this is a recursive rule
+    if (rule->is_recursive && is_goal_in_stack(stack, current_goal)) {
+#ifdef DEBUG
+        printf("DEBUG: Recursion detected for goal: ");
+        print_term(current_goal);
+        printf(", skipping recursive rule\n");
+#endif
+        return 0;
+    }
     
 #ifdef DEBUG
     printf("DEBUG: Trying rule for goal: ");
@@ -1307,6 +1375,16 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
     print_term(unify_target);
     printf("\n");
 #endif
+
+    // Push goal onto stack to detect recursion
+    if (rule->is_recursive) {
+        if (!push_goal(stack, current_goal)) {
+#ifdef DEBUG
+            printf("DEBUG: Goal stack overflow\n");
+#endif
+            return 0;
+        }
+    }
 
     // Apply substitution to rule body
     term_t** instantiated_body = malloc(sizeof(term_t*) * rule->body_size);
@@ -1345,7 +1423,7 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
 #ifdef DEBUG
         printf("DEBUG: Continuing with %d remaining goals\n", remaining_count);
 #endif
-        found = linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth);
+        found = linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth, stack);
 
         // Clean up produced resource (backtrack)
         if (produced_resource) {
@@ -1365,7 +1443,7 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
         }
     } else {
         // Non-empty body - use depth-first backtracking to try each way to satisfy the body
-        found = try_rule_body_depth_first(kb, rule, goals, goal_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth, instantiated_body);
+        found = try_rule_body_depth_first(kb, rule, goals, goal_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth, instantiated_body, stack);
     }
 
     // Clean up
@@ -1374,13 +1452,18 @@ int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t*
     }
     free(instantiated_body);
 
+    // Pop goal from stack
+    if (rule->is_recursive) {
+        pop_goal(stack);
+    }
+
     return found;
 }
 
 // Depth-first backtracking for rule body resolution
 int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
                               term_t** original_goals, int original_goal_count, substitution_t* rule_subst,
-                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body) {
+                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body, goal_stack_t* stack) {
     
     // This function should find each way to satisfy the rule body using depth-first backtracking
     // For each way the body is satisfied:
@@ -1395,7 +1478,7 @@ int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, i
     // We need to resolve the body goals one by one, not all at once
     if (resolve_rule_body_recursive(kb, instantiated_body, rule->body_size, 0, rule_subst, 
                                    rule, goals + 1, goal_count - 1, original_goals, original_goal_count, 
-                                   solutions, rule_depth)) {
+                                   solutions, rule_depth, stack)) {
         found_any = 1;
     }
     
@@ -1405,7 +1488,7 @@ int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, i
 // Recursive helper for depth-first rule body resolution
 int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
                                 substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
-                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth) {
+                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
     
     if (body_index >= body_count) {
         // All body goals satisfied - now apply rule production and continue with remaining goals
@@ -1435,7 +1518,7 @@ int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_c
 #endif
         int found = linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, 
                                                                            original_goals, original_goal_count, 
-                                                                           current_subst, solutions, rule_depth);
+                                                                           current_subst, solutions, rule_depth, stack);
 
         // Clean up produced resource (backtrack)
         if (produced_resource) {
@@ -1493,7 +1576,7 @@ int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_c
             
             if (resolve_rule_body_recursive(kb, body_goals, body_count, body_index + 1, &local_subst,
                                            rule, remaining_goals, remaining_count, original_goals, original_goal_count,
-                                           solutions, rule_depth)) {
+                                           solutions, rule_depth, stack)) {
                 found_any = 1;
             }
             
@@ -1504,6 +1587,40 @@ int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_c
         }
     }
     
+    // If no direct resource matching worked, try applying rules to resolve the body goal
+    if (!found_any) {
+#ifdef DEBUG
+        printf("DEBUG: No direct resource match for body goal, trying rules\n");
+#endif
+        // Apply current substitution to the body goal before trying to resolve it
+        term_t* instantiated_goal = apply_substitution(current_body_goal, current_subst);
+        
+#ifdef DEBUG
+        printf("DEBUG: Instantiated body goal for rule resolution: ");
+        print_term(instantiated_goal);
+        printf("\n");
+#endif
+        
+        // Try to resolve the instantiated body goal using rules
+        term_t* body_goal_array[1] = { instantiated_goal };
+        
+        // Try to resolve this single goal - if it succeeds, continue with next body goal
+        if (linear_resolve_query_with_substitution_enhanced_internal(kb, body_goal_array, 1, 
+                                                                    body_goal_array, 1, current_subst, 
+                                                                    solutions, rule_depth + 1, stack)) {
+#ifdef DEBUG
+            printf("DEBUG: Body goal resolved successfully via rules, continuing with next body goal\n");
+#endif                                                           
+            if (resolve_rule_body_recursive(kb, body_goals, body_count, body_index + 1, current_subst,
+                                           rule, remaining_goals, remaining_count, original_goals, original_goal_count,
+                                           solutions, rule_depth, stack)) {
+                found_any = 1;
+            }
+        }
+        
+        free_term(instantiated_goal);
+    }
+
     return found_any;
 }
 

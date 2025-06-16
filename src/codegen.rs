@@ -559,6 +559,14 @@ impl CodeGenerator {
                     }
                 }
                 Clause::Rule { head, body, produces } => {
+                    // Check if this rule is recursive
+                    let is_recursive = clause.is_recursive();
+                    
+                    if is_recursive {
+                        writeln!(self.output, "    // Recursive rule detected: {}", 
+                            self.term_to_string(head))?;
+                    }
+                    
                     // Generate code to add the rule to the knowledge base
                     let head_code = self.generate_term_creation(head)?;
                     if body.is_empty() {
@@ -580,7 +588,12 @@ impl CodeGenerator {
                             "NULL".to_string()
                         };
                         
-                        writeln!(self.output, "    add_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
+                        // Add rule with recursion flag
+                        if is_recursive {
+                            writeln!(self.output, "    add_recursive_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
+                        } else {
+                            writeln!(self.output, "    add_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
+                        }
                     }
                 }
             }

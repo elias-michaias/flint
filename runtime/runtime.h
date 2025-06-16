@@ -58,6 +58,7 @@ typedef struct {
     term_t** body;
     int body_size;
     term_t* production;  // Optional production term (NULL if no production)
+    int is_recursive;    // 1 if this rule is recursive, 0 otherwise
 } clause_t;
 
 typedef struct {
@@ -114,6 +115,13 @@ typedef struct persistent_fact {
     struct persistent_fact* next;
 } persistent_fact_t;
 
+// Goal stack for recursion detection
+#define MAX_GOAL_STACK_DEPTH 100
+typedef struct goal_stack {
+    term_t* goals[MAX_GOAL_STACK_DEPTH];
+    int depth;
+} goal_stack_t;
+
 // Linear knowledge base
 typedef struct {
     linear_resource_t* resources;  // Linear facts
@@ -169,8 +177,16 @@ linear_path_t* copy_linear_path(linear_path_t* path);
 linear_kb_t* create_linear_kb();
 void add_linear_fact(linear_kb_t* kb, term_t* fact);
 void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production);
+void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production);
 void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name);
 void add_union_mapping(linear_kb_t* kb, const char* variant_type, const char* parent_type);
+
+// Goal stack functions for recursion detection
+void init_goal_stack(goal_stack_t* stack);
+int push_goal(goal_stack_t* stack, term_t* goal);
+void pop_goal(goal_stack_t* stack);
+int is_goal_in_stack(goal_stack_t* stack, term_t* goal);
+
 int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_type);
 const char* get_term_type(linear_kb_t* kb, const char* term_name);
 int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact);
@@ -234,15 +250,16 @@ void free_enhanced_solution_list(enhanced_solution_list_t* list);
 void add_persistent_fact(linear_kb_t* kb, term_t* fact);
 int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
 int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
+int linear_resolve_query_enhanced_with_stack(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions, goal_stack_t* stack);
 int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
 int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth);
+                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
 int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
                               term_t** original_goals, int original_goal_count, substitution_t* rule_subst,
-                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body);
+                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body, goal_stack_t* stack);
 int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
                                 substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
-                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth);
+                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
 
 // Helper functions
 int has_variables(term_t* term);
