@@ -27,24 +27,27 @@ wants_item :: customer -> item -> type.
 // Define the transaction predicate
 can_buy :: customer -> item -> dollar -> type.
 
-// Store inventory - persistent facts (always available)
-persistent inv1 :: has_item(bread).
-persistent inv2 :: has_item(milk).
+// Store inventory - linear resources (consumed when sold)
+inv1 :: has_item(bread).
+inv2 :: has_item(milk).
 
 // Customer money - linear resources (money gets consumed when spent)
 m1 :: has_money(alice, dollar1).
-m2 :: has_money(alice, dollar2).
+?m2 :: has_money(alice, dollar2).
 ?m3 :: has_money(bob, dollar3).
 
 // Customer preferences - some are optional (might not exist)
 w1 :: wants_item(alice, bread).
 ?w2 :: wants_item(alice, milk).
-w3 :: wants_item(bob, bread).
+?w3 :: wants_item(bob, bread).
 
-// Transaction rule using persistent store inventory
+// Transaction rule - consumes money, item, and customer preference
 transaction_rule :: 
-    has_money($customer, $money) & !has_item($item) & wants_item($customer, $item)
+    has_money($customer, $money) 
+    & has_item($item) 
+    & wants_item($customer, $item)
     => can_buy($customer, $item, $money).
 
 // Main goal - Alice can buy bread
-main :: can_buy(alice, bread, dollar1).
+main :: 
+    can_buy(alice, $item, $dollar).

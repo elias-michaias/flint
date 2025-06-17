@@ -331,32 +331,44 @@ term_t* copy_term(term_t* term) {
     return NULL;
 }
 
+// Apply a substitution to a term, returning a new term with variables replaced
 term_t* apply_substitution(term_t* term, substitution_t* subst) {
     if (!term || !subst) return copy_term(term);
     
     switch (term->type) {
         case TERM_VAR:
+            // Look for this variable in the substitution
             for (int i = 0; i < subst->count; i++) {
-                if (string_equal(term->data.var, subst->bindings[i].var)) {
-                    return apply_substitution(subst->bindings[i].term, subst);
+                if (strcmp(term->data.var, subst->bindings[i].var) == 0) {
+                    return copy_term(subst->bindings[i].term);
                 }
             }
+            // Variable not found in substitution, return as-is
             return copy_term(term);
             
-        case TERM_COMPOUND: {
-            term_t** new_args = NULL;
-            if (term->data.compound.arity > 0) {
-                new_args = malloc(sizeof(term_t*) * term->data.compound.arity);
-                for (int i = 0; i < term->data.compound.arity; i++) {
-                    new_args[i] = apply_substitution(term->data.compound.args[i], subst);
-                }
+        case TERM_COMPOUND:
+            // Apply substitution recursively to all arguments
+            if (term->data.compound.arity == 0) {
+                return copy_term(term);
             }
+            
+            term_t** new_args = malloc(sizeof(term_t*) * term->data.compound.arity);
+            for (int i = 0; i < term->data.compound.arity; i++) {
+                new_args[i] = apply_substitution(term->data.compound.args[i], subst);
+            }
+            
             return create_compound(term->data.compound.functor, new_args, term->data.compound.arity);
-        }
-        
-        default:
+            
+        case TERM_CLONE:
+            return create_clone(apply_substitution(term->data.cloned, subst));
+            
+        case TERM_ATOM:
+        case TERM_INTEGER:
+            // These don't contain variables, return as-is
             return copy_term(term);
     }
+    
+    return copy_term(term);
 }
 
 // Compose two substitutions: dest = compose(dest, src)
@@ -606,9 +618,16 @@ linear_kb_t* create_linear_kb() {
     kb->resources = NULL;
     kb->rules = malloc(sizeof(clause_t) * MAX_CLAUSES);
     kb->rule_count = 0;
+    kb->resource_count = 0;
     kb->type_mappings = NULL;
     kb->union_mappings = NULL;
     kb->persistent_facts = NULL;
+    kb->auto_deallocate = 0; // Default: auto deallocation disabled
+    kb->total_memory_allocated = 0;
+    kb->peak_memory_usage = 0;
+    kb->checkpoint_count = 0;
+    kb->checkpoints = NULL;
+    kb->consumption_metadata = NULL; // Initialize consumption metadata
     return kb;
 }
 
@@ -618,456 +637,175 @@ void add_linear_fact(linear_kb_t* kb, term_t* fact) {
     resource->fact = copy_term(fact);
     resource->consumed = 0;
     resource->persistent = 0; // Mark as linear (consumable)
+    resource->deallocated = 0;
+    resource->memory_size = estimate_term_memory_size(fact);
+    resource->allocation_site = "fact";
     resource->next = kb->resources;
     kb->resources = resource;
+    kb->resource_count++;
+    
+    #ifdef DEBUG
+    printf("DEBUG: MEMORY ALLOCATED - Added resource: ");
+    print_term(fact);
+    printf(" (allocated %zu bytes, total resources: %d)\n", resource->memory_size, kb->resource_count);
+    #endif
 }
 
-// Add a rule (can be reused)
-void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production) {
-    if (kb->rule_count < MAX_CLAUSES) {
-        kb->rules[kb->rule_count].head = copy_term(head);
-        kb->rules[kb->rule_count].body_size = body_size;
-        if (body_size > 0) {
-            kb->rules[kb->rule_count].body = malloc(sizeof(term_t*) * body_size);
-            for (int i = 0; i < body_size; i++) {
-                kb->rules[kb->rule_count].body[i] = copy_term(body[i]);
+// Set automatic deallocation mode
+void set_auto_deallocation(linear_kb_t* kb, int enabled) {
+    kb->auto_deallocate = enabled;
+    #ifdef DEBUG
+    printf("DEBUG: Auto deallocation %s\n", enabled ? "enabled" : "disabled");
+    #endif
+}
+
+// Mark a fact as optional (won't cause errors if not consumed)
+void add_optional_linear_fact(linear_kb_t* kb, term_t* fact) {
+    linear_resource_t* resource = malloc(sizeof(linear_resource_t));
+    resource->fact = fact;
+    resource->consumed = 0;
+    resource->deallocated = 0;
+    resource->persistent = 0;  // Linear but optional
+    resource->memory_size = estimate_term_memory_size(fact);
+    resource->allocation_site = "optional_fact";
+    resource->next = kb->resources;
+    kb->resources = resource;
+    kb->resource_count++;
+    
+    #ifdef DEBUG
+    printf("DEBUG: Added optional linear fact: ");
+    print_term(fact);
+    printf(" (estimated size: %zu bytes)\n", resource->memory_size);
+    #endif
+}
+
+// Enhanced fact addition with exponential support
+void add_exponential_linear_fact(linear_kb_t* kb, term_t* fact) {
+    // Exponential facts are essentially persistent but with different semantics
+    linear_resource_t* resource = malloc(sizeof(linear_resource_t));
+    resource->fact = fact;
+    resource->consumed = 0;
+    resource->deallocated = 0;
+    resource->persistent = 2;  // 2 = exponential (can be used multiple times)
+    resource->memory_size = estimate_term_memory_size(fact);
+    resource->allocation_site = "exponential_fact";
+    resource->next = kb->resources;
+    kb->resources = resource;
+    kb->resource_count++;
+    
+    #ifdef DEBUG
+    printf("DEBUG: Added exponential linear fact: ");
+    print_term(fact);
+    printf(" (estimated size: %zu bytes)\n", resource->memory_size);
+    #endif
+}
+
+// Memory size estimation for automatic management
+size_t estimate_term_memory_size(term_t* term) {
+    if (!term) return 0;
+    
+    size_t size = sizeof(term_t);
+    
+    switch (term->type) {
+        case TERM_ATOM:
+            if (term->data.atom) {
+                size += strlen(term->data.atom) + 1;
             }
-        } else {
-            kb->rules[kb->rule_count].body = NULL;
-        }
-        kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
-        kb->rules[kb->rule_count].is_recursive = 0;  // Default to non-recursive
-        kb->rule_count++;
-    }
-}
-
-// Add a recursive rule (can be reused, marked as recursive)
-void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production) {
-    if (kb->rule_count < MAX_CLAUSES) {
-        kb->rules[kb->rule_count].head = copy_term(head);
-        kb->rules[kb->rule_count].body_size = body_size;
-        if (body_size > 0) {
-            kb->rules[kb->rule_count].body = malloc(sizeof(term_t*) * body_size);
-            for (int i = 0; i < body_size; i++) {
-                kb->rules[kb->rule_count].body[i] = copy_term(body[i]);
+            break;
+        case TERM_VAR:
+            if (term->data.var) {
+                size += strlen(term->data.var) + 1;
             }
-        } else {
-            kb->rules[kb->rule_count].body = NULL;
-        }
-        kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
-        kb->rules[kb->rule_count].is_recursive = 1;  // Mark as recursive
-        kb->rule_count++;
-    }
-}
-
-// Add a type mapping for a term
-void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name) {
-    type_mapping_t* mapping = malloc(sizeof(type_mapping_t));
-    mapping->term_name = malloc(strlen(term_name) + 1);
-    strcpy(mapping->term_name, term_name);
-    mapping->type_name = malloc(strlen(type_name) + 1);
-    strcpy(mapping->type_name, type_name);
-    mapping->next = kb->type_mappings;
-    kb->type_mappings = mapping;
-}
-
-// Get the type of a term
-const char* get_term_type(linear_kb_t* kb, const char* term_name) {
-    type_mapping_t* mapping = kb->type_mappings;
-    while (mapping) {
-        if (strcmp(mapping->term_name, term_name) == 0) {
-            return mapping->type_name;
-        }
-        mapping = mapping->next;
-    }
-    return NULL;
-}
-
-// Add a union hierarchy mapping (variant -> parent type)
-void add_union_mapping(linear_kb_t* kb, const char* variant_type, const char* parent_type) {
-    union_mapping_t* mapping = malloc(sizeof(union_mapping_t));
-    mapping->variant_type = malloc(strlen(variant_type) + 1);
-    strcpy(mapping->variant_type, variant_type);
-    mapping->parent_type = malloc(strlen(parent_type) + 1);
-    strcpy(mapping->parent_type, parent_type);
-    mapping->next = kb->union_mappings;
-    kb->union_mappings = mapping;
-}
-
-// Check if a variant type can be treated as a parent type (with transitive closure)
-int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_type) {
-    // Direct match
-    if (strcmp(variant_type, parent_type) == 0) {
-        return 1;
+            break;
+        case TERM_COMPOUND:
+            if (term->data.compound.functor) {
+                size += strlen(term->data.compound.functor) + 1;
+            }
+            size += term->data.compound.arity * sizeof(term_t*);
+            for (int i = 0; i < term->data.compound.arity; i++) {
+                size += estimate_term_memory_size(term->data.compound.args[i]);
+            }
+            break;
+        case TERM_CLONE:
+            size += estimate_term_memory_size(term->data.cloned);
+            break;
+        case TERM_INTEGER:
+            // Just the union size, already counted in sizeof(term_t)
+            break;
     }
     
-    // Look for direct mapping
-    union_mapping_t* mapping = kb->union_mappings;
-    while (mapping) {
-        if (strcmp(mapping->variant_type, variant_type) == 0) {
-            // Found a mapping for variant_type -> intermediate_type
-            if (strcmp(mapping->parent_type, parent_type) == 0) {
-                return 1; // Direct match
-            }
-            // Recursively check if intermediate_type is a variant of parent_type
-            if (is_variant_of(kb, mapping->parent_type, parent_type)) {
-                return 1;
-            }
-        }
-        mapping = mapping->next;
+    return size;
+}
+
+// Automatic deallocation when resource is consumed
+void auto_deallocate_resource(linear_kb_t* kb, linear_resource_t* resource) {
+    if (!kb->auto_deallocate || resource->persistent) {
+        return;  // Don't deallocate persistent or when auto-deallocation is disabled
     }
-    return 0;
-}
-
-// Goal stack functions for recursion detection
-void init_goal_stack(goal_stack_t* stack) {
-    stack->depth = 0;
-}
-
-int push_goal(goal_stack_t* stack, term_t* goal) {
-    if (stack->depth >= MAX_GOAL_STACK_DEPTH) {
-        return 0; // Stack overflow
-    }
-    stack->goals[stack->depth] = copy_term(goal);
-    stack->depth++;
-    return 1;
-}
-
-void pop_goal(goal_stack_t* stack) {
-    if (stack->depth > 0) {
-        stack->depth--;
-        free_term(stack->goals[stack->depth]);
-    }
-}
-
-int is_goal_in_stack(goal_stack_t* stack, term_t* goal) {
-    for (int i = 0; i < stack->depth; i++) {
-        if (terms_equal(stack->goals[i], goal)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// Check if a goal is recursively related to any goal in the stack
-// This checks for same functor/arity pattern to catch recursive calls with different variables
-int is_goal_pattern_in_stack(goal_stack_t* stack, term_t* goal) {
-    for (int i = 0; i < stack->depth; i++) {
-        if (goals_have_same_pattern(stack->goals[i], goal)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// Check if two goals have the same pattern for recursion detection
-// For compound terms: same functor, same arity, and same ground arguments in key positions
-int goals_have_same_pattern(term_t* goal1, term_t* goal2) {
-    if (goal1->type != goal2->type) return 0;
     
-    if (goal1->type == TERM_COMPOUND && goal2->type == TERM_COMPOUND) {
-        // Must have same functor and arity
-        if (strcmp(goal1->data.compound.functor, goal2->data.compound.functor) != 0) return 0;
-        if (goal1->data.compound.arity != goal2->data.compound.arity) return 0;
+    if (!resource->deallocated) {
+        #ifdef DEBUG
+        printf("DEBUG: Auto-deallocating consumed resource: ");
+        print_term(resource->fact);
+        printf(" (freed %zu bytes)\n", resource->memory_size);
+        #endif
         
-        // For recursion detection, check if the first ground argument is the same
-        // This handles cases like ancestor(alice, $y) vs ancestor(alice, $z)
-        if (goal1->data.compound.arity > 0) {
-            term_t* arg1_1 = goal1->data.compound.args[0];
-            term_t* arg1_2 = goal2->data.compound.args[0];
+        // Mark as deallocated but don't actually free yet (for debugging)
+        resource->deallocated = 1;
+        
+        // In a production system, you might actually free the memory here:
+        // free_term(resource->fact);
+        // resource->fact = NULL;
+    }
+}
+
+// Enhanced resource consumption with automatic deallocation
+int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution_t* subst) {
+    linear_resource_t* current = kb->resources;
+    
+    while (current != NULL) {
+        if (!current->consumed && !current->deallocated) {
+            // Try to unify with the goal
+            substitution_t temp_subst = {0};
+            init_substitution(&temp_subst);
+            copy_substitution(&temp_subst, subst);
             
-            // If both first arguments are ground (atoms), they must be equal
-            if (arg1_1->type == TERM_ATOM && arg1_2->type == TERM_ATOM) {
-                return strcmp(arg1_1->data.atom, arg1_2->data.atom) == 0;
-            }
-            
-            // If one is ground and one is variable, consider them different patterns
-            if ((arg1_1->type == TERM_ATOM && arg1_2->type == TERM_VAR) ||
-                (arg1_1->type == TERM_VAR && arg1_2->type == TERM_ATOM)) {
-                return 0;
-            }
-        }
-        
-        return 1; // Same pattern for recursion purposes
-    }
-    
-    if (goal1->type == TERM_ATOM && goal2->type == TERM_ATOM) {
-        return strcmp(goal1->data.atom, goal2->data.atom) == 0;
-    }
-    
-    return terms_equal(goal1, goal2);
-}
-
-// Goal cache functions for memoization
-void init_goal_cache(goal_cache_t* cache) {
-    cache->count = 0;
-}
-
-int check_goal_cache(goal_cache_t* cache, term_t* goal) {
-    for (int i = 0; i < cache->count; i++) {
-        if (terms_equal(cache->goals[i], goal)) {
-            return cache->results[i];
-        }
-    }
-    return 0; // Not found in cache
-}
-
-void add_goal_cache(goal_cache_t* cache, term_t* goal, int result) {
-    if (cache->count < MAX_GOAL_CACHE) {
-        cache->goals[cache->count] = copy_term(goal);
-        cache->results[cache->count] = result;
-        cache->count++;
-    }
-}
-
-// Check if a resource is persistent (cloned)
-int is_persistent_resource(term_t* fact) {
-    return fact->type == TERM_CLONE;
-}
-
-// Get the inner term from a cloned term
-term_t* get_inner_term(term_t* term) {
-    if (term->type == TERM_CLONE) {
-        return term->data.cloned;
-    }
-    return term;
-}
-
-// Check if a goal can unify with a fact based on type matching
-int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact) {
-    // Handle cloned facts - unify with the inner term
-    term_t* actual_fact = get_inner_term(fact);
-    
-    // First try direct unification
-    substitution_t temp_subst = {0};
-    if (unify(goal, actual_fact, &temp_subst)) {
-        return 1;
-    }
-    
-    // If direct unification fails, try type-based matching
-    if (goal->type == TERM_ATOM && actual_fact->type == TERM_ATOM) {
-        // Check if goal is a type name and fact is an instance of that type
-        const char* fact_type = get_term_type(kb, actual_fact->data.atom);
-        if (fact_type) {
-            // Direct type match
-            if (strcmp(goal->data.atom, fact_type) == 0) {
-                return 1;
-            }
-            // Union hierarchy match: check if fact_type is a variant of goal type
-            if (is_variant_of(kb, fact_type, goal->data.atom)) {
-                return 1;
-            }
-        }
-    }
-    
-    return 0;
-}
-
-// Reset all consumed resources (for new queries)
-void reset_consumed_resources(linear_kb_t* kb) {
-    linear_resource_t* resource = kb->resources;
-    while (resource) {
-        resource->consumed = 0;
-        resource = resource->next;
-    }
-}
-
-// Save the current state of consumed resources for backtracking
-consumed_state_t* save_consumed_state(linear_kb_t* kb) {
-    consumed_state_t* state = NULL;
-    linear_resource_t* resource = kb->resources;
-    
-    while (resource) {
-        consumed_state_t* entry = malloc(sizeof(consumed_state_t));
-        entry->resource = resource;
-        entry->was_consumed = resource->consumed;
-        entry->next = state;
-        state = entry;
-        resource = resource->next;
-    }
-    return state;
-}
-
-void restore_consumed_state(consumed_state_t* state) {
-    while (state) {
-        state->resource->consumed = state->was_consumed;
-        consumed_state_t* next = state->next;
-        free(state);
-        state = next;
-    }
-}
-
-// Check if a fact exists in the knowledge base
-int fact_exists(linear_kb_t* kb, term_t* fact) {
-    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed && terms_equal(resource->fact, fact)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// Linear resolve disjunctive query
-int linear_resolve_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path) {
-    // Try to satisfy any one of the goals (OR logic)
-    for (int i = 0; i < goal_count; i++) {
-        // Create a single-goal array
-        term_t* single_goal[1] = { goals[i] };
-        
-        // Save the consumed state before trying this goal
-        consumed_state_t* saved_state = save_consumed_state(kb);
-        
-        // Try to resolve this single goal
-        int result = linear_resolve_query_with_path(kb, single_goal, 1, goals[i], NULL, path);
-        
-        if (result) {
-            // Success! This goal was satisfied
-            return 1;
-        }
-        
-        // Failed, restore state and try next goal
-        restore_consumed_state(saved_state);
-    }
-    
-    // None of the goals could be satisfied
-    return 0;
-}
-
-// Find matching resources for a rule
-int find_matching_resources(linear_kb_t* kb, clause_t* rule, linear_resource_t** resources, substitution_t* subst) {
-    (void)subst; // Suppress unused parameter warning
-    // This is a simplified implementation
-    // In practice, this would need to find all combinations of resources
-    // that can unify with the rule's body terms
-    
-    int matched_count = 0;
-    
-    for (int i = 0; i < rule->body_size && matched_count < 10; i++) {
-        term_t* body_term = rule->body[i];
-        
-        // Find a resource that matches this body term
-        for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-            if (!resource->consumed) {
-                substitution_t temp_subst = {0};
-                if (unify(body_term, resource->fact, &temp_subst)) {
-                    resources[matched_count++] = resource;
-                    // In a full implementation, we'd compose substitutions here
-                    break;
+            if (unify_terms(current->fact, goal, &temp_subst)) {
+                // Resource matches - for persistent resources, don't mark as consumed
+                if (current->persistent == 0) {
+                    // Linear resource: consume it  
+                    current->consumed = 1;
+                    #ifdef DEBUG
+                    printf("DEBUG: Consumed linear resource: ");
+                    print_term(current->fact);
+                    printf("\n");
+                    #endif
+                } else {
+                    // Persistent resource: use but don't consume
+                    #ifdef DEBUG
+                    printf("DEBUG: Used persistent resource (not consumed): ");
+                    print_term(current->fact);
+                    printf("\n");
+                    #endif
                 }
+                
+                copy_substitution(subst, &temp_subst);
+                
+                // Auto-deallocate if enabled and not persistent/exponential
+                if (current->persistent == 0) {  // Only auto-deallocate truly linear resources
+                    auto_deallocate_resource(kb, current);
+                }
+                
+                free_substitution(&temp_subst);
+                return 1;  // Successfully consumed
             }
+            
+            free_substitution(&temp_subst);
         }
+        current = current->next;
     }
     
-    return matched_count == rule->body_size;
-}
-
-// Check if body conditions can be satisfied
-int can_satisfy_body_conditions(linear_kb_t* kb, clause_t* rule, int body_index, 
-                               linear_resource_t** used_resources) {
-    // Simplified implementation
-    if (body_index >= rule->body_size) {
-        return 1; // All body terms satisfied
-    }
-    
-    term_t* body_term = rule->body[body_index];
-    
-    // Find an available resource that matches this body term
-    for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed && terms_equal(resource->fact, body_term)) {
-            used_resources[body_index] = resource;
-            return can_satisfy_body_conditions(kb, rule, body_index + 1, used_resources);
-        }
-    }
-    
-    return 0;
-}
-
-// Check if substitutions are equal
-int substitutions_equal(substitution_t* s1, substitution_t* s2) {
-    if (s1->count != s2->count) {
-        return 0;
-    }
-    
-    for (int i = 0; i < s1->count; i++) {
-        int found = 0;
-        for (int j = 0; j < s2->count; j++) {
-            if (strcmp(s1->bindings[i].var, s2->bindings[j].var) == 0 &&
-                terms_equal(s1->bindings[i].term, s2->bindings[j].term)) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            return 0;
-        }
-    }
-    
-    return 1;
-}
-
-// Wrapper function for external calls (top-level)
-int linear_resolve_query_with_substitution_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions) {
-    goal_stack_t stack;
-    init_goal_stack(&stack);
-    return linear_resolve_query_with_substitution_enhanced_internal(kb, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, 1, &stack);
-}
-
-// Free linear knowledge base
-void free_linear_kb(linear_kb_t* kb) {
-    if (!kb) return;
-    
-    // Free resources
-    linear_resource_t* resource = kb->resources;
-    while (resource) {
-        linear_resource_t* next = resource->next;
-        if (resource->fact) {
-            free_term(resource->fact);
-        }
-        free(resource);
-        resource = next;
-    }
-    
-    // Free rules
-    for (int i = 0; i < kb->rule_count; i++) {
-        if (kb->rules[i].head) {
-            free_term(kb->rules[i].head);
-        }
-        for (int j = 0; j < kb->rules[i].body_size; j++) {
-            if (kb->rules[i].body[j]) {
-                free_term(kb->rules[i].body[j]);
-            }
-        }
-        if (kb->rules[i].body) {
-            free(kb->rules[i].body);
-        }
-        if (kb->rules[i].production) {
-            free_term(kb->rules[i].production);
-        }
-    }
-    
-    // Free type mappings
-    type_mapping_t* type_mapping = kb->type_mappings;
-    while (type_mapping) {
-        type_mapping_t* next = type_mapping->next;
-        free(type_mapping->term_name);
-        free(type_mapping->type_name);
-        free(type_mapping);
-        type_mapping = next;
-    }
-    
-    // Free union mappings  
-    union_mapping_t* union_mapping = kb->union_mappings;
-    while (union_mapping) {
-        union_mapping_t* next = union_mapping->next;
-        free(union_mapping->variant_type);
-        free(union_mapping->parent_type);
-        free(union_mapping);
-        union_mapping = next;
-    }
-    
-    free(kb);
+    return 0;  // No matching resource found
 }
 
 // Linear resolve query with path
@@ -1123,14 +861,53 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     // Try to satisfy the first goal
     term_t* current_goal = goals[0];
     
-    // First, check if the goal is a rule name and try to apply that specific rule
-    if (current_goal->type == TERM_ATOM) {
-        for (int rule_idx = 0; rule_idx < kb->rule_count; rule_idx++) {
-            clause_t* rule = &kb->rules[rule_idx];
-            
-            // Check if this rule's head matches the goal (rule name)
-            if (rule->head && rule->head->type == TERM_ATOM && 
-                strcmp(rule->head->data.atom, current_goal->data.atom) == 0) {
+    // Try rules to derive the goal (works for both atoms and compounds)
+    for (int rule_idx = 0; rule_idx < kb->rule_count; rule_idx++) {
+        clause_t* rule = &kb->rules[rule_idx];
+        
+        #ifdef DEBUG
+        printf("DEBUG: Checking rule %d with head: ", rule_idx);
+        print_term(rule->head);
+        printf(" and production: ");
+        if (rule->production) {
+            print_term(rule->production);
+        } else {
+            printf("NULL");
+        }
+        printf("\n");
+        #endif
+        
+        // Check if this rule can produce the goal we're looking for
+        int rule_matches = 0;
+        substitution_t rule_subst = {0};  // Move substitution to broader scope
+        init_substitution(&rule_subst);
+        
+        if (rule->head && rule->head->type == TERM_ATOM && current_goal->type == TERM_ATOM &&
+            strcmp(rule->head->data.atom, current_goal->data.atom) == 0) {
+            // Direct head match (traditional Prolog-style rule for atoms)
+            rule_matches = 1;
+            #ifdef DEBUG
+            printf("DEBUG: Rule head matches goal directly\n");
+            #endif
+        } else if (rule->production) {
+            // Check if the rule's production matches the goal (linear logic production rule)
+            if (unify_terms(rule->production, current_goal, &rule_subst)) {
+                rule_matches = 1;
+                #ifdef DEBUG
+                printf("DEBUG: Rule production matches goal: ");
+                print_term(rule->production);
+                printf(" with substitution: ");
+                print_substitution(&rule_subst);
+                printf("\n");
+                #endif
+            } else {
+                #ifdef DEBUG
+                printf("DEBUG: Rule production does not match goal\n");
+                #endif
+            }
+        }
+        
+        if (rule_matches) {
                 
                 #ifdef DEBUG
                 printf("DEBUG: Attempting to apply rule '%s'\n", current_goal->data.atom);
@@ -1143,23 +920,58 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                 
                 for (int body_idx = 0; body_idx < rule->body_size; body_idx++) {
                     term_t* body_term = rule->body[body_idx];
+                    
+                    // Apply the substitution from rule-goal unification to the body term
+                    term_t* substituted_body_term = apply_substitution(body_term, &rule_subst);
+                    
                     int found = 0;
                     
-                    // Try to find a resource that matches this body term (with type compatibility)
-                    // For now, we still take the first match, but we could implement backtracking here
+                    #ifdef DEBUG
+                    printf("DEBUG: Looking for resource matching: ");
+                    print_term(substituted_body_term);
+                    printf("\n");
+                    #endif
+                    
+                    // Try to find a resource that matches this substituted body term
                     for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-                        if (!resource->consumed && can_unify_with_type(kb, body_term, resource->fact)) {
-                            resource->consumed = 1;
-                            consumed_resources[consumed_count++] = resource;
-                            found = 1;
-                            #ifdef DEBUG
-                            printf("DEBUG: Consuming resource: ");
-                            print_term(resource->fact);
-                            printf("\n");
-                            #endif
-                            break; // TODO: For full backtracking, we'd need to try all alternatives
+                        if (!resource->consumed && !resource->deallocated) {
+                            substitution_t match_subst = {0};
+                            init_substitution(&match_subst);
+                            
+                            if (unify_terms(substituted_body_term, resource->fact, &match_subst)) {
+                                // Found a matching resource
+                                if (resource->persistent == 0) {
+                                    // Linear resource: consume and deallocate it
+                                    resource->consumed = 1;
+                                    consumed_resources[consumed_count++] = resource;
+                                    
+                                    #ifdef DEBUG
+                                    printf("DEBUG: Consuming linear resource: ");
+                                    print_term(resource->fact);
+                                    printf("\n");
+                                    #endif
+                                    
+                                    // Deallocate for memory efficiency
+                                    auto_deallocate_resource(kb, resource);
+                                    
+                                } else {
+                                    // Persistent resource: use but don't consume
+                                    #ifdef DEBUG
+                                    printf("DEBUG: Using persistent resource (not consumed): ");
+                                    print_term(resource->fact);
+                                    printf("\n");
+                                    #endif
+                                }
+                                
+                                found = 1;
+                                free_substitution(&match_subst);
+                                break;
+                            }
+                            free_substitution(&match_subst);
                         }
                     }
+                    
+                    free_term(substituted_body_term);
                     
                     if (!found) {
                         #ifdef DEBUG
@@ -1205,8 +1017,9 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     }
                 }
             }
+            // Clean up rule substitution before trying next rule
+            free_substitution(&rule_subst);
         }
-    }
     
     // Check if we have a direct fact that matches this goal
     for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
@@ -1247,52 +1060,206 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     return 0; // Failed to satisfy all goals
 }
 
-// Check if an enhanced solution is equivalent to a substitution
-int enhanced_solutions_are_equivalent(enhanced_solution_t* solution, substitution_t* subst) {
-    if (solution->binding_count != subst->count) {
-        return 0;
+// Helper function to copy substitutions
+void copy_substitution(substitution_t* dest, substitution_t* src) {
+    if (!dest || !src) return;
+    dest->count = src->count;
+    for (int i = 0; i < src->count && i < MAX_VARS; i++) {
+        dest->bindings[i] = src->bindings[i];
+    }
+}
+
+// Basic unification for terms (simplified)
+int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
+    if (!term1 || !term2) return 0;
+    
+    // Extract inner terms from persistent resources (cloned terms)
+    term_t* actual_term1 = get_inner_term(term1);
+    term_t* actual_term2 = get_inner_term(term2);
+    
+    if (actual_term1->type == TERM_VAR) {
+        // Variable unifies with anything
+        return add_binding(subst, actual_term1->data.var, actual_term2);
     }
     
-    for (int i = 0; i < subst->count; i++) {
-        int found = 0;
-        for (int j = 0; j < solution->binding_count; j++) {
-            if (string_equal(subst->bindings[i].var, solution->bindings[j].var_name) &&
-                terms_equal(subst->bindings[i].term, solution->bindings[j].value)) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
+    if (actual_term2->type == TERM_VAR) {
+        // Variable unifies with anything  
+        return add_binding(subst, actual_term2->data.var, actual_term1);
+    }
+    
+    if (actual_term1->type == TERM_ATOM && actual_term2->type == TERM_ATOM) {
+        return strcmp(actual_term1->data.atom, actual_term2->data.atom) == 0;
+    }
+    
+    if (actual_term1->type == TERM_INTEGER && actual_term2->type == TERM_INTEGER) {
+        return actual_term1->data.integer == actual_term2->data.integer;
+    }
+    
+    if (actual_term1->type == TERM_COMPOUND && actual_term2->type == TERM_COMPOUND) {
+        if (strcmp(actual_term1->data.compound.functor, actual_term2->data.compound.functor) != 0) {
             return 0;
         }
+        if (actual_term1->data.compound.arity != actual_term2->data.compound.arity) {
+            return 0;
+        }
+        for (int i = 0; i < actual_term1->data.compound.arity; i++) {
+            if (!unify_terms(actual_term1->data.compound.args[i], actual_term2->data.compound.args[i], subst)) {
+                return 0;
+            }
+        }
+        return 1;
     }
     
-    return 1;
+    return 0; // Different types don't unify
 }
 
-// Simple solution list for backward compatibility
-solution_list_t* create_solution_list() {
-    solution_list_t* list = malloc(sizeof(solution_list_t));
-    list->count = 0;
-    list->capacity = 10;
-    list->solutions = malloc(sizeof(substitution_t) * list->capacity);
-    return list;
+// COMPILER-DIRECTED MEMORY MANAGEMENT FUNCTIONS
+// Register consumption metadata from compiler  
+void register_consumption_metadata(linear_kb_t* kb, const char* resource_name, const char* consumption_point,
+                                   int is_optional, int is_persistent, size_t estimated_size) {
+    consumption_metadata_t* metadata = malloc(sizeof(consumption_metadata_t));
+    metadata->resource_name = malloc(strlen(resource_name) + 1);
+    strcpy(metadata->resource_name, resource_name);
+    metadata->consumption_point = malloc(strlen(consumption_point) + 1);
+    strcpy(metadata->consumption_point, consumption_point);
+    metadata->is_optional = is_optional;
+    metadata->is_persistent = is_persistent;
+    metadata->estimated_size = estimated_size;
+    
+    // Add to linked list
+    metadata->next = kb->consumption_metadata;
+    kb->consumption_metadata = metadata;
+    
+    #ifdef DEBUG
+    printf("DEBUG: Registered consumption metadata for '%s' at '%s' (optional=%d, persistent=%d, size=%zu)\n",
+           resource_name, consumption_point, is_optional, is_persistent, estimated_size);
+    #endif
 }
 
-void add_solution(solution_list_t* list, substitution_t* solution) {
-    if (list->count >= list->capacity) {
-        list->capacity *= 2;
-        list->solutions = realloc(list->solutions, sizeof(substitution_t) * list->capacity);
+// Find consumption metadata for a resource
+consumption_metadata_t* find_consumption_metadata(linear_kb_t* kb, const char* resource_name) {
+    consumption_metadata_t* current = kb->consumption_metadata;
+    while (current != NULL) {
+        if (strcmp(current->resource_name, resource_name) == 0) {
+            return current;
+        }
+        current = current->next;
     }
-    // Copy the solution
-    list->solutions[list->count] = *solution;
-    list->count++;
+    return NULL;
 }
 
-void free_solution_list(solution_list_t* list) {
-    if (list) {
-        free(list->solutions);
-        free(list);
+// Compiler-directed resource deallocation (immediate, precise)
+void free_linear_resource(linear_kb_t* kb, linear_resource_t* resource) {
+    if (resource && !resource->deallocated && !resource->persistent) {
+        #ifdef DEBUG
+        printf("DEBUG: Compiler-directed deallocation of resource: ");
+        print_term(resource->fact);
+        printf(" (freed %zu bytes)\n", resource->memory_size);
+        #endif
+        
+        // Mark as deallocated
+        resource->deallocated = 1;
+        
+        // In production, actually free the memory:
+        // free_term(resource->fact);
+        // resource->fact = NULL;
+        
+        // Update memory tracking
+        if (kb->total_memory_allocated >= resource->memory_size) {
+            kb->total_memory_allocated -= resource->memory_size;
+        }
+    }
+}
+
+// Check if resource should be deallocated at current execution point
+int should_deallocate_resource(linear_kb_t* kb, const char* resource_name, const char* current_point) {
+    consumption_metadata_t* metadata = find_consumption_metadata(kb, resource_name);
+    if (!metadata) {
+        return 0; // No metadata, don't deallocate
+    }
+    
+    if (metadata->is_persistent) {
+        return 0; // Persistent resources are never deallocated
+    }
+    
+    // Check if we're at the right consumption point
+    return strcmp(metadata->consumption_point, current_point) == 0;
+}
+
+// Enhanced resource consumption with compiler metadata integration
+int consume_linear_resource_with_metadata(linear_kb_t* kb, term_t* goal, substitution_t* subst, const char* consumption_point) {
+    linear_resource_t* current = kb->resources;
+    
+    while (current != NULL) {
+        if (!current->consumed && !current->deallocated) {
+            // Try to unify with the goal
+            substitution_t temp_subst = {0};
+            init_substitution(&temp_subst);
+            copy_substitution(&temp_subst, subst);
+            
+            if (unify_terms(current->fact, goal, &temp_subst)) {
+                // Resource matches - consume it
+                current->consumed = 1;
+                copy_substitution(subst, &temp_subst);
+                
+                #ifdef DEBUG
+                printf("DEBUG: Consumed linear resource: ");
+                print_term(current->fact);
+                printf(" at point '%s'\n", consumption_point);
+                #endif
+                
+                // Check if compiler metadata says to deallocate here
+                char resource_name[256];
+                term_to_string_buffer(current->fact, resource_name, sizeof(resource_name));
+                
+                if (should_deallocate_resource(kb, resource_name, consumption_point)) {
+                    free_linear_resource(kb, current);
+                }
+                
+                free_substitution(&temp_subst);
+                return 1;  // Successfully consumed
+            }
+            
+            free_substitution(&temp_subst);
+        }
+        current = current->next;
+    }
+    
+    return 0; // No matching resource found
+}
+
+// Helper function to convert term to string (for resource naming)
+void term_to_string_buffer(term_t* term, char* buffer, size_t buffer_size) {
+    if (!term || !buffer || buffer_size < 2) {
+        if (buffer && buffer_size > 0) buffer[0] = '\0';
+        return;
+    }
+    
+    switch (term->type) {
+        case TERM_ATOM:
+            snprintf(buffer, buffer_size, "%s", term->data.atom ? term->data.atom : "null");
+            break;
+        case TERM_VAR:
+            snprintf(buffer, buffer_size, "%s", term->data.var ? term->data.var : "?");
+            break;
+        case TERM_INTEGER:
+            snprintf(buffer, buffer_size, "%lld", term->data.integer);
+            break;
+        case TERM_COMPOUND:
+            if (term->data.compound.arity == 0) {
+                snprintf(buffer, buffer_size, "%s", term->data.compound.functor ? term->data.compound.functor : "compound");
+            } else {
+                snprintf(buffer, buffer_size, "%s/%d", 
+                        term->data.compound.functor ? term->data.compound.functor : "compound",
+                        term->data.compound.arity);
+            }
+            break;
+        case TERM_CLONE:
+            term_to_string_buffer(term->data.cloned, buffer, buffer_size);
+            break;
+        default:
+            snprintf(buffer, buffer_size, "unknown");
+            break;
     }
 }
 
@@ -1303,6 +1270,9 @@ void add_persistent_fact(linear_kb_t* kb, term_t* fact) {
     resource->fact = fact;
     resource->consumed = 0;
     resource->persistent = 1; // Mark as persistent (non-consumable)
+    resource->deallocated = 0;
+    resource->memory_size = estimate_term_memory_size(fact);
+    resource->allocation_site = "persistent_fact";
     resource->next = kb->resources;
     kb->resources = resource;
 }
@@ -1314,84 +1284,6 @@ enhanced_solution_list_t* create_enhanced_solution_list() {
     list->capacity = 10;
     list->solutions = malloc(sizeof(enhanced_solution_t) * list->capacity);
     return list;
-}
-
-// Check if two solutions are equivalent (same variable bindings)
-int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
-    if (s1->count != s2->count) {
-        return 0;
-    }
-    
-    for (int i = 0; i < s1->count; i++) {
-        int found = 0;
-        for (int j = 0; j < s2->count; j++) {
-            if (strcmp(s1->bindings[i].var, s2->bindings[j].var) == 0 &&
-                terms_equal(s1->bindings[i].term, s2->bindings[j].term)) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            return 0;
-        }
-    }
-    
-    return 1;
-}
-
-void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst) {
-    // Check for duplicate solutions before adding
-    for (int i = 0; i < list->count; i++) {
-        if (enhanced_solutions_are_equivalent(&list->solutions[i], subst)) {
-#ifdef DEBUG
-            printf("DEBUG: Skipping duplicate solution\n");
-#endif
-            return; // Skip duplicate
-        }
-    }
-    
-#ifdef DEBUG
-    printf("DEBUG: No duplicate found, adding new solution\n");
-#endif
-    
-    if (list->count >= list->capacity) {
-        list->capacity *= 2;
-        list->solutions = realloc(list->solutions, sizeof(enhanced_solution_t) * list->capacity);
-    }
-    
-#ifdef DEBUG
-    printf("DEBUG: Adding solution %d with %d bindings\n", list->count + 1, subst->count);
-    for (int i = 0; i < subst->count; i++) {
-        printf("DEBUG:   %s = ", subst->bindings[i].var);
-        print_term(subst->bindings[i].term);
-        printf("\n");
-    }
-#endif
-    
-    enhanced_solution_t* solution = &list->solutions[list->count];
-    solution->substitution = *subst;
-    solution->binding_count = subst->count;
-    solution->bindings = malloc(sizeof(variable_binding_t) * solution->binding_count);
-    
-    for (int i = 0; i < subst->count; i++) {
-        solution->bindings[i].var_name = strdup(subst->bindings[i].var);
-        solution->bindings[i].value = copy_term(subst->bindings[i].term);
-    }
-    
-    list->count++;
-}
-
-void print_enhanced_solution(enhanced_solution_t* solution) {
-    if (solution->binding_count == 0) {
-        printf("true");
-        return;
-    }
-    
-    for (int i = 0; i < solution->binding_count; i++) {
-        if (i > 0) printf(", ");
-        printf("%s = ", solution->bindings[i].var_name);
-        print_term(solution->bindings[i].value);
-    }
 }
 
 void free_enhanced_solution_list(enhanced_solution_list_t* list) {
@@ -1410,597 +1302,291 @@ void free_enhanced_solution_list(enhanced_solution_list_t* list) {
     free(list);
 }
 
-int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions) {
-    goal_stack_t stack;
-    init_goal_stack(&stack);
-    return linear_resolve_query_enhanced_with_stack(kb, goals, goal_count, solutions, &stack);
-}
-
-int linear_resolve_query_enhanced_with_stack(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions, goal_stack_t* stack) {
-    substitution_t initial_subst = {0};
-    return linear_resolve_query_with_substitution_enhanced_internal(kb, goals, goal_count, goals, goal_count, &initial_subst, solutions, 1, stack);
-}
-
-// Enhanced disjunctive resolution: try to satisfy any one of the goals (OR logic)
-int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions) {
-    int found_any = 0;
-    
-    // Try each goal independently
-    for (int i = 0; i < goal_count; i++) {
-        // Create a single-goal array
-        term_t* single_goal[1] = { goals[i] };
-        
-        // Save the consumed state before trying this goal
-        consumed_state_t* saved_state = save_consumed_state(kb);
-        
-        // Try to resolve this single goal with enhanced resolution
-        enhanced_solution_list_t* goal_solutions = create_enhanced_solution_list();
-        int result = linear_resolve_query_enhanced(kb, single_goal, 1, goal_solutions);
-        
-        if (result && goal_solutions->count > 0) {
-            // Success! Add all solutions from this goal
-            for (int j = 0; j < goal_solutions->count; j++) {
-                add_enhanced_solution(solutions, &goal_solutions->solutions[j].substitution);
-            }
-            found_any = 1;
-        }
-        
-        // Restore state for next goal attempt
-        restore_consumed_state(saved_state);
-        free_enhanced_solution_list(goal_solutions);
+// Substitution utility functions
+void init_substitution(substitution_t* subst) {
+    if (subst) {
+        subst->count = 0;
     }
-    
-    return found_any;
 }
 
-int linear_resolve_query_with_substitution_enhanced_internal(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                  term_t** original_goals, int original_goal_count, substitution_t* global_subst, 
-                                                  enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
-    static int total_iterations = 0;
-    total_iterations++;
+void free_substitution(substitution_t* subst) {
+    if (!subst) return;
     
-    // Prevent excessive recursion depth or total iterations
-    if (rule_depth > 10 || total_iterations > 500) {
-#ifdef DEBUG
-        printf("DEBUG: Maximum recursion depth or iterations reached (depth=%d, iterations=%d), terminating\n", rule_depth, total_iterations);
-#endif
-        return 0;
+    for (int i = 0; i < subst->count; i++) {
+        free(subst->bindings[i].var);
+        free_term(subst->bindings[i].term);
     }
-    if (goal_count == 0) {
-        // Add solution when all original goals are satisfied (regardless of rule depth)
-        char* original_vars[MAX_VARS];
-        int original_var_count = 0;
-        extract_variables_from_goals(original_goals, original_goal_count, original_vars, &original_var_count, MAX_VARS);
-        
-        if (original_var_count == 0 || all_variables_bound(original_vars, original_var_count, global_subst)) {
-#ifdef DEBUG
-            printf("DEBUG: Adding solution (rule_depth = %d)\n", rule_depth);
-#endif
-            // Create a filtered substitution with only original query variables
-            substitution_t filtered_subst = {0};
-            create_filtered_substitution(global_subst, original_vars, original_var_count, &filtered_subst);
-            add_enhanced_solution(solutions, &filtered_subst);
-            
-            // Clean up filtered substitution
-            for (int i = 0; i < filtered_subst.count; i++) {
-                free(filtered_subst.bindings[i].var);
-                free_term(filtered_subst.bindings[i].term);
-            }
+    subst->count = 0;
+}
+
+int add_binding(substitution_t* subst, const char* var, term_t* term) {
+    if (!subst || subst->count >= MAX_VARS) return 0;
+    
+    subst->bindings[subst->count].var = malloc(strlen(var) + 1);
+    strcpy(subst->bindings[subst->count].var, var);
+    subst->bindings[subst->count].term = copy_term(term);
+    subst->count++;
+    return 1;
+}
+
+// Check if a resource is persistent (has persistent-use marker)
+int is_persistent_resource(term_t* fact) {
+    return fact->type == TERM_CLONE;
+}
+
+// Utility functions for type checking
+term_t* get_inner_term(term_t* term) {
+    if (term->type == TERM_CLONE) {
+        return term->data.cloned;
+    }
+    return term;
+}
+
+const char* get_term_type(linear_kb_t* kb, const char* term_name) {
+    type_mapping_t* mapping = kb->type_mappings;
+    while (mapping) {
+        if (strcmp(mapping->term_name, term_name) == 0) {
+            return mapping->type_name;
         }
-        
-        free_variable_list(original_vars, original_var_count);
+        mapping = mapping->next;
+    }
+    return NULL;
+}
+
+int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_type) {
+    // Direct match
+    if (strcmp(variant_type, parent_type) == 0) {
         return 1;
     }
-
-    term_t* current_goal = goals[0];
-    term_t** remaining_goals = goals + 1;
-    int remaining_count = goal_count - 1;
-    int found_any = 0;
-
-    // Try matching against facts (both linear and persistent)
-    for (linear_resource_t* resource = kb->resources; resource; resource = resource->next) {
-        if (resource->consumed) continue; // Skip consumed resources
-
-#ifdef DEBUG
-        printf("DEBUG: Checking resource: ");
-        print_term(resource->fact);
-        printf(" (persistent: %d)\n", resource->persistent);
-        printf("DEBUG: Against goal: ");
-        print_term(current_goal);
-        printf("\n");
-#endif
-
-        substitution_t local_subst = *global_subst;
-        int unified = unify(current_goal, resource->fact, &local_subst);
-        if (!unified) {
-            // Try type-aware matching only if regular unification failed
-            unified = can_unify_with_type(kb, current_goal, resource->fact);
-            if (unified) {
-                // Reset substitution since type matching doesn't update it
-                local_subst = *global_subst;
+    
+    // Look for direct mapping
+    union_mapping_t* mapping = kb->union_mappings;
+    while (mapping) {
+        if (strcmp(mapping->variant_type, variant_type) == 0) {
+            // Found a mapping for variant_type -> intermediate_type
+            if (strcmp(mapping->parent_type, parent_type) == 0) {
+                return 1; // Direct match
+            }
+            // Recursively check if intermediate_type is a variant of parent_type
+            if (is_variant_of(kb, mapping->parent_type, parent_type)) {
+                return 1;
             }
         }
-        
-        if (unified) {
-#ifdef DEBUG
-            printf("DEBUG: Unification successful!\n");
-#endif
-            // Consume the resource only if it's linear (not persistent)
-            if (!resource->persistent) {
-                resource->consumed = 1;
-            }
-            
-            if (linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &local_subst, solutions, 0, stack)) {
-                found_any = 1;
-            }
-            
-            // Restore the resource state only for linear resources
-            if (!resource->persistent) {
-                resource->consumed = 0;
-            }
-        }
-#ifdef DEBUG
-        else {
-            printf("DEBUG: Unification failed\n");
-        }
-#endif
+        mapping = mapping->next;
     }
+    return 0;
+}
 
-
-
-    // Try applying rules
+// Free the linear knowledge base
+void free_linear_kb(linear_kb_t* kb) {
+    if (!kb) return;
+    
+    // Free resources
+    linear_resource_t* resource = kb->resources;
+    while (resource) {
+        linear_resource_t* next = resource->next;
+        if (resource->fact) {
+            free_term(resource->fact);
+        }
+        free(resource);
+        resource = next;
+    }
+    
+    // Free rules
     for (int i = 0; i < kb->rule_count; i++) {
-        clause_t* rule = &kb->rules[i];
-        if (try_rule_with_backtracking_enhanced(kb, rule, goals, goal_count, original_goals, original_goal_count, global_subst, solutions, rule_depth, stack)) {
-            found_any = 1;
+        if (kb->rules[i].head) {
+            free_term(kb->rules[i].head);
+        }
+        for (int j = 0; j < kb->rules[i].body_size; j++) {
+            if (kb->rules[i].body[j]) {
+                free_term(kb->rules[i].body[j]);
+            }
+        }
+        if (kb->rules[i].body) {
+            free(kb->rules[i].body);
+        }
+        if (kb->rules[i].production) {
+            free_term(kb->rules[i].production);
         }
     }
-
-    return found_any;
+    
+    // Free type mappings
+    type_mapping_t* type_mapping = kb->type_mappings;
+    while (type_mapping) {
+        type_mapping_t* next = type_mapping->next;
+        free(type_mapping->term_name);
+        free(type_mapping->type_name);
+        free(type_mapping);
+        type_mapping = next;
+    }
+    
+    // Free union mappings  
+    union_mapping_t* union_mapping = kb->union_mappings;
+    while (union_mapping) {
+        union_mapping_t* next = union_mapping->next;
+        free(union_mapping->variant_type);
+        free(union_mapping->parent_type);
+        free(union_mapping);
+        union_mapping = next;
+    }
+    
+    // Free consumption metadata
+    consumption_metadata_t* metadata = kb->consumption_metadata;
+    while (metadata) {
+        consumption_metadata_t* next = metadata->next;
+        free(metadata->resource_name);
+        free(metadata->consumption_point);
+        free(metadata);
+        metadata = next;
+    }
+    
+    free(kb);
 }
 
-int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
-    term_t* current_goal = goals[0];
-    substitution_t rule_subst = *global_subst;
+// Enhanced query resolution with solutions tracking
+int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions) {
+    if (goal_count == 0) return 1; // Success
     
-    // Check for recursion if this is a recursive rule
-    // Use improved pattern matching for similar goals with same ground arguments
-    if (rule->is_recursive && is_goal_pattern_in_stack(stack, current_goal)) {
-#ifdef DEBUG
-        printf("DEBUG: Recursion detected for goal: ");
-        print_term(current_goal);
-        printf(", skipping recursive rule\n");
-#endif
-        return 0;
-    }
+    // For now, delegate to the basic resolution and just track success/failure
+    substitution_t global_subst = {0};
+    init_substitution(&global_subst);
     
-#ifdef DEBUG
-    printf("DEBUG: Trying rule for goal: ");
-    print_term(current_goal);
-    printf(" (rule depth: %d)\n", rule_depth);
-#endif
-
-    // Rename variables in the rule to avoid conflicts with existing variables
-    static int rule_instance_counter = 0;
-    rule_instance_counter++;
+    int result = linear_resolve_query_with_substitution(kb, goals, goal_count, goals[0], &global_subst);
     
-    term_t* renamed_head = rename_variables_in_term(rule->head, rule_instance_counter);
-    term_t* renamed_production = rule->production ? rename_variables_in_term(rule->production, rule_instance_counter) : NULL;
-    
-#ifdef DEBUG
-    printf("DEBUG: Original rule head: ");
-    print_term(rule->head);
-    printf("\n");
-    printf("DEBUG: Renamed rule head: ");
-    print_term(renamed_head);
-    printf("\n");
-#endif
-
-    // For production rules, unify with the production; for regular rules, unify with the head
-    term_t* unify_target = renamed_production ? renamed_production : renamed_head;
-    
-    // Try to unify current goal with rule production/head
-    if (!unify(current_goal, unify_target, &rule_subst)) {
-#ifdef DEBUG
-        printf("DEBUG: Rule unification failed\n");
-#endif
-        free_term(renamed_head);
-        if (renamed_production) free_term(renamed_production);
-        return 0;
-    }
-
-#ifdef DEBUG
-    printf("DEBUG: Rule unified successfully with ");
-    print_term(unify_target);
-    printf("\n");
-#endif
-
-    // Push goal onto stack to detect recursion
-    if (rule->is_recursive) {
-        if (!push_goal(stack, current_goal)) {
-#ifdef DEBUG
-            printf("DEBUG: Goal stack overflow\n");
-#endif
-            free_term(renamed_head);
-            if (renamed_production) free_term(renamed_production);
-            return 0;
+    if (result && solutions) {
+        // Add the solution to the list if resolution succeeded
+        if (solutions->count < solutions->capacity) {
+            enhanced_solution_t* solution = &solutions->solutions[solutions->count];
+            solution->binding_count = global_subst.count;
+            solution->bindings = malloc(sizeof(variable_binding_t) * global_subst.count);
+            
+            for (int i = 0; i < global_subst.count; i++) {
+                solution->bindings[i].var_name = malloc(strlen(global_subst.bindings[i].var) + 1);
+                strcpy(solution->bindings[i].var_name, global_subst.bindings[i].var);
+                solution->bindings[i].value = copy_term(global_subst.bindings[i].term);
+            }
+            solutions->count++;
         }
-#ifdef DEBUG
-        printf("DEBUG: Pushed goal onto recursion stack (depth now: %d)\n", stack->depth);
-#endif
-    } else {
-#ifdef DEBUG
-        printf("DEBUG: Rule is not recursive, skipping goal stack push\n");
-#endif
     }
-
-#ifdef DEBUG
-    printf("DEBUG: About to apply substitution to rule body (body_size: %d)\n", rule->body_size);
-#endif
-
-    // Apply substitution to rule body (also rename variables)
-    term_t** instantiated_body = malloc(sizeof(term_t*) * rule->body_size);
-    for (int i = 0; i < rule->body_size; i++) {
-        term_t* renamed_body_term = rename_variables_in_term(rule->body[i], rule_instance_counter);
-#ifdef DEBUG
-        printf("DEBUG: Applying substitution to body term %d: ", i);
-        print_term(renamed_body_term);
-        printf("\n");
-        printf("DEBUG: Substitution has %d bindings:\n", rule_subst.count);
-        for (int j = 0; j < rule_subst.count; j++) {
-            printf("DEBUG:   %s = ", rule_subst.bindings[j].var);
-            print_term(rule_subst.bindings[j].term);
-            printf("\n");
-        }
-#endif
-        instantiated_body[i] = apply_substitution(renamed_body_term, &rule_subst);
-        free_term(renamed_body_term);
-#ifdef DEBUG
-        printf("DEBUG: Result: ");
-        print_term(instantiated_body[i]);
-        printf("\n");
-#endif
-    }
-
-#ifdef DEBUG
-    printf("DEBUG: Successfully instantiated rule body\n");
-#endif
-
-    // Try to satisfy the rule body with depth-first backtracking
-    // We need to find each way the body can be satisfied and for each way:
-    // 1. Apply the rule production 
-    // 2. Continue with remaining goals
-    // 3. Backtrack and try the next way
     
-    int found = 0;
-    if (rule->body_size == 0) {
-        // Empty body - proceed directly to rule completion
-        linear_resource_t* produced_resource = NULL;
-        if (renamed_production) {
-            term_t* produced_term = apply_substitution(renamed_production, &rule_subst);
-            produced_resource = malloc(sizeof(linear_resource_t));
-            produced_resource->fact = produced_term;
-            produced_resource->consumed = 0;
-            produced_resource->persistent = 0;
-            produced_resource->next = kb->resources;
-            kb->resources = produced_resource;
-#ifdef DEBUG
-            printf("DEBUG: Produced resource: ");
-            print_term(produced_term);
-            printf("\n");
-#endif
+    free_substitution(&global_subst);
+    return result;
+}
+
+// Disjunctive resolution (placeholder)
+int linear_resolve_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path) {
+    (void)path; // Unused parameter
+    // For now, just try each goal independently and return success if any succeeds
+    for (int i = 0; i < goal_count; i++) {
+        term_t* single_goal[1] = { goals[i] };
+        if (linear_resolve_query(kb, single_goal, 1)) {
+            return 1;
         }
+    }
+    return 0;
+}
 
-        // Continue with remaining goals
-        term_t** remaining_goals = goals + 1;
-        int remaining_count = goal_count - 1;
-#ifdef DEBUG
-        printf("DEBUG: Continuing with %d remaining goals\n", remaining_count);
-#endif
-        found = linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth, stack);
+// Add a rule to the knowledge base
+void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production) {
+    if (kb->rule_count < MAX_CLAUSES) {
+        kb->rules[kb->rule_count].head = copy_term(head);
+        kb->rules[kb->rule_count].body_size = body_size;
+        if (body_size > 0) {
+            kb->rules[kb->rule_count].body = malloc(sizeof(term_t*) * body_size);
+            for (int i = 0; i < body_size; i++) {
+                kb->rules[kb->rule_count].body[i] = copy_term(body[i]);
+            }
+        } else {
+            kb->rules[kb->rule_count].body = NULL;
+        }
+        kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
+        kb->rules[kb->rule_count].is_recursive = 0;  // Default to non-recursive
+        kb->rule_count++;
+    }
+}
 
-        // Clean up produced resource (backtrack)
-        if (produced_resource) {
-            if (kb->resources == produced_resource) {
-                kb->resources = produced_resource->next;
+// Add a type mapping to the knowledge base
+void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name) {
+    type_mapping_t* mapping = malloc(sizeof(type_mapping_t));
+    mapping->term_name = malloc(strlen(term_name) + 1);
+    strcpy(mapping->term_name, term_name);
+    mapping->type_name = malloc(strlen(type_name) + 1);
+    strcpy(mapping->type_name, type_name);
+    mapping->next = kb->type_mappings;
+    kb->type_mappings = mapping;
+}
+
+// Type-based unification check
+int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact) {
+    // Handle cloned facts - unify with the inner term
+    term_t* actual_fact = get_inner_term(fact);
+    
+    // First try direct unification
+    substitution_t temp_subst = {0};
+    if (unify(goal, actual_fact, &temp_subst)) {
+        return 1;
+    }
+    
+    // If direct unification fails, try type-based matching
+    if (goal->type == TERM_ATOM && actual_fact->type == TERM_ATOM) {
+        // Check if goal is a type name and fact is an instance of that type
+        const char* fact_type = get_term_type(kb, actual_fact->data.atom);
+        if (fact_type) {
+            // Direct type match
+            if (strcmp(goal->data.atom, fact_type) == 0) {
+                return 1;
+            }
+            // Union hierarchy match: check if fact_type is a variant of goal type
+            if (is_variant_of(kb, fact_type, goal->data.atom)) {
+                return 1;
+            }
+        }
+    }
+    
+    return 0;
+}
+
+// Print current memory state for debugging
+void print_memory_state(linear_kb_t* kb, const char* context) {
+    #ifndef DEBUG
+    (void)kb;      // Suppress unused parameter warning
+    (void)context; // Suppress unused parameter warning
+    #endif
+    #ifdef DEBUG
+    printf("DEBUG: MEMORY STATE [%s]:\n", context);
+    
+    size_t total_allocated = 0;
+    size_t total_active = 0;
+    size_t total_deallocated = 0;
+    int active_count = 0;
+    int deallocated_count = 0;
+    
+    linear_resource_t* current = kb->resources;
+    while (current != NULL) {
+        total_allocated += current->memory_size;
+        
+        if (current->deallocated) {
+            total_deallocated += current->memory_size;
+            deallocated_count++;
+            printf("  [FREED] ");
+        } else {
+            total_active += current->memory_size;
+            active_count++;
+            if (current->consumed) {
+                printf("  [CONSUMED] ");
             } else {
-                linear_resource_t* prev = kb->resources;
-                while (prev && prev->next != produced_resource) {
-                    prev = prev->next;
-                }
-                if (prev) {
-                    prev->next = produced_resource->next;
-                }
-            }
-            free_term(produced_resource->fact);
-            free(produced_resource);
-        }
-    } else {
-        // Non-empty body - use depth-first backtracking to try each way to satisfy the body
-        found = try_rule_body_depth_first(kb, rule, goals, goal_count, original_goals, original_goal_count, &rule_subst, solutions, rule_depth, instantiated_body, stack);
-    }
-
-    // Clean up
-    for (int i = 0; i < rule->body_size; i++) {
-        free_term(instantiated_body[i]);
-    }
-    free(instantiated_body);
-    free_term(renamed_head);
-    if (renamed_production) free_term(renamed_production);
-
-    // Pop goal from stack
-    if (rule->is_recursive) {
-        pop_goal(stack);
-#ifdef DEBUG
-        printf("DEBUG: Popped goal from recursion stack (depth now: %d)\n", stack->depth);
-#endif
-    }
-
-    return found;
-}
-
-// Depth-first backtracking for rule body resolution
-int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                              term_t** original_goals, int original_goal_count, substitution_t* rule_subst,
-                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body, goal_stack_t* stack) {
-    
-    // This function should find each way to satisfy the rule body using depth-first backtracking
-    // For each way the body is satisfied:
-    // 1. Apply the substitution from body satisfaction  
-    // 2. Produce the rule production
-    // 3. Continue with remaining goals
-    // 4. Backtrack to try the next way
-    
-    int found_any = 0;
-    
-    // Use a recursive helper to resolve the rule body with depth-first backtracking
-    // We need to resolve the body goals one by one, not all at once
-    if (resolve_rule_body_recursive(kb, instantiated_body, rule->body_size, 0, rule_subst, 
-                                   rule, goals + 1, goal_count - 1, original_goals, original_goal_count, 
-                                   solutions, rule_depth, stack)) {
-        found_any = 1;
-    }
-    
-    return found_any;
-}
-
-// Recursive helper for depth-first rule body resolution
-int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
-                                substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
-                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack) {
-    
-    if (body_index >= body_count) {
-        // All body goals satisfied - now apply rule production and continue with remaining goals
-#ifdef DEBUG
-        printf("DEBUG: All rule body goals satisfied, applying production\n");
-#endif
-        
-        linear_resource_t* produced_resource = NULL;
-        if (rule->production) {
-            term_t* produced_term = apply_substitution(rule->production, current_subst);
-            produced_resource = malloc(sizeof(linear_resource_t));
-            produced_resource->fact = produced_term;
-            produced_resource->consumed = 0;
-            produced_resource->persistent = 0;
-            produced_resource->next = kb->resources;
-            kb->resources = produced_resource;
-#ifdef DEBUG
-            printf("DEBUG: Produced resource: ");
-            print_term(produced_term);
-            printf("\n");
-#endif
-        }
-
-        // Continue with remaining goals after rule application
-#ifdef DEBUG
-        printf("DEBUG: Continuing with %d remaining goals after rule completion\n", remaining_count);
-#endif
-        int found = linear_resolve_query_with_substitution_enhanced_internal(kb, remaining_goals, remaining_count, 
-                                                                           original_goals, original_goal_count, 
-                                                                           current_subst, solutions, rule_depth, stack);
-
-        // Clean up produced resource (backtrack)
-        if (produced_resource) {
-            if (kb->resources == produced_resource) {
-                kb->resources = produced_resource->next;
-            } else {
-                linear_resource_t* prev = kb->resources;
-                while (prev && prev->next != produced_resource) {
-                    prev = prev->next;
-                }
-                if (prev) {
-                    prev->next = produced_resource->next;
-                }
-            }
-            free_term(produced_resource->fact);
-            free(produced_resource);
-        }
-        
-        return found;
-    }
-    
-    // Resolve current body goal using depth-first backtracking
-    term_t* current_body_goal = body_goals[body_index];
-    int found_any = 0;
-    
-#ifdef DEBUG
-    printf("DEBUG: Resolving rule body goal %d: ", body_index);
-    print_term(current_body_goal);
-    printf("\n");
-#endif
-    
-    // Try to match current body goal against available resources
-    for (linear_resource_t* resource = kb->resources; resource; resource = resource->next) {
-        if (resource->consumed) continue;
-        
-        substitution_t local_subst = *current_subst;
-        int unified = unify(current_body_goal, resource->fact, &local_subst);
-        if (!unified) {
-            unified = can_unify_with_type(kb, current_body_goal, resource->fact);
-            if (unified) {
-                local_subst = *current_subst;
+                printf("  [ACTIVE] ");
             }
         }
         
-        if (unified) {
-#ifdef DEBUG
-            printf("DEBUG: Rule body goal unified with resource: ");
-            print_term(resource->fact);
-            printf("\n");
-#endif
-            // Consume resource and recurse to next body goal
-            if (!resource->persistent) {
-                resource->consumed = 1;
-            }
-            
-            if (resolve_rule_body_recursive(kb, body_goals, body_count, body_index + 1, &local_subst,
-                                           rule, remaining_goals, remaining_count, original_goals, original_goal_count,
-                                           solutions, rule_depth, stack)) {
-                found_any = 1;
-            }
-            
-            // Restore resource (backtrack)
-            if (!resource->persistent) {
-                resource->consumed = 0;
-            }
-        }
+        print_term(current->fact);
+        printf(" (%zu bytes)\n", current->memory_size);
+        
+        current = current->next;
     }
     
-    // If no direct resource matching worked, try applying rules to resolve the body goal
-    if (!found_any) {
-#ifdef DEBUG
-        printf("DEBUG: No direct resource match for body goal, trying rules\n");
-#endif
-        // Apply current substitution to the body goal before trying to resolve it
-        term_t* instantiated_goal = apply_substitution(current_body_goal, current_subst);
-        
-#ifdef DEBUG
-        printf("DEBUG: Instantiated body goal for rule resolution: ");
-        print_term(instantiated_goal);
-        printf("\n");
-#endif
-        
-        // Try to resolve the instantiated body goal using rules
-        term_t* body_goal_array[1] = { instantiated_goal };
-        
-        // Try to resolve this single goal - if it succeeds, continue with next body goal
-        if (linear_resolve_query_with_substitution_enhanced_internal(kb, body_goal_array, 1, 
-                                                                    original_goals, original_goal_count, current_subst, 
-                                                                    solutions, rule_depth + 1, stack)) {
-#ifdef DEBUG
-            printf("DEBUG: Body goal resolved successfully via rules, continuing with next body goal\n");
-#endif                                                           
-            if (resolve_rule_body_recursive(kb, body_goals, body_count, body_index + 1, current_subst,
-                                           rule, remaining_goals, remaining_count, original_goals, original_goal_count,
-                                           solutions, rule_depth, stack)) {
-                found_any = 1;
-            }
-        }
-        
-        free_term(instantiated_goal);
-    }
-
-    return found_any;
-}
-
-// Extract all variables from a term
-void extract_variables_from_term(term_t* term, char** vars, int* var_count, int max_vars) {
-    if (!term || *var_count >= max_vars) return;
-    
-    switch (term->type) {
-        case TERM_VAR:
-            // Check if this variable is already in the list
-            for (int i = 0; i < *var_count; i++) {
-                if (strcmp(vars[i], term->data.var) == 0) {
-                    return; // Already have this variable
-                }
-            }
-            // Add new variable
-            vars[*var_count] = strdup(term->data.var);
-            (*var_count)++;
-            break;
-            
-        case TERM_COMPOUND:
-            for (int i = 0; i < term->data.compound.arity; i++) {
-                extract_variables_from_term(term->data.compound.args[i], vars, var_count, max_vars);
-            }
-            break;
-            
-        case TERM_CLONE:
-            extract_variables_from_term(term->data.cloned, vars, var_count, max_vars);
-            break;
-            
-        case TERM_ATOM:
-        case TERM_INTEGER:
-            // No variables in atoms or integers
-            break;
-    }
-}
-
-// Extract all variables from multiple goals
-void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, int* var_count, int max_vars) {
-    for (int i = 0; i < goal_count && *var_count < max_vars; i++) {
-        extract_variables_from_term(goals[i], vars, var_count, max_vars);
-    }
-}
-
-// Check if all variables are bound to concrete values (not just other variables)
-int all_variables_bound(char** vars, int var_count, substitution_t* subst) {
-    for (int i = 0; i < var_count; i++) {
-        term_t* final_value = resolve_variable_chain(subst, vars[i]);
-        if (!final_value || final_value->type == TERM_VAR) {
-            // Variable is not bound or is bound to another variable
-            if (final_value) free_term(final_value);
-            return 0;
-        }
-        free_term(final_value);
-    }
-    return 1; // All variables bound to concrete values
-}
-
-// Free variable list
-void free_variable_list(char** vars, int var_count) {
-    for (int i = 0; i < var_count; i++) {
-        free(vars[i]);
-    }
-}
-
-// Create a filtered substitution containing only the specified variables
-// Also resolves chains of variables to their final values
-void create_filtered_substitution(substitution_t* full_subst, char** target_vars, int target_count, substitution_t* filtered_subst) {
-    filtered_subst->count = 0;
-    
-    for (int i = 0; i < target_count; i++) {
-        char* var = target_vars[i];
-        term_t* final_value = resolve_variable_chain(full_subst, var);
-        
-        if (final_value) {
-            // Add this binding to the filtered substitution
-            if (filtered_subst->count < MAX_VARS) {
-                filtered_subst->bindings[filtered_subst->count].var = malloc(strlen(var) + 1);
-                strcpy(filtered_subst->bindings[filtered_subst->count].var, var);
-                filtered_subst->bindings[filtered_subst->count].term = copy_term(final_value);
-                filtered_subst->count++;
-            }
-            free_term(final_value);
-        }
-    }
-}
-
-// Resolve a variable through a chain of substitutions to get its final value
-term_t* resolve_variable_chain(substitution_t* subst, const char* var) {
-    for (int i = 0; i < subst->count; i++) {
-        if (string_equal(subst->bindings[i].var, var)) {
-            term_t* value = subst->bindings[i].term;
-            
-            // If the value is a variable, recursively resolve it
-            if (value->type == TERM_VAR) {
-                return resolve_variable_chain(subst, value->data.var);
-            } else {
-                return copy_term(value);
-            }
-        }
-    }
-    return NULL; // Variable not found
+    printf("  SUMMARY: %d active (%zu bytes), %d deallocated (%zu bytes), total allocated: %zu bytes\n",
+           active_count, total_active, deallocated_count, total_deallocated, total_allocated);
+    printf("DEBUG: END MEMORY STATE\n\n");
+    #endif
 }

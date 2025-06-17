@@ -1,6 +1,33 @@
 use crate::ast::*;
+use crate::resource::{LinearUsageAnalysis, LinearError};
 use std::collections::HashMap;
 use std::fmt::Write;
+
+/// Memory management strategy for generated code
+#[derive(Debug, Clone)]
+pub enum MemoryStrategy {
+    /// Compiler generates explicit free() calls at consumption points
+    CompilerDirected,
+    /// Runtime manages deallocation using compiler metadata  
+    RuntimeManaged,
+    /// Hybrid: compiler metadata + optional direct calls for optimization
+    Hybrid { optimize: bool },
+}
+
+/// Metadata about resource consumption for runtime
+#[derive(Debug, Clone)]
+pub struct ConsumptionMetadata {
+    /// Resource name that gets consumed
+    pub resource_name: String,
+    /// Point in execution where consumption happens
+    pub consumption_point: String,
+    /// Whether this is an optional resource
+    pub is_optional: bool,
+    /// Whether this is a persistent resource (doesn't get deallocated)
+    pub is_persistent: bool,
+    /// Estimated memory size
+    pub estimated_size: usize,
+}
 
 pub struct CodeGenerator {
     /// Counter for generating unique variable names
@@ -13,6 +40,12 @@ pub struct CodeGenerator {
     output: String,
     /// Enable debug output
     debug: bool,
+    /// Memory management strategy
+    memory_strategy: MemoryStrategy,
+    /// Consumption metadata for runtime
+    consumption_metadata: Vec<ConsumptionMetadata>,
+    /// Linear usage analysis results
+    usage_analysis: Option<LinearUsageAnalysis>,
 }
 
 impl CodeGenerator {
@@ -23,11 +56,24 @@ impl CodeGenerator {
             functions: HashMap::new(),
             output: String::new(),
             debug: false,
+            memory_strategy: MemoryStrategy::Hybrid { optimize: true },
+            consumption_metadata: Vec::new(),
+            usage_analysis: None,
         }
     }
     
     pub fn with_debug(mut self, debug: bool) -> Self {
         self.debug = debug;
+        self
+    }
+    
+    pub fn with_memory_strategy(mut self, strategy: MemoryStrategy) -> Self {
+        self.memory_strategy = strategy;
+        self
+    }
+    
+    pub fn with_usage_analysis(mut self, analysis: LinearUsageAnalysis) -> Self {
+        self.usage_analysis = Some(analysis);
         self
     }
     
@@ -49,6 +95,55 @@ impl CodeGenerator {
         var
     }
     
+    /// Generate consumption metadata for a resource
+    fn add_consumption_metadata(&mut self, resource_name: String, point: String, is_optional: bool, is_persistent: bool) {
+        self.consumption_metadata.push(ConsumptionMetadata {
+            resource_name,
+            consumption_point: point,
+            is_optional,
+            is_persistent,
+            estimated_size: 64, // Default estimate
+        });
+    }
+    
+    /// Generate C code for compiler-directed deallocation
+    fn generate_direct_deallocation(&mut self, resource_name: &str) -> Result<(), std::fmt::Error> {
+        match self.memory_strategy {
+            MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { optimize: true } => {
+                writeln!(self.output, "    // Compiler-directed deallocation of {}", resource_name)?;
+                writeln!(self.output, "    if (resource_{} && !resource_{}->persistent) {{", resource_name, resource_name)?;
+                writeln!(self.output, "        free_linear_resource(kb, resource_{});", resource_name)?;
+                writeln!(self.output, "        resource_{} = NULL; // Prevent use-after-free", resource_name)?;
+                writeln!(self.output, "    }}")?;
+            }
+            _ => {
+                // For runtime-managed, just add metadata
+                writeln!(self.output, "    // Runtime will handle deallocation of {}", resource_name)?;
+            }
+        }
+        Ok(())
+    }
+    
+    /// Generate metadata registration for runtime memory management  
+    fn generate_consumption_metadata(&mut self) -> Result<(), std::fmt::Error> {
+        if matches!(self.memory_strategy, MemoryStrategy::RuntimeManaged | MemoryStrategy::Hybrid { .. }) {
+            writeln!(self.output, "    // Register consumption metadata for runtime memory management")?;
+            for metadata in &self.consumption_metadata {
+                writeln!(self.output, 
+                    "    register_consumption_metadata(kb, \"{}\", \"{}\", {}, {}, {});",
+                    metadata.resource_name,
+                    metadata.consumption_point,
+                    if metadata.is_optional { 1 } else { 0 },
+                    if metadata.is_persistent { 1 } else { 0 },
+                    metadata.estimated_size
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CodeGenerator {
     pub fn generate(&mut self, program: &Program) -> Result<String, std::fmt::Error> {
         self.output.clear();
         
@@ -380,18 +475,30 @@ impl CodeGenerator {
                     // Generate body
                     let body_code = self.generate_term_array(body)?;
                     writeln!(self.output, "    term_t** rule_body_{} = {};", i, body_code)?;
-                    writeln!(self.output, "    add_rule(kb, rule_head_{}, rule_body_{}, {});", 
-                        i, i, body.len())?;
-                    writeln!(self.output, "    printf(\"Added rule: \");");
-                    writeln!(self.output, "    print_term(rule_head_{});", i)?;
-                    writeln!(self.output, "    printf(\" :- \");")?;
-                    for j in 0..body.len() {
-                        if j > 0 {
-                            writeln!(self.output, "    printf(\", \");")?;
+                    
+                    // Add consumption metadata for body terms (resources this rule consumes)
+                    for (j, body_term) in body.iter().enumerate() {
+                        if let Some(resource_name) = body_term.get_resource_name() {
+                            let consumption_point = format!("rule_{}_body_{}", i, j);
+                            let is_persistent = body_term.has_persistent_use();
+                            self.add_consumption_metadata(resource_name, consumption_point.clone(), false, is_persistent);
+                            
+                            // Generate compiler-directed deallocation if enabled
+                            if let MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { optimize: true } = self.memory_strategy {
+                                writeln!(self.output, "    // Consumption point: {}", consumption_point)?;
+                            }
                         }
-                        writeln!(self.output, "    print_term(rule_body_{}[{}]);", i, j)?;
                     }
-                    writeln!(self.output, "    printf(\"\\n\");")?;
+                    
+                    // Handle production (if any)
+                    let production_code = if let Some(prod_term) = produces {
+                        self.generate_term_creation(prod_term)?
+                    } else {
+                        "NULL".to_string()
+                    };
+                    
+                    writeln!(self.output, "    add_rule(kb, rule_head_{}, rule_body_{}, {}, {});", 
+                        i, i, body.len(), production_code)?;
                     writeln!(self.output)?;
                 }
             }
@@ -468,6 +575,10 @@ impl CodeGenerator {
     fn generate_query_main(&mut self, clauses: &[Clause], query: &Query) -> Result<(), std::fmt::Error> {
         writeln!(self.output, "int main() {{")?;
         writeln!(self.output, "    initialize_kb();")?;
+        
+        // Generate consumption metadata registration
+        self.generate_consumption_metadata()?;
+        
         writeln!(self.output, "    printf(\"\\n=== LINEAR LOGIC QUERY RESOLUTION ===\\n\");")?;
         
         // Generate query resolution using linear logic
@@ -478,10 +589,27 @@ impl CodeGenerator {
             writeln!(self.output, "    printf(\"Goal {}: \");", i)?;
             writeln!(self.output, "    print_term(goals[{}]);", i)?;
             writeln!(self.output, "    printf(\"\\n\");")?;
+            
+            // Add consumption metadata for this goal if it's a resource consumption
+            if let Some(resource_name) = goal.get_resource_name() {
+                let consumption_point = format!("goal_{}", i);
+                let is_persistent = goal.has_persistent_use();
+                self.add_consumption_metadata(resource_name, consumption_point, false, is_persistent);
+            }
         }
         
         writeln!(self.output, "    printf(\"\\nStarting linear resolution...\\n\");")?;
-        writeln!(self.output, "    int success = linear_resolve_query(kb, goals, {});", query.goals.len())?;
+        
+        // Use enhanced resolution with consumption point tracking
+        match self.memory_strategy {
+            MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { .. } => {
+                writeln!(self.output, "    int success = linear_resolve_query_enhanced(kb, goals, {});", query.goals.len())?;
+            }
+            MemoryStrategy::RuntimeManaged => {
+                writeln!(self.output, "    int success = linear_resolve_query(kb, goals, {});", query.goals.len())?;
+            }
+        }
+        
         writeln!(self.output)?;
         writeln!(self.output, "    if (success) {{")?;
         writeln!(self.output, "        printf(\"\\n=== QUERY SUCCEEDED ===\\n\");")?;
@@ -515,7 +643,7 @@ impl CodeGenerator {
     fn generate_multiple_queries_main(&mut self, clauses: &[Clause], queries: &[Query], term_types: &[TermType], type_definitions: &[TypeDefinition]) -> Result<(), std::fmt::Error> {
         writeln!(self.output, "int main() {{")?;
         writeln!(self.output, "    // Initialize linear knowledge base")?;
-        writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "    initialize_kb();")?;
         writeln!(self.output)?;
         
         // Add union type hierarchy mappings
@@ -531,80 +659,10 @@ impl CodeGenerator {
         }
         writeln!(self.output)?;
 
-        // Add all clauses to the knowledge base
-        for clause in clauses {
-            match clause {
-                Clause::Fact { predicate, args, persistent, .. } => {
-                    // Create appropriate term for the fact
-                    let mut fact_term = if args.is_empty() {
-                        // Nullary fact: create an atom
-                        Term::Atom { 
-                            name: predicate.clone(),
-                            type_name: None,
-                            persistent_use: false,
-                        }
-                    } else {
-                        // Regular fact: create a compound term
-                        Term::Compound { 
-                            functor: predicate.clone(), 
-                            args: args.clone(),
-                            persistent_use: false,
-                        }
-                    };
-                    
-                    // If persistent, wrap in clone
-                    if *persistent {
-                        fact_term = Term::Clone(Box::new(fact_term));
-                    }
-                    
-                    let term_creation = self.generate_term_creation(&fact_term)?;
-                    if *persistent {
-                        writeln!(self.output, "    add_persistent_fact(kb, {});", term_creation)?;
-                    } else {
-                        writeln!(self.output, "    add_linear_fact(kb, {});", term_creation)?;
-                    }
-                }
-                Clause::Rule { head, body, produces, .. } => {
-                    // Check if this rule is recursive
-                    let is_recursive = clause.is_recursive();
-                    
-                    if is_recursive {
-                        writeln!(self.output, "    // Recursive rule detected: {}", 
-                            self.term_to_string(head))?;
-                    }
-                    
-                    // Generate code to add the rule to the knowledge base
-                    let head_code = self.generate_term_creation(head)?;
-                    if body.is_empty() {
-                        // Rule with no body - treat as a fact
-                        writeln!(self.output, "    add_linear_fact(kb, {});", head_code)?;
-                    } else {
-                        // Generate body array
-                        let body_array_var = self.generate_unique_var("body_array");
-                        writeln!(self.output, "    term_t** {} = malloc(sizeof(term_t*) * {});", body_array_var, body.len())?;
-                        for (i, body_term) in body.iter().enumerate() {
-                            let body_code = self.generate_term_creation(body_term)?;
-                            writeln!(self.output, "    {}[{}] = {};", body_array_var, i, body_code)?;
-                        }
-                        
-                        // Handle production (if any)
-                        let production_code = if let Some(prod_term) = produces {
-                            self.generate_term_creation(prod_term)?
-                        } else {
-                            "NULL".to_string()
-                        };
-                        
-                        // Add rule with recursion flag
-                        if is_recursive {
-                            writeln!(self.output, "    add_recursive_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
-                        } else {
-                            writeln!(self.output, "    add_rule(kb, {}, {}, {}, {});", head_code, body_array_var, body.len(), production_code)?;
-                        }
-                    }
-                }
-            }
-        }
+        // All clauses are already added by initialize_kb()
         
+        // Print initial memory state before executing queries
+        writeln!(self.output, "    print_memory_state(kb, \"INITIAL STATE - Before executing queries\");")?;
         writeln!(self.output)?;
         
         // Execute each query
@@ -707,6 +765,9 @@ impl CodeGenerator {
             writeln!(self.output, "    free({});", goals_var)?;
         }
         
+        writeln!(self.output)?;
+        writeln!(self.output, "    // Print final memory state before cleanup")?;
+        writeln!(self.output, "    print_memory_state(kb, \"FINAL STATE - Before program exit\");")?;
         writeln!(self.output)?;
         writeln!(self.output, "    // Clean up")?;
         writeln!(self.output, "    free_linear_kb(kb);")?;

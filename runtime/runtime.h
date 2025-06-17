@@ -181,6 +181,7 @@ typedef struct {
     linear_resource_t* resources;  // Linear facts
     clause_t* rules;               // Rules (can be reused)
     int rule_count;
+    int resource_count;            // Number of linear resources
     type_mapping_t* type_mappings; // Maps terms to their types
     union_mapping_t* union_mappings; // Maps variant types to parent types
     persistent_fact_t* persistent_facts; // Persistent facts (not consumed)
@@ -192,7 +193,22 @@ typedef struct {
     size_t peak_memory_usage;      // Track peak memory usage
     int checkpoint_count;          // Number of active checkpoints
     void** checkpoints;            // Stack of resource state checkpoints
+    
+    // Compiler-directed memory management metadata
+    struct consumption_metadata* consumption_metadata; // Linked list of consumption metadata
 } linear_kb_t;
+
+// Consumption metadata for compiler-directed memory management
+typedef struct consumption_metadata {
+    char* resource_name;          // Name of resource that gets consumed
+    char* consumption_point;      // Point in execution where consumption happens  
+    int is_optional;              // 1 if optional resource, 0 if required
+    int is_persistent;            // 1 if persistent (no deallocation), 0 if linear
+    size_t estimated_size;        // Estimated memory size for this resource
+    struct consumption_metadata* next;
+} consumption_metadata_t;
+
+// Solution tracking for query resolution
 
 // Runtime function declarations
 linear_ptr_t linear_alloc(size_t size);
@@ -378,25 +394,29 @@ void free_variable_list(char** vars, int var_count);
 
 // Enhanced linear memory management functions
 void set_auto_deallocation(linear_kb_t* kb, int enabled);
+void add_optional_linear_fact(linear_kb_t* kb, term_t* fact);
+void add_exponential_linear_fact(linear_kb_t* kb, term_t* fact);
+size_t estimate_term_memory_size(term_t* term);
+void auto_deallocate_resource(linear_kb_t* kb, linear_resource_t* resource);
+
 int get_memory_usage_estimate(linear_kb_t* kb);
-int create_resource_checkpoint(linear_kb_t* kb);
-int rollback_to_checkpoint(linear_kb_t* kb, int checkpoint_id);
-void cleanup_consumed_resources(linear_kb_t* kb);
-void print_linear_memory_status(linear_kb_t* kb);
 
-// Linear resource lifecycle functions  
-linear_resource_t* create_linear_resource_with_tracking(term_t* fact, const char* allocation_site);
-void deallocate_linear_resource(linear_resource_t* resource);
-int is_resource_deallocated(linear_resource_t* resource);
+// Memory debugging functions
+void print_memory_state(linear_kb_t* kb, const char* context);
 
-// Compile-time checking support (for integration with Rust)
-typedef struct linearity_violation {
-    char* resource_name;
-    char* violation_type;  // "unconsumed", "double_use", "use_after_free"
-    char* location;
-} linearity_violation_t;
+// Missing function declarations
+void copy_substitution(substitution_t* dest, substitution_t* src);
+int unify_terms(term_t* term1, term_t* term2, substitution_t* subst);
+int add_binding(substitution_t* subst, const char* var, term_t* term);
+void term_to_string_buffer(term_t* term, char* buffer, size_t buffer_size);
+int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution_t* subst);
 
-int check_resource_linearity(linear_kb_t* kb, linearity_violation_t** violations, int* violation_count);
-void free_linearity_violations(linearity_violation_t* violations, int count);
+// Compiler-directed memory management functions
+void register_consumption_metadata(linear_kb_t* kb, const char* resource_name, const char* consumption_point, 
+                                   int is_optional, int is_persistent, size_t estimated_size);
+consumption_metadata_t* find_consumption_metadata(linear_kb_t* kb, const char* resource_name);
+void free_linear_resource(linear_kb_t* kb, linear_resource_t* resource);
+int should_deallocate_resource(linear_kb_t* kb, const char* resource_name, const char* current_point);
+int consume_linear_resource_with_metadata(linear_kb_t* kb, term_t* goal, substitution_t* subst, const char* consumption_point);
 
 #endif // RUNTIME_H

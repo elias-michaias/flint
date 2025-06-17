@@ -288,6 +288,32 @@ pub enum Term {
     Clone(Box<Term>),
 }
 
+impl Term {
+    /// Check if this term uses persistent semantics (!term)
+    pub fn has_persistent_use(&self) -> bool {
+        match self {
+            Term::Atom { persistent_use, .. } => *persistent_use,
+            Term::Compound { persistent_use, .. } => *persistent_use,
+            _ => false,
+        }
+    }
+    
+    /// Get the name of this term for resource tracking
+    pub fn get_resource_name(&self) -> Option<String> {
+        match self {
+            Term::Atom { name, .. } => Some(name.clone()),
+            Term::Compound { functor, args, .. } => {
+                if args.is_empty() {
+                    Some(functor.clone())
+                } else {
+                    Some(format!("{}/{}", functor, args.len()))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Resource state for linear logic
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceState {
