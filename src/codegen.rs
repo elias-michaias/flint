@@ -439,8 +439,8 @@ impl CodeGenerator {
                             writeln!(self.output, "    add_persistent_fact(kb, create_atom(\"{}\"));", predicate)?;
                         } else {
                             let args_code = self.generate_term_array(args)?;
-                            writeln!(self.output, "    term_t** args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", args_{}, {});", 
+                            writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", fact_args_{}, {});", 
                                 i, predicate, i, args.len())?;
                             writeln!(self.output, "    add_persistent_fact(kb, fact_{});", i)?;
                         }
@@ -454,8 +454,8 @@ impl CodeGenerator {
                             writeln!(self.output, "    add_linear_fact(kb, create_atom(\"{}\"));", predicate)?;
                         } else {
                             let args_code = self.generate_term_array(args)?;
-                            writeln!(self.output, "    term_t** args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", args_{}, {});", 
+                            writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", fact_args_{}, {});", 
                                 i, predicate, i, args.len())?;
                             writeln!(self.output, "    add_linear_fact(kb, fact_{});", i)?;
                         }

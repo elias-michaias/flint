@@ -28,5 +28,5 @@ double_take_rule ::
     => double_owns(alice, $item).
     
 main ::
-    owns(alice, bread),
+    owns(alice, bread).
     double_owns(alice, bread).

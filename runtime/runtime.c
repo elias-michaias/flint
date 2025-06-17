@@ -1590,3 +1590,22 @@ void print_memory_state(linear_kb_t* kb, const char* context) {
     printf("DEBUG: END MEMORY STATE\n\n");
     #endif
 }
+
+// Print enhanced solution for debugging
+void print_enhanced_solution(enhanced_solution_t* solution) {
+    if (!solution) {
+        printf("(null solution)");
+        return;
+    }
+    
+    if (solution->binding_count == 0) {
+        printf("true");
+        return;
+    }
+    
+    for (int i = 0; i < solution->binding_count; i++) {
+        if (i > 0) printf(", ");
+        printf("%s = ", solution->bindings[i].var_name);
+        print_term(solution->bindings[i].value);
+    }
+}
