@@ -86,8 +86,10 @@ impl CodeGenerator {
         }
         
         // Generate main function
-        if let Some(ref main_expr) = program.main {
-            self.generate_main(main_expr)?;
+        if let Some(ref main_query) = program.main_goal {
+            // TODO: Generate main from query instead of expression
+            // self.generate_main_query(main_query)?;
+            self.generate_multiple_queries_main(&program.clauses, &[main_query.clone()], &program.term_types, &program.type_definitions)?;
         } else if !program.queries.is_empty() {
             // Use the multiple queries version which we'll need to implement
             self.generate_multiple_queries_main(&program.clauses, &program.queries, &program.term_types, &program.type_definitions)?;
@@ -312,6 +314,7 @@ impl CodeGenerator {
         
         writeln!(self.output, "void initialize_kb() {{")?;
         writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
         writeln!(self.output, "}}")?;
         writeln!(self.output)?;
         
@@ -325,6 +328,7 @@ impl CodeGenerator {
         
         writeln!(self.output, "void initialize_kb() {{")?;
         writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
         writeln!(self.output)?;
         
         for (i, clause) in clauses.iter().enumerate() {
@@ -405,7 +409,7 @@ impl CodeGenerator {
             Term::Atom { name, .. } => Ok(format!("create_atom(\"{}\")", name)),
             Term::Var { name, .. } => Ok(format!("create_var(\"${}\")", name)),
             Term::Integer(value) => Ok(format!("create_integer({})", value)),
-            Term::Compound { functor, args } => {
+            Term::Compound { functor, args, .. } => {
                 if args.is_empty() {
                     Ok(format!("create_compound(\"{}\", NULL, 0)", functor))
                 } else {
@@ -451,7 +455,7 @@ impl CodeGenerator {
             Term::Atom { name, .. } => name.clone(),
             Term::Var { name, .. } => name.clone(),
             Term::Integer(value) => value.to_string(),
-            Term::Compound { functor, args } => {
+            Term::Compound { functor, args, .. } => {
                 format!("{}({})", functor, 
                     args.iter().map(|t| self.term_to_string(t)).collect::<Vec<_>>().join(", "))
             }
@@ -537,12 +541,14 @@ impl CodeGenerator {
                         Term::Atom { 
                             name: predicate.clone(),
                             type_name: None,
+                            persistent_use: false,
                         }
                     } else {
                         // Regular fact: create a compound term
                         Term::Compound { 
                             functor: predicate.clone(), 
-                            args: args.clone() 
+                            args: args.clone(),
+                            persistent_use: false,
                         }
                     };
                     
@@ -558,7 +564,7 @@ impl CodeGenerator {
                         writeln!(self.output, "    add_linear_fact(kb, {});", term_creation)?;
                     }
                 }
-                Clause::Rule { head, body, produces } => {
+                Clause::Rule { head, body, produces, .. } => {
                     // Check if this rule is recursive
                     let is_recursive = clause.is_recursive();
                     

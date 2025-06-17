@@ -1,5 +1,5 @@
-// Shopping example - A store selling bread and milk for $1 each
-// Demonstrates linear logic resources being consumed during transactions
+// Shopping example with correct linear logic syntax
+// Demonstrates persistent goals (!), optional facts (?), and main goal
 
 // Define basic types as subtypes of atom
 item :: type of atom.
@@ -27,36 +27,24 @@ wants_item :: customer -> item -> type.
 // Define the transaction predicate
 can_buy :: customer -> item -> dollar -> type.
 
-// Store inventory - persistent resources (the store keeps restocking)
+// Store inventory - persistent facts (always available)
 persistent inv1 :: has_item(bread).
 persistent inv2 :: has_item(milk).
 
 // Customer money - linear resources (money gets consumed when spent)
 m1 :: has_money(alice, dollar1).
-m2 :: has_money(alice, dollar2).  // Alice has $2
-m3 :: has_money(bob, dollar3).    // Bob has $1
+m2 :: has_money(alice, dollar2).
+?m3 :: has_money(bob, dollar3).
 
-// Customer preferences
+// Customer preferences - some are optional (might not exist)
 w1 :: wants_item(alice, bread).
-w2 :: wants_item(alice, milk).
+?w2 :: wants_item(alice, milk).
 w3 :: wants_item(bob, bread).
 
-// Transaction rule: A customer can buy an item if they have the money and the store has the item
-transaction :: customer -> item -> dollar -> type.
-
+// Transaction rule using persistent store inventory
 transaction_rule :: 
-    has_money($customer, $money) & has_item($item) & wants_item($customer, $item)
-    => transaction($customer, $item, $money).
+    has_money($customer, $money) & !has_item($item) & wants_item($customer, $item)
+    => can_buy($customer, $item, $money).
 
-// Test queries
-// Alice should be able to buy bread (she has money, wants bread, store has bread)
-?- transaction(alice, bread, dollar1).
-
-// Alice should also be able to buy milk with a dollar
-?- transaction(alice, milk, dollar2).
-
-// Alice can also buy both
-?- transaction(alice, bread, dollar1) & transaction(alice, milk, dollar2).
-
-// What can alice buy?
-?- transaction(alice, $item, dollar1).
+// Main goal - Alice can buy bread
+main :: can_buy(alice, bread, dollar1).

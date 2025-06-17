@@ -24,6 +24,14 @@ pub enum TypeCheckError {
     
     #[error("Unification failed: cannot unify {term1:?} with {term2:?}")]
     UnificationFailed { term1: Term, term2: Term },
+    
+    /// Linear resource consistency checking error
+    #[error("Linear resource error: {message}")]
+    LinearResourceError { message: String },
+    
+    /// Unconsumed linear resources error
+    #[error("Unconsumed linear resources: {resources:?}")]
+    UnconsumedResources { resources: Vec<String> },
 }
 
 pub struct TypeChecker {
@@ -97,10 +105,10 @@ impl TypeChecker {
                     return Ok(());
                 }
             }
-            Clause::Rule { head, body, produces } => {
+            Clause::Rule { head, body, produces, .. } => {
                 // Check head
                 match head {
-                    Term::Compound { functor, args } => {
+                    Term::Compound { functor, args, .. } => {
                         self.check_predicate_call(functor, args)?;
                     }
                     _ => {
@@ -111,7 +119,7 @@ impl TypeChecker {
                 // Check body terms
                 for term in body {
                     match term {
-                        Term::Compound { functor, args } => {
+                        Term::Compound { functor, args, .. } => {
                             self.check_predicate_call(functor, args)?;
                         }
                         _ => {
@@ -136,7 +144,7 @@ impl TypeChecker {
     fn check_query(&self, query: &Query) -> Result<(), TypeCheckError> {
         for term in &query.goals {
             match term {
-                Term::Compound { functor, args } => {
+                Term::Compound { functor, args, .. } => {
                     self.check_predicate_call(functor, args)?;
                 }
                 _ => {
@@ -181,7 +189,7 @@ impl TypeChecker {
     
     fn infer_term_type(&self, term: &Term) -> Result<LogicType, TypeCheckError> {
         match term {
-            Term::Atom { name, type_name: _ } => {
+            Term::Atom { name, type_name: _, .. } => {
                 // Look up the term's declared type
                 if let Some(term_type) = self.term_types.get(name) {
                     Ok(term_type.clone())
@@ -206,7 +214,7 @@ impl TypeChecker {
                 }
             }
             Term::Integer(_) => Ok(LogicType::Integer),
-            Term::Compound { functor, args: _ } => {
+            Term::Compound { functor, args: _, .. } => {
                 // For compound terms, we need to look up the predicate type
                 // This is a simplified approach - in practice you'd want more sophisticated inference
                 Err(TypeCheckError::UnknownTerm { term: functor.clone() })
@@ -288,7 +296,7 @@ impl TypeChecker {
                 // For now, we'll assign a generic type to variables
                 var_types.insert(name.clone(), LogicType::Named("any".to_string()));
             }
-            Term::Compound { functor: _, args } => {
+            Term::Compound { functor: _, args, .. } => {
                 for arg in args {
                     self.collect_variable_types(arg, var_types)?;
                 }
@@ -310,7 +318,7 @@ impl TypeChecker {
                     });
                 }
             }
-            Term::Compound { functor: _, args } => {
+            Term::Compound { functor: _, args, .. } => {
                 for arg in args {
                     self.check_term_variables(arg, var_types)?;
                 }
@@ -463,7 +471,7 @@ impl TypeChecker {
                     return Err(TypeCheckError::UnknownTerm { term: name.clone() });
                 }
             }
-            Term::Compound { functor, args } => {
+            Term::Compound { functor, args, .. } => {
                 // For compound productions, check the functor as a predicate
                 self.check_predicate_call(functor, args)?;
             }

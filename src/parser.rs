@@ -112,6 +112,39 @@ impl Parser {
         }
     }
     
+    /// Create LinearResourceInfo with current location
+    fn create_linear_resource_info(&self) -> LinearResourceInfo {
+        if let Some(span) = self.current_token_span() {
+            LinearResourceInfo::new()
+                .with_location(SourceLocation::new(
+                    self.file_path.clone(),
+                    span.line,
+                    span.column,
+                    span.length,
+                ))
+        } else {
+            LinearResourceInfo::new()
+        }
+    }
+    
+    /// Create location-aware error with custom message
+    fn error_at_current(&self, message: &str) -> ParseError {
+        let current_span = self.current_token_span();
+        if let Some(span) = current_span {
+            let diagnostic = Diagnostic::error(message.to_string())
+                .with_location(SourceLocation::new(
+                    self.file_path.clone(),
+                    span.line,
+                    span.column,
+                    span.length,
+                ))
+                .with_source_text(self.source_text.clone());
+            ParseError::Diagnostic(diagnostic)
+        } else {
+            ParseError::InvalidExpression
+        }
+    }
+    
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut type_definitions = Vec::new();
         let mut type_declarations = Vec::new();
@@ -120,6 +153,7 @@ impl Parser {
         let mut clauses = Vec::new();
         let mut queries = Vec::new();
         let mut main = None;
+        let mut main_goal = None;
         
         // Parse type declarations, clauses, functions, and queries
         while !matches!(self.current_token(), Token::Eof) {
@@ -131,6 +165,20 @@ impl Parser {
                 Token::Bang => {
                     // Persistent fact: !fact(args). or !name :: predicate(args).
                     clauses.push(self.parse_persistent_clause()?);
+                }
+                Token::Question => {
+                    // Optional fact: ?fact(args). or ?name :: predicate(args).
+                    self.advance(); // consume ?
+                    let mut clause = self.parse_clause()?;
+                    match &mut clause {
+                        Clause::Fact { optional, .. } => {
+                            *optional = true;
+                        }
+                        Clause::Rule { .. } => {
+                            return Err(self.error_at_current("Rules cannot be marked as optional"));
+                        }
+                    }
+                    clauses.push(clause);
                 }
                 Token::Persistent => {
                     // New persistent syntax: persistent name :: fact
@@ -145,6 +193,31 @@ impl Parser {
                     }
                 }
                 Token::Identifier(_) => {
+                    // Check if this is a main goal definition
+                    if let Token::Identifier(name) = self.current_token() {
+                        if name == "main" && matches!(self.peek_token(), Some(Token::ColonColon)) {
+                            // Parse main :: goal1, goal2.
+                            self.advance(); // consume 'main'
+                            self.advance(); // consume '::'
+                            
+                            let mut goals = Vec::new();
+                            goals.push(self.parse_term_with_context(true)?);
+                            
+                            while matches!(self.current_token(), Token::Comma) {
+                                self.advance();
+                                goals.push(self.parse_term_with_context(true)?);
+                            }
+                            
+                            self.expect(Token::Dot)?;
+                            
+                            main_goal = Some(Query {
+                                goals,
+                                is_disjunctive: false, // main goals are always conjunctive
+                            });
+                            continue;
+                        }
+                    }
+                    
                     // Check if this is a new-style type definition (name :: [distinct] type [of supertype].)
                     if self.peek_new_type_definition() {
                         let type_def = self.parse_new_type_definition()?;
@@ -211,7 +284,7 @@ impl Parser {
             functions, 
             clauses, 
             queries, 
-            main 
+            main_goal
         })
     }
     
@@ -404,7 +477,7 @@ impl Parser {
                 self.advance();
                 name
             }
-            _ => return Err(ParseError::InvalidExpression),
+            _ => return Err(self.error_at_current("Expected function name")),
         };
         
         self.expect(Token::LeftParen)?;
@@ -415,7 +488,7 @@ impl Parser {
                 self.advance();
                 param
             }
-            _ => return Err(ParseError::InvalidExpression),
+            _ => return Err(self.error_at_current("Expected parameter name")),
         };
         
         // Skip type annotations for now (simplified)
@@ -670,7 +743,7 @@ impl Parser {
                 None => is_disjunctive = Some(new_connective),
                 Some(current) => {
                     if current != new_connective {
-                        return Err(ParseError::InvalidSyntax("Cannot mix conjunctive (&, ,) and disjunctive (|) operators in the same query".to_string()));
+                        return Err(self.create_error_diagnostic("Cannot mix conjunctive (&, ,) and disjunctive (|) operators in the same query".to_string()));
                     }
                 }
             }
@@ -710,11 +783,11 @@ impl Parser {
             self.expect(Token::Dot)?;
             
             match predicate_term {
-                Term::Compound { functor, args } => {
-                    Ok(Clause::Fact { predicate: functor, args, persistent: true, name })
+                Term::Compound { functor, args, .. } => {
+                    Ok(Clause::Fact { predicate: functor, args, persistent: true, optional: false, name, linear_info: self.create_linear_resource_info() })
                 }
                 Term::Atom { name: pred_name, .. } => {
-                    Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: true, name })
+                    Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: true, optional: false, name, linear_info: self.create_linear_resource_info() })
                 }
                 _ => Err(ParseError::InvalidExpression),
             }
@@ -741,8 +814,8 @@ impl Parser {
                 self.expect(Token::Dot)?;
                 
                 match predicate_term {
-                    Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args, persistent: true, name: None })
+                    Term::Compound { functor, args, .. } => {
+                        Ok(Clause::Fact { predicate: functor, args, persistent: true, optional: false, name: None, linear_info: self.create_linear_resource_info() })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
@@ -762,17 +835,25 @@ impl Parser {
                 
                 self.expect(Token::RightParen)?;
                 self.expect(Token::Dot)?;
-                Ok(Clause::Fact { predicate: first_identifier, args, persistent: true, name: None })
+                Ok(Clause::Fact { predicate: first_identifier, args, persistent: true, optional: false, name: None, linear_info: self.create_linear_resource_info() })
             } else {
                 // This is a simple !fact.
                 self.expect(Token::Dot)?;
-                Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true, name: None })
+                Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true, optional: false, name: None, linear_info: self.create_linear_resource_info() })
             }
         }
     }
 
     fn parse_clause(&mut self) -> Result<Clause, ParseError> {
-        // Check for persistent fact prefix
+        // Check for optional fact prefix (?)
+        let optional = if matches!(self.current_token(), Token::Question) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        
+        // Check for persistent fact prefix (!)
         let persistent = if matches!(self.current_token(), Token::Bang) {
             self.advance();
             true
@@ -781,18 +862,31 @@ impl Parser {
         };
         
         // Parse the first identifier/term
+        let name_location = self.current_token_span().cloned(); // Capture location before parsing
         let first_term = self.parse_term()?;
         
         match self.current_token() {
             Token::Dot => {
                 // Simple fact: predicate(args).
                 self.advance();
+                
+                // Create linear info with the captured location
+                let mut linear_info = LinearResourceInfo::new();
+                if let Some(span) = name_location {
+                    linear_info = linear_info.with_location(SourceLocation::new(
+                        self.file_path.clone(),
+                        span.line,
+                        span.column,
+                        span.length,
+                    ));
+                }
+                
                 match first_term {
-                    Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args, persistent, name: None })
+                    Term::Compound { functor, args, .. } => {
+                        Ok(Clause::Fact { predicate: functor, args, persistent, optional, name: None, linear_info })
                     }
                     Term::Atom { name, .. } => {
-                        Ok(Clause::Fact { predicate: name, args: vec![], persistent, name: None })
+                        Ok(Clause::Fact { predicate: name, args: vec![], persistent, optional, name: None, linear_info })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
@@ -826,7 +920,7 @@ impl Parser {
                         // Handle conjunction with & (instead of comma)
                         while matches!(self.current_token(), Token::Ampersand) {
                             self.advance();
-                            body.push(self.parse_term()?);
+                            body.push(self.parse_term_with_context(true)?);
                         }
                         
                         // Expect => for the result
@@ -838,18 +932,30 @@ impl Parser {
                         self.expect(Token::Dot)?;
                         
                         // Create the goal name as the head term
-                        let head = Term::Atom { name, type_name: None };
-                        Ok(Clause::Rule { head, body, produces })
+                        let head = Term::Atom { name, type_name: None, persistent_use: false };
+                        Ok(Clause::Rule { head, body, produces, linear_info: self.create_linear_resource_info() })
                     }
                     Token::Dot => {
                         // Named fact: name :: predicate(args).
                         self.advance(); // consume .
+                        
+                        // Create linear info with the captured name location
+                        let mut linear_info = LinearResourceInfo::new();
+                        if let Some(span) = name_location {
+                            linear_info = linear_info.with_location(SourceLocation::new(
+                                self.file_path.clone(),
+                                span.line,
+                                span.column,
+                                span.length,
+                            ));
+                        }
+                        
                         match second_term {
-                            Term::Compound { functor, args } => {
-                                Ok(Clause::Fact { predicate: functor, args, persistent: false, name: Some(name) })
+                            Term::Compound { functor, args, .. } => {
+                                Ok(Clause::Fact { predicate: functor, args, persistent: false, optional: false, name: Some(name), linear_info })
                             }
                             Term::Atom { name: pred_name, .. } => {
-                                Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: false, name: Some(name) })
+                                Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: false, optional: false, name: Some(name), linear_info })
                             }
                             _ => Err(ParseError::InvalidExpression),
                         }
@@ -861,7 +967,7 @@ impl Parser {
                         // Handle conjunction with &
                         while matches!(self.current_token(), Token::Ampersand) {
                             self.advance();
-                            body.push(self.parse_term()?);
+                            body.push(self.parse_term_with_context(true)?);
                         }
                         
                         // Expect => for the result
@@ -873,8 +979,8 @@ impl Parser {
                         self.expect(Token::Dot)?;
                         
                         // Create the goal name as the head term
-                        let head = Term::Atom { name, type_name: None };
-                        Ok(Clause::Rule { head, body, produces })
+                        let head = Term::Atom { name, type_name: None, persistent_use: false };
+                        Ok(Clause::Rule { head, body, produces, linear_info: self.create_linear_resource_info() })
                     }
                     _ => Err(ParseError::InvalidExpression),
                 }
@@ -889,27 +995,66 @@ impl Parser {
                 let produces = None;
                 
                 // Parse the body goals
-                body.push(self.parse_term()?);
+                body.push(self.parse_term_with_context(true)?);
                 
                 while matches!(self.current_token(), Token::Comma) {
                     self.advance();
-                    body.push(self.parse_term()?);
+                    body.push(self.parse_term_with_context(true)?);
                 }
                 
                 self.expect(Token::Dot)?;
-                Ok(Clause::Rule { head: first_term, body, produces })
+                Ok(Clause::Rule { head: first_term, body, produces, linear_info: self.create_linear_resource_info() })
             }
             _ => Err(ParseError::InvalidExpression),
         }
     }
     
     fn parse_term(&mut self) -> Result<Term, ParseError> {
+        self.parse_term_with_context(false)
+    }
+    
+    fn parse_term_with_context(&mut self, allow_persistent_use: bool) -> Result<Term, ParseError> {
         match self.current_token() {
             Token::Bang => {
-                // Clone operator: !term
                 self.advance();
-                let inner_term = self.parse_term()?;
-                Ok(Term::Clone(Box::new(inner_term)))
+                
+                // Look ahead to see if this is a persistent predicate use or a clone
+                if allow_persistent_use && matches!(self.current_token(), Token::Identifier(_)) {
+                    // This is !predicate(...) - persistent use
+                    if let Token::Identifier(name) = self.current_token() {
+                        let name = name.clone();
+                        self.advance();
+                        
+                        if matches!(self.current_token(), Token::LeftParen) {
+                            // Compound term with persistent use
+                            self.advance(); // consume (
+                            let mut args = Vec::new();
+                            
+                            if !matches!(self.current_token(), Token::RightParen) {
+                                loop {
+                                    args.push(self.parse_term_with_context(allow_persistent_use)?);
+                                    if matches!(self.current_token(), Token::Comma) {
+                                        self.advance();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            self.expect(Token::RightParen)?;
+                            Ok(Term::Compound { functor: name, args, persistent_use: true })
+                        } else {
+                            // Atom with persistent use
+                            Ok(Term::Atom { name, type_name: None, persistent_use: true })
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    // This is !term - clone operator
+                    let inner_term = self.parse_term_with_context(allow_persistent_use)?;
+                    Ok(Term::Clone(Box::new(inner_term)))
+                }
             }
             Token::Variable(name) => {
                 // Variable: $name
@@ -927,21 +1072,22 @@ impl Parser {
                     let mut args = Vec::new();
                     
                     if !matches!(self.current_token(), Token::RightParen) {
-                        args.push(self.parse_term()?);
+                        args.push(self.parse_term_with_context(allow_persistent_use)?);
                         
                         while matches!(self.current_token(), Token::Comma) {
                             self.advance();
-                            args.push(self.parse_term()?);
+                            args.push(self.parse_term_with_context(allow_persistent_use)?);
                         }
                     }
                     
                     self.expect(Token::RightParen)?;
-                    Ok(Term::Compound { functor: name, args })
+                    Ok(Term::Compound { functor: name, args, persistent_use: false })
                 } else {
                     // Simple atom/identifier
                     Ok(Term::Atom { 
                         name, 
-                        type_name: None 
+                        type_name: None,
+                        persistent_use: false,  // Will be set by parser when ! is encountered
                     })
                 }
             }
@@ -1287,5 +1433,25 @@ mod tests {
             }
             _ => panic!("Expected lambda expression"),
         }
+    }
+
+    /// Parse optional clause starting with ? token
+    fn parse_optional_clause(&mut self) -> Result<Clause, ParseError> {
+        self.expect(Token::Question)?;
+        
+        // Parse the rest as a normal clause but mark it as optional
+        let mut clause = self.parse_clause()?;
+        
+        // Set the optional flag based on the clause type
+        match &mut clause {
+            Clause::Fact { optional, .. } => {
+                *optional = true;
+            }
+            Clause::Rule { .. } => {
+                return Err(self.error_at_current("Rules cannot be marked as optional"));
+            }
+        }
+        
+        Ok(clause)
     }
 }

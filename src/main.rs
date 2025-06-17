@@ -3,7 +3,6 @@ mod lexer;
 mod parser;
 mod typechecker;
 mod codegen;
-mod unification;
 mod diagnostic;
 mod resource;
 
@@ -46,14 +45,18 @@ enum Commands {
         #[arg(long)]
         debug: bool,
     },
-    /// Check syntax and types
+    /// Check a program
     Check {
         /// Input source file
         input: PathBuf,
+        /// Generate detailed linearity report
+        #[arg(long)]
+        report: bool,
         /// Enable debug output
         #[arg(long)]
         debug: bool,
     },
+
 }
 
 /// Result of the parsing pipeline
@@ -73,8 +76,8 @@ fn main() {
         Commands::Compile { input, output, executable, debug } => {
             compile_command(input, output, executable, debug)
         }
-        Commands::Check { input, debug } => {
-            check_command(input, debug)
+        Commands::Check { input, report, debug } => {
+            check_command(input, report, debug)
         }
     };
     
@@ -88,6 +91,10 @@ fn main() {
 fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn std::error::Error>> {
     // Read source file
     let source = fs::read_to_string(&input)?;
+    
+    if debug {
+        println!("=== PARSING {} ===", input.display());
+    }
     
     // Tokenize
     let lex_result = match lexer::tokenize(&source) {
@@ -180,6 +187,74 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
         eprintln!("DEBUG: Type checking passed");
     }
     
+    // COMPILE-TIME LINEAR RESOURCE ANALYSIS
+    if debug {
+        eprintln!("DEBUG: Performing linear resource analysis...");
+    }
+    
+    // Run comprehensive linearity analysis with actual file name
+    let filename = input.to_string_lossy().to_string();
+    if let Err(linearity_errors) = resource::analyze_program_linearity_with_file(&program, &filename) {
+        eprintln!("Linear resource errors detected:");
+        for error in &linearity_errors {
+            match error {
+                resource::LinearError::UnconsumedResource { resource_name, location } => {
+                    let diagnostic = diagnostic::Diagnostic::error(
+                        format!("Unconsumed linear resource: '{}'", resource_name)
+                    )
+                    .with_location(diagnostic::SourceLocation::new(
+                        location.file.clone(),
+                        location.line,
+                        location.column,
+                        location.length,
+                    ))
+                    .with_help(format!("Linear resource '{}' must be consumed exactly once. Either add a rule that uses this resource, or mark the fact as optional with '?' prefix.", resource_name))
+                    .with_source_text(source.clone());
+                    diagnostic.emit();
+                }
+                resource::LinearError::MultipleUseWithoutClone { variable, first_use, second_use } => {
+                    let diagnostic = diagnostic::Diagnostic::error(
+                        format!("Linear variable '{}' used multiple times", variable)
+                    )
+                    .with_location(diagnostic::SourceLocation::new(
+                        second_use.file.clone(),
+                        second_use.line,
+                        second_use.column,
+                        second_use.length,
+                    ))
+                    .with_help(format!("Linear variable '{}' was first used at '{}' and then again at '{}'. Use the exponential prefix !{} if multiple uses are intended.", variable, first_use, second_use, variable))
+                    .with_source_text(source.clone());
+                    diagnostic.emit();
+                }
+                resource::LinearError::UseAfterFree { resource_name, deallocation_site, use_site } => {
+                    let diagnostic = diagnostic::Diagnostic::error(
+                        format!("Use after free: '{}'", resource_name)
+                    )
+                    .with_location(diagnostic::SourceLocation::new(
+                        use_site.file.clone(),
+                        use_site.line,
+                        use_site.column,
+                        use_site.length,
+                    ))
+                    .with_help(format!("Resource '{}' was deallocated at '{}' but used again at '{}'", resource_name, deallocation_site, use_site))
+                    .with_source_text(source.clone());
+                    diagnostic.emit();
+                }
+                _ => {
+                    eprintln!("  - {:?}", error);
+                }
+            }
+        }
+        std::process::exit(1);
+    }
+    
+    if debug {
+        eprintln!("DEBUG: Linear resource analysis passed - all resources properly consumed");
+        // Generate and print linearity report
+        let report = resource::generate_linearity_report(&program);
+        eprintln!("{}", report);
+    }
+    
     // Perform linear resource analysis
     let mut resource_manager = resource::LinearResourceManager::new();
     for clause in &program.clauses {
@@ -187,7 +262,7 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
             Clause::Fact { predicate, args, persistent: _, .. } => {
                 resource_manager.add_fact(predicate.clone(), args.clone());
             }
-            Clause::Rule { head, body, produces } => {
+            Clause::Rule { head, body, produces, .. } => {
                 resource_manager.add_rule(head.clone(), body.clone());
                 if debug && produces.is_some() {
                     eprintln!("DEBUG: Rule produces: {:?}", produces);
@@ -372,12 +447,22 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
 }
 
 /// Check command: validate syntax, types, and linear resource usage
-fn check_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let _parsed = parse_program(input, debug)?;
+fn check_command(input: PathBuf, report: bool, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_program(input, debug)?;
+    
+    if report {
+        let report = resource::generate_linearity_report(&parsed.program);
+        println!("{}", report);
+    }
+    
+    println!("✓ All checks passed!");
     println!("✓ Type checking passed!");
-    println!("Program is well-typed");
+    println!("✓ Linear resource analysis passed!");
+    println!("Program is well-typed and linear resource usage is correct.");
     Ok(())
 }
+
+
 
 #[cfg(test)]
 mod tests {

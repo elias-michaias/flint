@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::diagnostic::SourceLocation;
 
 /// Represents a variable name
 pub type VarName = String;
@@ -200,7 +201,7 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub clauses: Vec<Clause>,
     pub queries: Vec<Query>,
-    pub main: Option<Expr>,
+    pub main_goal: Option<Query>,  // Main goal that runs automatically if present
 }
 
 /// Type environment for tracking variable types and usage
@@ -264,6 +265,7 @@ pub enum Term {
     Atom {
         name: String,
         type_name: Option<LogicType>,
+        persistent_use: bool,  // true for !atom, false otherwise
     },
     
     /// Variable with type
@@ -276,6 +278,7 @@ pub enum Term {
     Compound {
         functor: String,
         args: Vec<Term>,
+        persistent_use: bool,  // true for !predicate(...), false otherwise
     },
     
     /// Integer
@@ -308,7 +311,9 @@ pub enum Clause {
         predicate: String,
         args: Vec<Term>,
         persistent: bool,  // true for persistent fact, false for linear fact
+        optional: bool,    // true for optional fact (?fact), false otherwise
         name: Option<String>, // optional name for persistent facts (persistent name :: fact)
+        linear_info: LinearResourceInfo, // Linear resource tracking
     },
     
     /// Rule: head :- body.
@@ -316,6 +321,7 @@ pub enum Clause {
         head: Term,
         body: Vec<Term>,
         produces: Option<Term>,  // Optional production after =>
+        linear_info: LinearResourceInfo, // Linear resource tracking
     },
 }
 
@@ -398,13 +404,135 @@ impl Substitution {
                     term.clone()
                 }
             }
-            Term::Compound { functor, args } => {
+            Term::Compound { functor, args, .. } => {
                 Term::Compound {
                     functor: functor.clone(),
                     args: args.iter().map(|arg| self.apply(arg)).collect(),
+                    persistent_use: false,  // Default for substitution
                 }
             }
             _ => term.clone(),
         }
+    }
+}
+
+/// Linear resource tracking for compile-time checking
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearResourceTracker {
+    /// Resources that must be consumed
+    pub required_resources: Vec<String>,
+    /// Resources that have been consumed
+    pub consumed_resources: Vec<String>,
+    /// Resources that are available for consumption
+    pub available_resources: Vec<String>,
+}
+
+impl LinearResourceTracker {
+    pub fn new() -> Self {
+        Self {
+            required_resources: Vec::new(),
+            consumed_resources: Vec::new(),
+            available_resources: Vec::new(),
+        }
+    }
+    
+    /// Mark a resource as required to be consumed
+    pub fn require_resource(&mut self, resource: String) {
+        if !self.required_resources.contains(&resource) {
+            self.required_resources.push(resource);
+        }
+    }
+    
+    /// Mark a resource as consumed
+    pub fn consume_resource(&mut self, resource: String) -> Result<(), String> {
+        if !self.available_resources.contains(&resource) {
+            return Err(format!("Cannot consume resource '{}': not available", resource));
+        }
+        
+        self.available_resources.retain(|r| r != &resource);
+        if !self.consumed_resources.contains(&resource) {
+            self.consumed_resources.push(resource);
+        }
+        Ok(())
+    }
+    
+    /// Make a resource available for consumption
+    pub fn add_available_resource(&mut self, resource: String) {
+        if !self.available_resources.contains(&resource) {
+            self.available_resources.push(resource);
+        }
+    }
+    
+    /// Check if all required resources have been consumed
+    pub fn check_all_consumed(&self) -> Result<(), Vec<String>> {
+        let unconsumed: Vec<String> = self.required_resources
+            .iter()
+            .filter(|r| !self.consumed_resources.contains(r))
+            .cloned()
+            .collect();
+            
+        if unconsumed.is_empty() {
+            Ok(())
+        } else {
+            Err(unconsumed)
+        }
+    }
+    
+    /// Merge another tracker's state (for rule composition)
+    pub fn merge(&mut self, other: &LinearResourceTracker) {
+        for resource in &other.required_resources {
+            self.require_resource(resource.clone());
+        }
+        for resource in &other.consumed_resources {
+            if let Err(_) = self.consume_resource(resource.clone()) {
+                // Resource not available, add it as consumed directly
+                if !self.consumed_resources.contains(resource) {
+                    self.consumed_resources.push(resource.clone());
+                }
+            }
+        }
+        for resource in &other.available_resources {
+            self.add_available_resource(resource.clone());
+        }
+    }
+}
+
+/// Linear resource information attached to clauses
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearResourceInfo {
+    /// Resources consumed by this clause
+    pub consumes: Vec<String>,
+    /// Resources produced by this clause
+    pub produces: Vec<String>,
+    /// Whether this clause requires linear resource checking
+    pub requires_linear_check: bool,
+    /// Source location of the clause for error reporting
+    pub location: Option<SourceLocation>,
+}
+
+impl LinearResourceInfo {
+    pub fn new() -> Self {
+        Self {
+            consumes: Vec::new(),
+            produces: Vec::new(),
+            requires_linear_check: false,
+            location: None,
+        }
+    }
+    
+    pub fn with_consumes(mut self, resources: Vec<String>) -> Self {
+        self.consumes = resources;
+        self.requires_linear_check = true;
+        self
+    }
+    
+    pub fn with_produces(mut self, resources: Vec<String>) -> Self {
+        self.produces = resources;
+        self
+    }
+    
+    pub fn with_location(mut self, location: SourceLocation) -> Self {
+        self.location = Some(location);
+        self
     }
 }

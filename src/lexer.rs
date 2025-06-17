@@ -65,6 +65,7 @@ pub enum Token {
     And,        // &&
     Or,         // ||
     Bang,       // ! (clone operator)
+    Question,   // ? (optional consumption)
     
     // Punctuation
     LeftParen,   // (
@@ -196,6 +197,7 @@ fn parse_operators(input: &str) -> IResult<&str, Token> {
         map(tag("<"), |_| Token::Less),
         map(tag(">"), |_| Token::Greater),
         map(tag("!"), |_| Token::Bang),
+        map(tag("?"), |_| Token::Question),
         map(tag("|"), |_| Token::Pipe),
     ))(input)
 }

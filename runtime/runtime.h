@@ -45,11 +45,14 @@ typedef struct term {
     } data;
 } term_t;
 
-// Linear resource - facts that can be consumed
+// Linear resource - facts that can be consumed with enhanced memory management
 typedef struct linear_resource {
     term_t* fact;
     int consumed;  // 0 = available, 1 = consumed
+    int deallocated; // 0 = in memory, 1 = deallocated (for true linear management)
     int persistent; // 0 = linear (consumable), 1 = persistent (non-consumable)
+    size_t memory_size; // Estimated memory usage for this resource
+    char* allocation_site; // Debug info: where this was allocated
     struct linear_resource* next;
 } linear_resource_t;
 
@@ -104,10 +107,52 @@ typedef struct consumed_state {
     struct consumed_state* next;
 } consumed_state_t;
 
+// Define substitution_t before forward collection structures
 typedef struct {
     binding_t bindings[MAX_VARS];
     int count;
 } substitution_t;
+
+// NEW: Forward collection solution planning structures
+#define MAX_RESOURCE_ALLOCATIONS 50
+#define MAX_RULE_APPLICATIONS 20
+
+// Represents a specific resource allocation for a goal
+typedef struct resource_allocation {
+    term_t* goal;                    // The goal this allocation satisfies
+    linear_resource_t* resource;     // The resource being allocated
+    substitution_t bindings;         // Variable bindings from unification
+    int is_valid;                    // Whether this allocation is viable
+} resource_allocation_t;
+
+// Represents a rule application plan
+typedef struct rule_application_plan {
+    clause_t* rule;                  // The rule to apply
+    substitution_t bindings;         // Variable bindings for this application
+    linear_resource_t** consumed_resources; // Resources this rule will consume
+    int consumed_count;              // Number of resources consumed
+    term_t* produced_fact;           // Fact this rule will produce
+    int execution_order;             // When to execute this rule (0 = first)
+    int is_valid;                    // Whether this rule application is viable
+} rule_application_plan_t;
+
+// Complete solution plan for a query
+typedef struct solution_plan {
+    substitution_t final_bindings;   // Final variable bindings
+    resource_allocation_t* allocations; // Resource allocations
+    int allocation_count;            // Number of allocations
+    rule_application_plan_t* rule_applications; // Rule applications
+    int rule_application_count;      // Number of rule applications
+    int is_valid;                    // Whether this plan is executable
+    int estimated_cost;              // Cost estimate for optimization
+} solution_plan_t;
+
+// Collection of all possible solution plans
+typedef struct solution_plan_collection {
+    solution_plan_t* plans;          // Array of solution plans
+    int count;                       // Number of plans
+    int capacity;                    // Allocated capacity
+} solution_plan_collection_t;
 
 // Forward declaration for persistent facts
 typedef struct persistent_fact {
@@ -131,7 +176,7 @@ typedef struct goal_cache {
     int count;
 } goal_cache_t;
 
-// Linear knowledge base
+// Linear knowledge base with enhanced memory management
 typedef struct {
     linear_resource_t* resources;  // Linear facts
     clause_t* rules;               // Rules (can be reused)
@@ -140,6 +185,13 @@ typedef struct {
     union_mapping_t* union_mappings; // Maps variant types to parent types
     persistent_fact_t* persistent_facts; // Persistent facts (not consumed)
     int* applied_rules;            // Bitmap tracking which rules have been applied
+    
+    // Enhanced memory management
+    int auto_deallocate;           // Enable automatic deallocation on consumption
+    size_t total_memory_allocated; // Track total memory usage
+    size_t peak_memory_usage;      // Track peak memory usage
+    int checkpoint_count;          // Number of active checkpoints
+    void** checkpoints;            // Stack of resource state checkpoints
 } linear_kb_t;
 
 // Runtime function declarations
@@ -270,6 +322,21 @@ typedef struct enhanced_solution_list {
 enhanced_solution_list_t* create_enhanced_solution_list();
 void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst);
 void print_enhanced_solution(enhanced_solution_t* solution);
+
+// NEW: Forward collection function declarations
+solution_plan_collection_t* create_solution_plan_collection();
+void free_solution_plan_collection(solution_plan_collection_t* collection);
+solution_plan_collection_t* generate_all_solution_plans(linear_kb_t* kb, term_t** goals, int goal_count);
+int execute_solution_plan(linear_kb_t* kb, solution_plan_t* plan);
+resource_allocation_t* find_all_resource_allocations(linear_kb_t* kb, term_t** goals, int goal_count, int* allocation_count);
+rule_application_plan_t* plan_all_rule_applications(linear_kb_t* kb, term_t** goals, int goal_count, int* plan_count);
+int is_solution_plan_valid(linear_kb_t* kb, solution_plan_t* plan);
+linear_kb_t* create_kb_copy(linear_kb_t* kb);
+
+// NEW: Forward collection query resolution (replaces backtracking versions)
+int linear_resolve_query_forward(linear_kb_t* kb, term_t** goals, int goal_count);
+int linear_resolve_query_enhanced_forward(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
+int linear_resolve_query_enhanced_disjunctive_forward(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
 void free_enhanced_solution_list(enhanced_solution_list_t* list);
 void add_persistent_fact(linear_kb_t* kb, term_t* fact);
 int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
@@ -308,5 +375,28 @@ void extract_variables_from_term(term_t* term, char** vars, int* var_count, int 
 void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, int* var_count, int max_vars);
 int all_variables_bound(char** vars, int var_count, substitution_t* subst);
 void free_variable_list(char** vars, int var_count);
+
+// Enhanced linear memory management functions
+void set_auto_deallocation(linear_kb_t* kb, int enabled);
+int get_memory_usage_estimate(linear_kb_t* kb);
+int create_resource_checkpoint(linear_kb_t* kb);
+int rollback_to_checkpoint(linear_kb_t* kb, int checkpoint_id);
+void cleanup_consumed_resources(linear_kb_t* kb);
+void print_linear_memory_status(linear_kb_t* kb);
+
+// Linear resource lifecycle functions  
+linear_resource_t* create_linear_resource_with_tracking(term_t* fact, const char* allocation_site);
+void deallocate_linear_resource(linear_resource_t* resource);
+int is_resource_deallocated(linear_resource_t* resource);
+
+// Compile-time checking support (for integration with Rust)
+typedef struct linearity_violation {
+    char* resource_name;
+    char* violation_type;  // "unconsumed", "double_use", "use_after_free"
+    char* location;
+} linearity_violation_t;
+
+int check_resource_linearity(linear_kb_t* kb, linearity_violation_t** violations, int* violation_count);
+void free_linearity_violations(linearity_violation_t* violations, int count);
 
 #endif // RUNTIME_H

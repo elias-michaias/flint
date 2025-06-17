@@ -17,7 +17,7 @@ impl Colors {
 }
 
 /// Represents a location in source code
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SourceLocation {
     pub file: String,
     pub line: usize,
@@ -33,6 +33,16 @@ impl SourceLocation {
     /// Create a location for a single character
     pub fn single(file: String, line: usize, column: usize) -> Self {
         Self::new(file, line, column, 1)
+    }
+}
+
+impl fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.line == 0 {
+            write!(f, "{}", self.file)
+        } else {
+            write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        }
     }
 }
 
