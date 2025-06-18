@@ -408,7 +408,8 @@ impl CodeGenerator {
         writeln!(self.output)?;
         
         writeln!(self.output, "void initialize_kb() {{")?;
-        writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "    symbol_table_t* symbols = create_symbol_table();")?;
+        writeln!(self.output, "    kb = create_linear_kb(symbols);")?;
         writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
         writeln!(self.output, "}}")?;
         writeln!(self.output)?;
@@ -422,7 +423,8 @@ impl CodeGenerator {
         writeln!(self.output)?;
         
         writeln!(self.output, "void initialize_kb() {{")?;
-        writeln!(self.output, "    kb = create_linear_kb();")?;
+        writeln!(self.output, "    symbol_table_t* symbols = create_symbol_table();")?;
+        writeln!(self.output, "    kb = create_linear_kb(symbols);")?;
         writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
         writeln!(self.output)?;
         
@@ -436,11 +438,11 @@ impl CodeGenerator {
                         
                         // Generate code to create the persistent fact
                         if args.is_empty() {
-                            writeln!(self.output, "    add_persistent_fact(kb, create_atom(\"{}\"));", predicate)?;
+                            writeln!(self.output, "    add_persistent_fact(kb, create_atom(kb->symbols, \"{}\"));", predicate)?;
                         } else {
                             let args_code = self.generate_term_array(args)?;
                             writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", fact_args_{}, {});", 
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(kb->symbols, \"{}\", fact_args_{}, {});", 
                                 i, predicate, i, args.len())?;
                             writeln!(self.output, "    add_persistent_fact(kb, fact_{});", i)?;
                         }
@@ -451,11 +453,11 @@ impl CodeGenerator {
                         
                         // Generate code to create the linear fact
                         if args.is_empty() {
-                            writeln!(self.output, "    add_linear_fact(kb, create_atom(\"{}\"));", predicate)?;
+                            writeln!(self.output, "    add_linear_fact(kb, create_atom(kb->symbols, \"{}\"));", predicate)?;
                         } else {
                             let args_code = self.generate_term_array(args)?;
                             writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(\"{}\", fact_args_{}, {});", 
+                            writeln!(self.output, "    term_t* fact_{} = create_compound(kb->symbols, \"{}\", fact_args_{}, {});", 
                                 i, predicate, i, args.len())?;
                             writeln!(self.output, "    add_linear_fact(kb, fact_{});", i)?;
                         }
@@ -513,12 +515,12 @@ impl CodeGenerator {
 
     fn generate_term_creation(&mut self, term: &Term) -> Result<String, std::fmt::Error> {
         match term {
-            Term::Atom { name, .. } => Ok(format!("create_atom(\"{}\")", name)),
-            Term::Var { name, .. } => Ok(format!("create_var(\"${}\")", name)),
+            Term::Atom { name, .. } => Ok(format!("create_atom(kb->symbols, \"{}\")", name)),
+            Term::Var { name, .. } => Ok(format!("create_var_named(kb->symbols, \"${}\")", name)),
             Term::Integer(value) => Ok(format!("create_integer({})", value)),
             Term::Compound { functor, args, .. } => {
                 if args.is_empty() {
-                    Ok(format!("create_compound(\"{}\", NULL, 0)", functor))
+                    Ok(format!("create_compound(kb->symbols, \"{}\", NULL, 0)", functor))
                 } else {
                     let args_var = format!("args_{}", self.var_counter);
                     self.var_counter += 1;
@@ -529,7 +531,7 @@ impl CodeGenerator {
                         writeln!(self.output, "    {}[{}] = {};", args_var, i, arg_code)?;
                     }
                     
-                    Ok(format!("create_compound(\"{}\", {}, {})", functor, args_var, args.len()))
+                    Ok(format!("create_compound(kb->symbols, \"{}\", {}, {})", functor, args_var, args.len()))
                 }
             }
             Term::Clone(inner) => {
@@ -587,7 +589,7 @@ impl CodeGenerator {
             let goal_code = self.generate_term_creation(goal)?;
             writeln!(self.output, "    goals[{}] = {};", i, goal_code)?;
             writeln!(self.output, "    printf(\"Goal {}: \");", i)?;
-            writeln!(self.output, "    print_term(goals[{}]);", i)?;
+            writeln!(self.output, "    print_term(goals[{}], kb->symbols);", i)?;
             writeln!(self.output, "    printf(\"\\n\");")?;
             
             // Add consumption metadata for this goal if it's a resource consumption
@@ -683,7 +685,7 @@ impl CodeGenerator {
                     }
                 }
                 let goal_code = self.generate_term_creation(goal)?;
-                writeln!(self.output, "    print_term({});", goal_code)?;
+                writeln!(self.output, "    print_term({}, kb->symbols);", goal_code)?;
             }
             writeln!(self.output, "    printf(\".\\n\");")?;
             

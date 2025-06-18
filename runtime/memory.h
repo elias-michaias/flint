@@ -3,8 +3,15 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "symbol_table.h"
 
 // Forward declarations
+struct linear_kb;
+struct term;
+struct linear_resource;
+struct consumption_metadata;
+
+// Typedefs for convenience
 typedef struct linear_kb linear_kb_t;
 typedef struct term term_t;
 typedef struct linear_resource linear_resource_t;

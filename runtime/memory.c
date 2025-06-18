@@ -90,19 +90,13 @@ size_t estimate_term_memory_size(term_t* term) {
     
     switch (term->type) {
         case TERM_ATOM:
-            if (term->data.atom) {
-                size += strlen(term->data.atom) + 1;
-            }
+            // ID is already accounted for in sizeof(term_t)
             break;
         case TERM_VAR:
-            if (term->data.var) {
-                size += strlen(term->data.var) + 1;
-            }
+            // ID is already accounted for in sizeof(term_t)
             break;
         case TERM_COMPOUND:
-            if (term->data.compound.functor) {
-                size += strlen(term->data.compound.functor) + 1;
-            }
+            // functor_id is already accounted for in sizeof(term_t)
             size += term->data.compound.arity * sizeof(term_t*);
             for (int i = 0; i < term->data.compound.arity; i++) {
                 size += estimate_term_memory_size(term->data.compound.args[i]);
@@ -128,8 +122,8 @@ void auto_deallocate_resource(linear_kb_t* kb, linear_resource_t* resource) {
     if (!resource->deallocated) {
         #ifdef DEBUG
         printf("DEBUG: Auto-deallocating consumed resource: ");
-        print_term(resource->fact);
-        printf(" (freed %zu bytes)\n", resource->memory_size);
+        print_term(resource->fact, kb->symbols);
+        printf(" (freed %hu bytes)\n", resource->memory_size);
         #endif
         
         // Mark as deallocated but don't actually free yet (for debugging)
@@ -146,8 +140,8 @@ void free_linear_resource(linear_kb_t* kb, linear_resource_t* resource) {
     if (resource && !resource->deallocated && !resource->persistent) {
         #ifdef DEBUG
         printf("DEBUG: Compiler-directed deallocation of resource: ");
-        print_term(resource->fact);
-        printf(" (freed %zu bytes)\n", resource->memory_size);
+        print_term(resource->fact, kb->symbols);
+        printf(" (freed %hu bytes)\n", resource->memory_size);
         #endif
         
         // Mark as deallocated
@@ -197,8 +191,8 @@ void print_memory_state(linear_kb_t* kb, const char* context) {
             }
         }
         
-        print_term(current->fact);
-        printf(" (%zu bytes)\n", current->memory_size);
+        print_term(current->fact, kb->symbols);
+        printf(" (%hu bytes)\n", current->memory_size);
         
         current = current->next;
     }

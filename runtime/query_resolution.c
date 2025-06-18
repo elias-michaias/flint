@@ -41,18 +41,18 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     printf("DEBUG: Resolving query with %d goals\n", goal_count);
     for (int i = 0; i < goal_count; i++) {
         printf("DEBUG: Goal %d: ", i);
-        print_term(goals[i]);
+        print_term(goals[i], kb->symbols);
         printf("\n");
     }
     printf("DEBUG: Knowledge base has %d rules and resources:\n", kb->rule_count);
     for (linear_resource_t* r = kb->resources; r != NULL; r = r->next) {
         printf("DEBUG: Resource: ");
-        print_term(r->fact);
+        print_term(r->fact, kb->symbols);
         printf(" (consumed: %d)\n", r->consumed);
     }
     for (int i = 0; i < kb->rule_count; i++) {
         printf("DEBUG: Rule %d head: ", i);
-        print_term(kb->rules[i].head);
+        print_term(kb->rules[i].head, kb->symbols);
         printf(" body_size: %d\n", kb->rules[i].body_size);
     }
     #endif
@@ -70,10 +70,10 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
         
         #ifdef DEBUG
         printf("DEBUG: Checking rule %d with head: ", rule_idx);
-        print_term(rule->head);
+        print_term(rule->head, kb->symbols);
         printf(" and production: ");
         if (rule->production) {
-            print_term(rule->production);
+            print_term(rule->production, kb->symbols);
         } else {
             printf("NULL");
         }
@@ -86,7 +86,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
         init_substitution(&rule_subst);
         
         if (rule->head && rule->head->type == TERM_ATOM && current_goal->type == TERM_ATOM &&
-            strcmp(rule->head->data.atom, current_goal->data.atom) == 0) {
+            rule->head->data.atom_id == current_goal->data.atom_id) {
             // Direct head match (traditional Prolog-style rule for atoms)
             rule_matches = 1;
             #ifdef DEBUG
@@ -98,9 +98,9 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                 rule_matches = 1;
                 #ifdef DEBUG
                 printf("DEBUG: Rule production matches goal: ");
-                print_term(rule->production);
+                print_term(rule->production, kb->symbols);
                 printf(" with substitution: ");
-                print_substitution(&rule_subst);
+                print_substitution(&rule_subst, kb->symbols);
                 printf("\n");
                 #endif
             } else {
@@ -113,7 +113,8 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
         if (rule_matches) {
                 
                 #ifdef DEBUG
-                printf("DEBUG: Attempting to apply rule '%s'\n", current_goal->data.atom);
+                printf("DEBUG: Attempting to apply rule '%s'\n", 
+                       symbol_table_get_string(kb->symbols, current_goal->data.atom_id));
                 #endif
                 
                 // Check if we can consume all the rule's body requirements
@@ -131,7 +132,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     
                     #ifdef DEBUG
                     printf("DEBUG: Looking for resource matching: ");
-                    print_term(substituted_body_term);
+                    print_term(substituted_body_term, kb->symbols);
                     printf("\n");
                     #endif
                     
@@ -150,7 +151,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                                     
                                     #ifdef DEBUG
                                     printf("DEBUG: Consuming linear resource: ");
-                                    print_term(resource->fact);
+                                    print_term(resource->fact, kb->symbols);
                                     printf("\n");
                                     #endif
                                     
@@ -161,7 +162,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                                     // Persistent resource: use but don't consume
                                     #ifdef DEBUG
                                     printf("DEBUG: Using persistent resource (not consumed): ");
-                                    print_term(resource->fact);
+                                    print_term(resource->fact, kb->symbols);
                                     printf("\n");
                                     #endif
                                 }
@@ -179,7 +180,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     if (!found) {
                         #ifdef DEBUG
                         printf("DEBUG: Cannot find resource for: ");
-                        print_term(body_term);
+                        print_term(body_term, kb->symbols);
                         printf("\n");
                         #endif
                         can_apply = 0;
@@ -199,7 +200,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     
                     #ifdef DEBUG
                     printf("DEBUG: Rule applied successfully, produced: ");
-                    print_term(new_resource->fact);
+                    print_term(new_resource->fact, kb->symbols);
                     printf("\n");
                     #endif
                     
@@ -233,7 +234,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
             if (unify(current_goal, resource->fact, &temp_subst)) {
                 #ifdef DEBUG
                 printf("DEBUG: Found direct fact match: ");
-                print_term(resource->fact);
+                print_term(resource->fact, kb->symbols);
                 printf("\n");
                 #endif
                 
@@ -299,8 +300,9 @@ int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_coun
             solution->bindings = malloc(sizeof(variable_binding_t) * global_subst.count);
             
             for (int i = 0; i < global_subst.count; i++) {
-                solution->bindings[i].var_name = malloc(strlen(global_subst.bindings[i].var) + 1);
-                strcpy(solution->bindings[i].var_name, global_subst.bindings[i].var);
+                const char* var_name = symbol_table_get_var_name(kb->symbols, global_subst.bindings[i].var_id);
+                solution->bindings[i].var_name = malloc(strlen(var_name) + 1);
+                strcpy(solution->bindings[i].var_name, var_name);
                 solution->bindings[i].value = copy_term(global_subst.bindings[i].term);
             }
             solutions->count++;

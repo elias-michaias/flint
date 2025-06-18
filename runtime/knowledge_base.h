@@ -3,6 +3,7 @@
 
 #include "terms.h"
 #include "unification.h"
+#include "symbol_table.h"
 
 // Constants
 #define MAX_TERMS 1000
@@ -11,23 +12,25 @@
 #define MAX_RECURSIVE_DEPTH 10
 #define MAX_GOAL_CACHE 50
 
-// Linear resource - facts that can be consumed with enhanced memory management
+// More compact linear resource representation
 typedef struct linear_resource {
     term_t* fact;
-    int consumed;  // 0 = available, 1 = consumed
-    int deallocated; // 0 = in memory, 1 = deallocated (for true linear management)
-    int persistent; // 0 = linear (consumable), 1 = persistent (non-consumable)
-    size_t memory_size; // Estimated memory usage for this resource
-    char* allocation_site; // Debug info: where this was allocated
-    struct linear_resource* next;
+    uint8_t consumed;      // 1 bit needed, but 1 byte for alignment
+    uint8_t deallocated;   // 1 bit needed, but 1 byte for alignment  
+    uint8_t persistent;    // 1 bit needed, but 1 byte for alignment
+    uint16_t memory_size;  // 2 bytes instead of 8 (sufficient for most resources)
+    symbol_id_t allocation_site; // 2 bytes for interned allocation site string
+    struct linear_resource* next; // 8 bytes (unchanged)
 } linear_resource_t;
+
+// Total: ~17 bytes vs previous ~32+ bytes
 
 typedef struct {
     term_t* head;
     term_t** body;
-    int body_size;
-    term_t* production;  // Optional production term (NULL if no production)
-    int is_recursive;    // 1 if this rule is recursive, 0 otherwise
+    uint8_t body_size;     // 1 byte instead of 4
+    term_t* production;    // Optional production term (NULL if no production)
+    uint8_t is_recursive;  // 1 byte instead of 4
 } clause_t;
 
 // Type mapping for terms
@@ -73,21 +76,22 @@ typedef struct consumption_metadata {
     struct consumption_metadata* next;
 } consumption_metadata_t;
 
-// Linear knowledge base with enhanced memory management
+// Linear knowledge base with enhanced memory management and symbol table
 typedef struct linear_kb {
+    symbol_table_t* symbols;       // Central symbol table for efficient string storage
     linear_resource_t* resources;  // Linear facts
     clause_t* rules;               // Rules (can be reused)
-    int rule_count;
-    int resource_count;            // Number of linear resources
+    uint16_t rule_count;           // 2 bytes instead of 4
+    uint16_t resource_count;       // 2 bytes instead of 4
     type_mapping_t* type_mappings; // Maps terms to their types
     union_mapping_t* union_mappings; // Maps variant types to parent types
     persistent_fact_t* persistent_facts; // Persistent facts (not consumed)
-    int* applied_rules;            // Bitmap tracking which rules have been applied
+    uint8_t* applied_rules;        // Compact bitmap tracking which rules have been applied
     
-    // Enhanced memory management
-    int auto_deallocate;           // Enable automatic deallocation on consumption
-    size_t total_memory_allocated; // Track total memory usage
-    size_t peak_memory_usage;      // Track peak memory usage
+    // Enhanced memory management (more compact)
+    uint8_t auto_deallocate;       // 1 byte instead of 4
+    uint32_t total_memory_allocated; // 4 bytes instead of 8 (sufficient for most uses)
+    uint32_t peak_memory_usage;    // 4 bytes instead of 8
     int checkpoint_count;          // Number of active checkpoints
     void** checkpoints;            // Stack of resource state checkpoints
     
@@ -103,7 +107,7 @@ typedef struct consumed_state {
 } consumed_state_t;
 
 // Knowledge base functions
-linear_kb_t* create_linear_kb();
+linear_kb_t* create_linear_kb(symbol_table_t* symbols);
 void free_linear_kb(linear_kb_t* kb);
 linear_kb_t* create_kb_copy(linear_kb_t* kb);
 

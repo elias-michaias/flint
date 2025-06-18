@@ -3,33 +3,40 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "symbol_table.h"
 
-// Forward declarations
-typedef struct substitution substitution_t;
+// Forward declaration for substitution struct (typedef comes from unification.h)
+struct substitution;
 
-// Term types
+// Compact term representation using IDs instead of strings
 typedef enum {
-    TERM_ATOM,
-    TERM_VAR,
-    TERM_COMPOUND,
-    TERM_INTEGER,
-    TERM_CLONE
+    TERM_ATOM,      // atom represented by symbol_id_t (2 bytes)
+    TERM_VAR,       // variable represented by var_id_t (2 bytes)  
+    TERM_COMPOUND,  // compound term with functor ID and args
+    TERM_INTEGER,   // 64-bit integer
+    TERM_CLONE      // reference to another term
 } term_type_t;
 
+// Compact term structure - much smaller memory footprint
 typedef struct term {
-    term_type_t type;
+    uint8_t type;           // 1 byte instead of 4
     union {
-        char* atom;
-        char* var;
-        int64_t integer;
+        symbol_id_t atom_id;   // 2 bytes instead of 8-byte pointer + string
+        var_id_t var_id;       // 2 bytes instead of 8-byte pointer + string
+        int64_t integer;    // 8 bytes (unchanged)
         struct {
-            char* functor;
-            struct term** args;
-            int arity;
+            symbol_id_t functor_id;  // 2 bytes instead of 8-byte pointer + string
+            struct term** args;   // 8 bytes (pointer to args array)
+            uint8_t arity;        // 1 byte instead of 4
         } compound;
-        struct term* cloned;  // For TERM_CLONE
+        struct term* cloned;      // 8 bytes (unchanged)
     } data;
 } term_t;
+
+// Memory usage: 
+// - ATOM/VAR: 3 bytes total (1 + 2) vs previous ~24+ bytes
+// - COMPOUND: 12 bytes + args vs previous ~32+ bytes + strings
+// - INTEGER: 9 bytes vs previous 12 bytes
 
 // Pair type for tensor products
 typedef struct {
@@ -37,30 +44,32 @@ typedef struct {
     int64_t second;
 } pair_t;
 
-// Term creation functions
-term_t* create_atom(const char* name);
-term_t* create_var(const char* name);
+// Term creation functions (now take symbol table for efficient storage)
+term_t* create_atom(symbol_table_t* table, const char* name);
+term_t* create_atom_id(symbol_id_t atom_id);
+term_t* create_var(var_id_t var_id);
+term_t* create_var_named(symbol_table_t* table, const char* name);
 term_t* create_integer(int64_t value);
-term_t* create_compound(const char* functor, term_t** args, int arity);
+term_t* create_compound(symbol_table_t* table, const char* functor, term_t** args, int arity);
+term_t* create_compound_id(symbol_id_t functor_id, term_t** args, uint8_t arity);
 term_t* create_clone(term_t* inner);
 
 // Term manipulation functions
 term_t* copy_term(term_t* term);
 void free_term(term_t* term);
-void print_term(term_t* term);
+void print_term(term_t* term, symbol_table_t* symbols);
 int terms_equal(term_t* t1, term_t* t2);
-int string_equal(const char* s1, const char* s2);
-int occurs_in_term(const char* var, term_t* term);
+int occurs_in_term(var_id_t var_id, term_t* term);
 term_t* rename_variables_in_term(term_t* term, int instance_id);
-term_t* apply_substitution(term_t* term, substitution_t* subst);
-term_t* resolve_variable_chain(substitution_t* subst, const char* var);
+term_t* apply_substitution(term_t* term, struct substitution* subst);
+term_t* resolve_variable_chain(struct substitution* subst, var_id_t var_id);
 int has_variables(term_t* term);
 term_t* get_inner_term(term_t* term);
-void term_to_string_buffer(term_t* term, char* buffer, size_t buffer_size);
+void term_to_string_buffer(term_t* term, symbol_table_t* symbols, char* buffer, size_t buffer_size);
 
 // Variable extraction functions
-void extract_variables_from_term(term_t* term, char** vars, int* var_count, int max_vars);
-void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, int* var_count, int max_vars);
-void free_variable_list(char** vars, int var_count);
+void extract_variables_from_term(term_t* term, var_id_t* vars, int* var_count, int max_vars);
+void extract_variables_from_goals(term_t** goals, int goal_count, var_id_t* vars, int* var_count, int max_vars);
+void free_variable_list(var_id_t* vars, int var_count);
 
 #endif // TERMS_H

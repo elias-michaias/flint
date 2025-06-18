@@ -341,6 +341,7 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     
     let status = command
         .arg(&c_file)
+        .arg("runtime/symbol_table.c")
         .arg("runtime/memory.c")
         .arg("runtime/terms.c")
         .arg("runtime/unification.c")

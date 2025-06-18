@@ -3,6 +3,7 @@
 #include <string.h>
 #include "unification.h"
 #include "terms.h"
+#include "symbol_table.h"
 
 // TODO: Extract unification functions from runtime.c
 // This is a placeholder - implementations will be moved from runtime.c
@@ -25,10 +26,9 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     // Variable unification
     else if (term1->type == TERM_VAR) {
         // Occurs check: don't bind a variable to a term containing itself
-        if (!occurs_in_term(term1->data.var, term2)) {
+        if (!occurs_in_term(term1->data.var_id, term2)) {
             if (subst->count < MAX_VARS) {
-                subst->bindings[subst->count].var = malloc(strlen(term1->data.var) + 1);
-                strcpy(subst->bindings[subst->count].var, term1->data.var);
+                subst->bindings[subst->count].var_id = term1->data.var_id;
                 subst->bindings[subst->count].term = copy_term(term2);
                 subst->count++;
                 result = 1;
@@ -36,10 +36,9 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
         }
     } else if (term2->type == TERM_VAR) {
         // Occurs check: don't bind a variable to a term containing itself
-        if (!occurs_in_term(term2->data.var, term1)) {
+        if (!occurs_in_term(term2->data.var_id, term1)) {
             if (subst->count < MAX_VARS) {
-                subst->bindings[subst->count].var = malloc(strlen(term2->data.var) + 1);
-                strcpy(subst->bindings[subst->count].var, term2->data.var);
+                subst->bindings[subst->count].var_id = term2->data.var_id;
                 subst->bindings[subst->count].term = copy_term(term1);
                 subst->count++;
                 result = 1;
@@ -48,7 +47,7 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     }
     // Atom unification
     else if (term1->type == TERM_ATOM && term2->type == TERM_ATOM) {
-        result = string_equal(term1->data.atom, term2->data.atom);
+        result = term1->data.atom_id == term2->data.atom_id;
     }
     // Integer unification
     else if (term1->type == TERM_INTEGER && term2->type == TERM_INTEGER) {
@@ -56,7 +55,7 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     }
     // Compound term unification
     else if (term1->type == TERM_COMPOUND && term2->type == TERM_COMPOUND) {
-        if (string_equal(term1->data.compound.functor, term2->data.compound.functor) &&
+        if (term1->data.compound.functor_id == term2->data.compound.functor_id &&
             term1->data.compound.arity == term2->data.compound.arity) {
             result = 1;
             for (int i = 0; i < term1->data.compound.arity && result; i++) {
@@ -79,16 +78,16 @@ int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
     
     if (actual_term1->type == TERM_VAR) {
         // Variable unifies with anything
-        return add_binding(subst, actual_term1->data.var, actual_term2);
+        return add_binding(subst, actual_term1->data.var_id, actual_term2);
     }
     
     if (actual_term2->type == TERM_VAR) {
         // Variable unifies with anything  
-        return add_binding(subst, actual_term2->data.var, actual_term1);
+        return add_binding(subst, actual_term2->data.var_id, actual_term1);
     }
     
     if (actual_term1->type == TERM_ATOM && actual_term2->type == TERM_ATOM) {
-        return strcmp(actual_term1->data.atom, actual_term2->data.atom) == 0;
+        return actual_term1->data.atom_id == actual_term2->data.atom_id;
     }
     
     if (actual_term1->type == TERM_INTEGER && actual_term2->type == TERM_INTEGER) {
@@ -96,7 +95,7 @@ int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
     }
     
     if (actual_term1->type == TERM_COMPOUND && actual_term2->type == TERM_COMPOUND) {
-        if (strcmp(actual_term1->data.compound.functor, actual_term2->data.compound.functor) != 0) {
+        if (actual_term1->data.compound.functor_id != actual_term2->data.compound.functor_id) {
             return 0;
         }
         if (actual_term1->data.compound.arity != actual_term2->data.compound.arity) {
@@ -113,11 +112,10 @@ int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
     return 0; // Different types don't unify
 }
 
-int add_binding(substitution_t* subst, const char* var, term_t* term) {
+int add_binding(substitution_t* subst, var_id_t var_id, term_t* term) {
     if (!subst || subst->count >= MAX_VARS) return 0;
     
-    subst->bindings[subst->count].var = malloc(strlen(var) + 1);
-    strcpy(subst->bindings[subst->count].var, var);
+    subst->bindings[subst->count].var_id = var_id;
     subst->bindings[subst->count].term = copy_term(term);
     subst->count++;
     return 1;
@@ -145,21 +143,20 @@ void compose_substitutions(substitution_t* dest, substitution_t* src) {
     for (int i = 0; i < src->count; i++) {
         int found = 0;
         for (int j = 0; j < dest->count; j++) {
-            if (string_equal(src->bindings[i].var, dest->bindings[j].var)) {
+            if (src->bindings[i].var_id == dest->bindings[j].var_id) {
                 found = 1;
                 break;
             }
         }
         if (!found && dest->count < MAX_VARS) {
-            dest->bindings[dest->count].var = malloc(strlen(src->bindings[i].var) + 1);
-            strcpy(dest->bindings[dest->count].var, src->bindings[i].var);
+            dest->bindings[dest->count].var_id = src->bindings[i].var_id;
             dest->bindings[dest->count].term = copy_term(src->bindings[i].term);
             dest->count++;
         }
     }
 }
 
-void print_substitution(substitution_t* subst) {
+void print_substitution(substitution_t* subst, symbol_table_t* symbols) {
     if (!subst || subst->count == 0) {
         printf("{}");
         return;
@@ -168,8 +165,8 @@ void print_substitution(substitution_t* subst) {
     printf("{");
     for (int i = 0; i < subst->count; i++) {
         if (i > 0) printf(", ");
-        printf("%s/", subst->bindings[i].var);
-        print_term(subst->bindings[i].term);
+        printf("%s/", symbol_table_get_var_name(symbols, subst->bindings[i].var_id));
+        print_term(subst->bindings[i].term, symbols);
     }
     printf("}");
 }
@@ -188,7 +185,7 @@ int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
     return 0;
 }
 
-void create_filtered_substitution(substitution_t* full_subst, char** target_vars, int target_count, substitution_t* filtered_subst) {
+void create_filtered_substitution(substitution_t* full_subst, var_id_t* target_vars, int target_count, substitution_t* filtered_subst) {
     (void)full_subst;
     (void)target_vars;
     (void)target_count;
@@ -196,7 +193,7 @@ void create_filtered_substitution(substitution_t* full_subst, char** target_vars
     // TODO: Move implementation from runtime.c
 }
 
-int all_variables_bound(char** vars, int var_count, substitution_t* subst) {
+int all_variables_bound(var_id_t* vars, int var_count, substitution_t* subst) {
     (void)vars;
     (void)var_count;
     (void)subst;
@@ -214,7 +211,7 @@ void free_substitution(substitution_t* subst) {
     if (!subst) return;
     
     for (int i = 0; i < subst->count; i++) {
-        free(subst->bindings[i].var);
+        // No need to free var_id - it's just an integer
         free_term(subst->bindings[i].term);
     }
     subst->count = 0;

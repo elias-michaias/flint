@@ -4,12 +4,14 @@
 #include "knowledge_base.h"
 #include "unification.h"
 #include "memory.h"
+#include "symbol_table.h"
 
 // TODO: Extract knowledge base functions from runtime.c
 // This is a placeholder - implementations will be moved from runtime.c
 
-linear_kb_t* create_linear_kb() {
+linear_kb_t* create_linear_kb(symbol_table_t* symbols) {
     linear_kb_t* kb = malloc(sizeof(linear_kb_t));
+    kb->symbols = symbols;
     kb->resources = NULL;
     kb->rules = malloc(sizeof(clause_t) * MAX_CLAUSES);
     kb->rule_count = 0;
@@ -17,7 +19,7 @@ linear_kb_t* create_linear_kb() {
     kb->type_mappings = NULL;
     kb->union_mappings = NULL;
     kb->persistent_facts = NULL;
-    kb->auto_deallocate = 0; // Default: auto deallocation disabled
+    kb->auto_deallocate = 0; // Initialize auto_deallocate flag
     kb->total_memory_allocated = 0;
     kb->peak_memory_usage = 0;
     kb->checkpoint_count = 0;
@@ -104,15 +106,15 @@ void add_linear_fact(linear_kb_t* kb, term_t* fact) {
     resource->persistent = 0; // Mark as linear (consumable)
     resource->deallocated = 0;
     resource->memory_size = estimate_term_memory_size(fact);
-    resource->allocation_site = "fact";
+    resource->allocation_site = symbol_table_intern(kb->symbols, "fact");
     resource->next = kb->resources;
     kb->resources = resource;
     kb->resource_count++;
     
     #ifdef DEBUG
     printf("DEBUG: MEMORY ALLOCATED - Added resource: ");
-    print_term(fact);
-    printf(" (allocated %zu bytes, total resources: %d)\n", resource->memory_size, kb->resource_count);
+    print_term(fact, kb->symbols);
+    printf(" (allocated %hu bytes, total resources: %d)\n", resource->memory_size, kb->resource_count);
     #endif
 }
 
@@ -274,15 +276,15 @@ void add_optional_linear_fact(linear_kb_t* kb, term_t* fact) {
     resource->deallocated = 0;
     resource->persistent = 0;  // Linear but optional
     resource->memory_size = estimate_term_memory_size(fact);
-    resource->allocation_site = "optional_fact";
+    resource->allocation_site = symbol_table_intern(kb->symbols, "optional_fact");
     resource->next = kb->resources;
     kb->resources = resource;
     kb->resource_count++;
     
     #ifdef DEBUG
     printf("DEBUG: Added optional linear fact: ");
-    print_term(fact);
-    printf(" (estimated size: %zu bytes)\n", resource->memory_size);
+    print_term(fact, kb->symbols);
+    printf(" (estimated size: %hu bytes)\n", resource->memory_size);
     #endif
 }
 
@@ -295,15 +297,15 @@ void add_exponential_linear_fact(linear_kb_t* kb, term_t* fact) {
     resource->deallocated = 0;
     resource->persistent = 2;  // 2 = exponential (can be used multiple times)
     resource->memory_size = estimate_term_memory_size(fact);
-    resource->allocation_site = "exponential_fact";
+    resource->allocation_site = symbol_table_intern(kb->symbols, "exponential_fact");
     resource->next = kb->resources;
     kb->resources = resource;
     kb->resource_count++;
     
     #ifdef DEBUG
     printf("DEBUG: Added exponential linear fact: ");
-    print_term(fact);
-    printf(" (estimated size: %zu bytes)\n", resource->memory_size);
+    print_term(fact, kb->symbols);
+    printf(" (estimated size: %hu bytes)\n", resource->memory_size);
     #endif
 }
 
@@ -325,14 +327,14 @@ int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution
                     current->consumed = 1;
                     #ifdef DEBUG
                     printf("DEBUG: Consumed linear resource: ");
-                    print_term(current->fact);
+                    print_term(current->fact, kb->symbols);
                     printf("\n");
                     #endif
                 } else {
                     // Persistent resource: use but don't consume
                     #ifdef DEBUG
                     printf("DEBUG: Used persistent resource (not consumed): ");
-                    print_term(current->fact);
+                    print_term(current->fact, kb->symbols);
                     printf("\n");
                     #endif
                 }

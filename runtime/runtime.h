@@ -1,7 +1,8 @@
 #ifndef RUNTIME_H
 #define RUNTIME_H
 
-// Include all component headers
+// Include all component headers in dependency order
+#include "symbol_table.h"
 #include "terms.h"
 #include "unification.h"
 #include "memory.h"
