@@ -341,7 +341,13 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     
     let status = command
         .arg(&c_file)
-        .arg("runtime/runtime.c")
+        .arg("runtime/memory.c")
+        .arg("runtime/terms.c")
+        .arg("runtime/unification.c")
+        .arg("runtime/knowledge_base.c")
+        .arg("runtime/solutions.c")
+        .arg("runtime/path_tracking.c")
+        .arg("runtime/query_resolution.c")
         .arg("-I")
         .arg("runtime")
         .arg("-o")
@@ -429,7 +435,13 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
         
         let status = command
             .arg(&output_path)
-            .arg("runtime/runtime.c")
+            .arg("runtime/memory.c")
+            .arg("runtime/terms.c")
+            .arg("runtime/unification.c")
+            .arg("runtime/knowledge_base.c")
+            .arg("runtime/solutions.c")
+            .arg("runtime/path_tracking.c")
+            .arg("runtime/query_resolution.c")
             .arg("-I")
             .arg("runtime")
             .arg("-o")

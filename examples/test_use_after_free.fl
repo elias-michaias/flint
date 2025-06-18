@@ -16,6 +16,7 @@ double_owns :: customer -> item -> type.
 
 // Linear resource - will be consumed by first query
 resource1 :: has_item(bread).
+resource2 :: has_item(bread).
 
 // First rule that consumes the resource
 take_rule :: 
@@ -28,5 +29,5 @@ double_take_rule ::
     => double_owns(alice, $item).
     
 main ::
-    owns(alice, bread).
+    owns(alice, bread),
     double_owns(alice, bread).
