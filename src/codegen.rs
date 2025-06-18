@@ -150,6 +150,9 @@ impl CodeGenerator {
         // Generate C header
         self.generate_header()?;
         
+        // Generate type system for subtyping support
+        self.generate_type_system(&program.type_definitions)?;
+        
         // Store function definitions
         for func in &program.functions {
             self.functions.insert(func.name.clone(), func.clone());
@@ -203,6 +206,92 @@ impl CodeGenerator {
         writeln!(self.output, "#include <string.h>")?;
         writeln!(self.output, "#include \"runtime.h\"")?;
         writeln!(self.output)?;
+        Ok(())
+    }
+    
+    fn generate_type_system(&mut self, type_definitions: &[TypeDefinition]) -> Result<(), std::fmt::Error> {
+        writeln!(self.output, "// Generated type system for subtyping support")?;
+        writeln!(self.output)?;
+        
+        // Generate additional type index constants for user-defined types
+        writeln!(self.output, "// Additional type indices for user-defined types")?;
+        for (i, type_def) in type_definitions.iter().enumerate() {
+            let type_index = i + 3; // TYPE_IDX_USER_START = 3
+            writeln!(self.output, "#define TYPE_IDX_{} {}", 
+                type_def.name.to_uppercase(), type_index)?;
+        }
+        writeln!(self.output)?;
+        
+        // Generate type ID constants for user-defined types
+        writeln!(self.output, "// Type ID constants for user-defined types")?;
+        for type_def in type_definitions {
+            let distinct = if type_def.distinct { "true" } else { "false" };
+            writeln!(self.output, "#define TYPE_{} MAKE_TYPE_ID(TYPE_IDX_{}, {})",
+                type_def.name.to_uppercase(),
+                type_def.name.to_uppercase(),
+                distinct)?;
+        }
+        writeln!(self.output)?;
+        
+        // Generate symbol ID constants for user-defined types
+        writeln!(self.output, "// Symbol ID constants for user-defined types")?;
+        for (i, type_def) in type_definitions.iter().enumerate() {
+            writeln!(self.output, "#define SYM_{} {}", 
+                type_def.name.to_uppercase(), i + 10)?; // Start after built-in symbols
+        }
+        writeln!(self.output)?;
+        
+        // Generate type metadata table
+        writeln!(self.output, "// Type metadata for inheritance and compatibility")?;
+        writeln!(self.output, "static const type_metadata_t TYPE_METADATA_TABLE[] = {{")?;
+        
+        // Base types
+        writeln!(self.output, "    {{TYPE_ATOM, SYM_ATOM, 0xFFFFFFFF}},     // atom (root)")?;
+        writeln!(self.output, "    {{TYPE_INTEGER, SYM_INTEGER, 0x00000002}}, // integer")?;
+        writeln!(self.output, "    {{TYPE_VARIABLE, SYM_VARIABLE, 0x00000004}}, // variable")?;
+        
+        // User-defined types
+        for (i, type_def) in type_definitions.iter().enumerate() {
+            let parent_type = match &type_def.supertype {
+                Some(LogicType::Atom) => "TYPE_ATOM".to_string(),
+                Some(LogicType::Integer) => "TYPE_INTEGER".to_string(),
+                Some(LogicType::Named(name)) => format!("TYPE_{}", name.to_uppercase()),
+                _ => "TYPE_ATOM".to_string(), // Default to atom
+            };
+            
+            // Generate simple compatibility mask (for now, just self + parent)
+            let self_bit = 1u32 << (i + 3);
+            let parent_bit = match &type_def.supertype {
+                Some(LogicType::Atom) => 1u32,      // Bit 0 for atom
+                Some(LogicType::Integer) => 1u32 << 1, // Bit 1 for integer
+                _ => 1u32, // Default to atom
+            };
+            let compatibility_mask = if type_def.distinct {
+                self_bit // Distinct types only compatible with themselves
+            } else {
+                self_bit | parent_bit // Non-distinct compatible with self and parent
+            };
+            
+            writeln!(self.output, "    {{{}, {}, 0x{:08X}}}, // {}",
+                parent_type,
+                format!("SYM_{}", type_def.name.to_uppercase()),
+                compatibility_mask,
+                type_def.name)?;
+        }
+        
+        writeln!(self.output, "}};")?;
+        writeln!(self.output)?;
+        
+        // Generate type system initialization
+        writeln!(self.output, "// Initialize type system")?;
+        writeln!(self.output, "static void init_generated_type_system() {{")?;
+        writeln!(self.output, "    extern const type_metadata_t* TYPE_METADATA;")?;
+        writeln!(self.output, "    extern size_t TYPE_COUNT;")?;
+        writeln!(self.output, "    TYPE_METADATA = TYPE_METADATA_TABLE;")?;
+        writeln!(self.output, "    TYPE_COUNT = sizeof(TYPE_METADATA_TABLE) / sizeof(type_metadata_t);")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
         Ok(())
     }
     
@@ -721,7 +810,7 @@ impl CodeGenerator {
                 if has_variables {
                     // For queries with variables, print variable bindings
                     writeln!(self.output, "        for (int sol = 0; sol < enhanced_solutions_{}->count; sol++) {{", query_index)?;
-                    writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol]);", query_index)?;
+                    writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol], kb->symbols);", query_index)?;
                     writeln!(self.output, "            if (sol < enhanced_solutions_{}->count - 1) {{", query_index)?;
                     writeln!(self.output, "                printf(\";\\n\");")?;
                     writeln!(self.output, "            }} else {{")?;

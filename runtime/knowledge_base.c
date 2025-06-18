@@ -143,9 +143,26 @@ void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_s
 }
 
 void add_persistent_fact(linear_kb_t* kb, term_t* fact) {
-    (void)kb;
-    (void)fact;
-    // TODO: Move implementation from runtime.c
+    if (!kb || !fact) return;
+    
+    // Create a linear resource for this persistent fact
+    linear_resource_t* resource = malloc(sizeof(linear_resource_t));
+    resource->fact = copy_term(fact);
+    resource->flags = 0;
+    SET_PERSISTENT(resource, 3); // Persistent level 3 (highest)
+    resource->memory_size = sizeof(term_t); // Approximate size
+    resource->allocation_site = intern_symbol(kb->symbols, "persistent_fact");
+    resource->next = kb->resources;
+    
+    // Add to the front of the resource list
+    kb->resources = resource;
+    kb->resource_count++;
+    
+    #ifdef DEBUG
+    printf("DEBUG: Added persistent fact: ");
+    print_term(fact, kb->symbols);
+    printf(" (resource count now: %d)\n", kb->resource_count);
+    #endif
 }
 
 void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name) {

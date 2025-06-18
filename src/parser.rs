@@ -193,6 +193,10 @@ impl Parser {
                     }
                 }
                 Token::Identifier(_) => {
+                    if self.debug {
+                        println!("DEBUG: Found identifier: {:?}", self.current_token());
+                    }
+                    
                     // Check if this is a main goal definition
                     if let Token::Identifier(name) = self.current_token() {
                         if name == "main" && matches!(self.peek_token(), Some(Token::ColonColon)) {
@@ -220,6 +224,9 @@ impl Parser {
                     
                     // Check if this is a new-style type definition (name :: [distinct] type [of supertype].)
                     if self.peek_new_type_definition() {
+                        if self.debug {
+                            println!("DEBUG: Parsing new type definition");
+                        }
                         let type_def = self.parse_new_type_definition()?;
                         if let TypeDeclaration::TypeDefinition(td) = type_def {
                             type_definitions.push(td);
@@ -228,6 +235,9 @@ impl Parser {
                     }
                     // Check if this is an old-style type declaration (name :: type_signature.)
                     else if self.peek_type_declaration() {
+                        if self.debug {
+                            println!("DEBUG: Parsing type declaration");
+                        }
                         // Parse the type declaration and decide if it's a predicate or term
                         let type_decl = self.parse_type_declaration()?;
                         match type_decl {
@@ -254,10 +264,19 @@ impl Parser {
                             }
                         }
                     } else if self.peek_function_def() {
+                        if self.debug {
+                            println!("DEBUG: Parsing function definition");
+                        }
                         functions.push(self.parse_function()?);
                     } else if self.peek_clause() {
+                        if self.debug {
+                            println!("DEBUG: Parsing clause");
+                        }
                         clauses.push(self.parse_clause()?);
                     } else {
+                        if self.debug {
+                            println!("DEBUG: No pattern matched, treating as unexpected token");
+                        }
                         // Main expression
                         main = Some(self.parse_expression()?);
                         break;
@@ -269,8 +288,21 @@ impl Parser {
                 }
                 _ => {
                     // Main expression or unexpected token
-                    main = Some(self.parse_expression()?);
-                    break;
+                    let current_span = self.current_token_span();
+                    if let Some(span) = current_span {
+                        let diagnostic = Diagnostic::error(format!("Unexpected token in program: {:?} at line {}, column {}", 
+                            span.token, span.line, span.column))
+                            .with_location(SourceLocation::new(
+                                self.file_path.clone(),
+                                span.line,
+                                span.column,
+                                span.length,
+                            ))
+                            .with_source_text(self.source_text.clone());
+                        return Err(ParseError::Diagnostic(diagnostic));
+                    } else {
+                        return Err(ParseError::UnexpectedEof);
+                    }
                 }
             }
         }
@@ -444,12 +476,19 @@ impl Parser {
     
     fn peek_new_type_definition(&self) -> bool {
         // Look for pattern: identifier :: [distinct] type [of supertype] .
+        if self.debug {
+            println!("DEBUG: peek_new_type_definition checking token: {:?}", self.current_token());
+        }
+        
         if !matches!(self.current_token(), Token::Identifier(_)) {
             return false;
         }
         
         // Check for :: after identifier
         if !matches!(self.peek_token_at(1), Some(Token::ColonColon)) {
+            if self.debug {
+                println!("DEBUG: No :: found after identifier, found: {:?}", self.peek_token_at(1));
+            }
             return false;
         }
         
@@ -463,6 +502,9 @@ impl Parser {
         
         // Look for 'type' keyword
         if matches!(self.peek_token_at(i), Some(Token::Type)) {
+            if self.debug {
+                println!("DEBUG: Found new type definition pattern");
+            }
             return true;
         }
         

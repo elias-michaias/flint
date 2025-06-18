@@ -36,9 +36,23 @@ void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst
     // TODO: Move implementation from runtime.c
 }
 
-void print_enhanced_solution(enhanced_solution_t* solution) {
-    (void)solution;
-    // TODO: Move implementation from runtime.c
+void print_enhanced_solution(enhanced_solution_t* solution, symbol_table_t* symbols) {
+    if (!solution || solution->binding_count == 0) {
+        return; // No bindings to print
+    }
+    
+    for (int i = 0; i < solution->binding_count; i++) {
+        if (i > 0) {
+            printf(", ");
+        }
+        printf("%s = ", solution->bindings[i].var_name);
+        // Print the term using the symbol table
+        if (solution->bindings[i].value && symbols) {
+            print_term(solution->bindings[i].value, symbols);
+        } else {
+            printf("null");
+        }
+    }
 }
 
 void free_enhanced_solution_list(enhanced_solution_list_t* list) {

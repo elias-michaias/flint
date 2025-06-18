@@ -40,7 +40,7 @@ void free_solution_list(solution_list_t* list);
 // Enhanced solution functions
 enhanced_solution_list_t* create_enhanced_solution_list();
 void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst);
-void print_enhanced_solution(enhanced_solution_t* solution);
+void print_enhanced_solution(enhanced_solution_t* solution, symbol_table_t* symbols);
 void free_enhanced_solution_list(enhanced_solution_list_t* list);
 int enhanced_solutions_are_equivalent(enhanced_solution_t* solution, substitution_t* subst);
 

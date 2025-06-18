@@ -24,6 +24,13 @@ typedef struct {
     char** symbols;           // Array of symbol strings
     symbol_id_t count;        // Number of symbols
     symbol_id_t capacity;     // Capacity of symbols array
+    
+    // Variable name interning
+    char** var_names;         // Array of variable name strings
+    var_id_t* var_ids;        // Corresponding var_ids
+    var_id_t var_count;       // Number of variables
+    var_id_t var_capacity;    // Capacity of var arrays
+    var_id_t next_var_id;     // Next var_id to assign
 } symbol_table_t;
 
 // Global symbol table functions

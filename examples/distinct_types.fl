@@ -31,7 +31,4 @@ persistent a3 :: exists(triangle).
 persistent a4 :: exists(johnny).
 
 // Test query - this should work since johnny is human and human is subtype of atom (non-distinct)
-?- exists(johnny).
-
-// Test query that should fail - scout is person, and person is distinct from atom
-// ?- exists(scout).
+main :: exists(johnny).

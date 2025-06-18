@@ -90,23 +90,23 @@ size_t estimate_term_memory_size(term_t* term) {
     
     switch (term->type) {
         case TERM_ATOM:
-            // ID is already accounted for in sizeof(term_t)
-            break;
         case TERM_VAR:
-            // ID is already accounted for in sizeof(term_t)
+            // Simple types - just the term structure
             break;
         case TERM_COMPOUND:
-            // functor_id is already accounted for in sizeof(term_t)
-            size += term->arity * sizeof(term_t*);
-            for (int i = 0; i < term->arity; i++) {
-                size += estimate_term_memory_size(term->args[i]);
+            // For compounds, we need to account for the args array
+            if (term->arity > 0) {
+                size += term->arity * sizeof(term_t*);
+                for (int i = 0; i < term->arity; i++) {
+                    size += estimate_term_memory_size(term->data.compound.args[i]);
+                }
             }
+            break;
+        case TERM_INTEGER:
+            // Just the term structure
             break;
         case TERM_CLONE:
             size += estimate_term_memory_size(term->data.cloned);
-            break;
-        case TERM_INTEGER:
-            // Just the union size, already counted in sizeof(term_t)
             break;
     }
     
