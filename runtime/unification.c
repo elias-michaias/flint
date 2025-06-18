@@ -55,11 +55,11 @@ int unify(term_t* t1, term_t* t2, substitution_t* subst) {
     }
     // Compound term unification
     else if (term1->type == TERM_COMPOUND && term2->type == TERM_COMPOUND) {
-        if (term1->data.compound.functor_id == term2->data.compound.functor_id &&
-            term1->data.compound.arity == term2->data.compound.arity) {
+        if (term1->data.functor_id == term2->data.functor_id &&
+            term1->arity == term2->arity) {
             result = 1;
-            for (int i = 0; i < term1->data.compound.arity && result; i++) {
-                result = unify(term1->data.compound.args[i], term2->data.compound.args[i], subst);
+            for (int i = 0; i < term1->arity && result; i++) {
+                result = unify(term1->args[i], term2->args[i], subst);
             }
         }
     }
@@ -95,14 +95,14 @@ int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
     }
     
     if (actual_term1->type == TERM_COMPOUND && actual_term2->type == TERM_COMPOUND) {
-        if (actual_term1->data.compound.functor_id != actual_term2->data.compound.functor_id) {
+        if (actual_term1->data.functor_id != actual_term2->data.functor_id) {
             return 0;
         }
-        if (actual_term1->data.compound.arity != actual_term2->data.compound.arity) {
+        if (actual_term1->arity != actual_term2->arity) {
             return 0;
         }
-        for (int i = 0; i < actual_term1->data.compound.arity; i++) {
-            if (!unify_terms(actual_term1->data.compound.args[i], actual_term2->data.compound.args[i], subst)) {
+        for (int i = 0; i < actual_term1->arity; i++) {
+            if (!unify_terms(actual_term1->args[i], actual_term2->args[i], subst)) {
                 return 0;
             }
         }
@@ -165,7 +165,7 @@ void print_substitution(substitution_t* subst, symbol_table_t* symbols) {
     printf("{");
     for (int i = 0; i < subst->count; i++) {
         if (i > 0) printf(", ");
-        printf("%s/", symbol_table_get_var_name(symbols, subst->bindings[i].var_id));
+        printf("%s/", symbol_table_get_var_name(symbols, subst->bindings[subst->count].var_id));
         print_term(subst->bindings[i].term, symbols);
     }
     printf("}");

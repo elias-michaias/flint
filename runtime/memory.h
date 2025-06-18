@@ -7,15 +7,11 @@
 
 // Forward declarations
 struct linear_kb;
+// Forward declarations
 struct term;
 struct linear_resource;
 struct consumption_metadata;
-
-// Typedefs for convenience
-typedef struct linear_kb linear_kb_t;
-typedef struct term term_t;
-typedef struct linear_resource linear_resource_t;
-typedef struct consumption_metadata consumption_metadata_t;
+struct linear_kb;
 
 // Linear pointer type for memory management
 typedef struct {
@@ -41,19 +37,19 @@ void linear_string_free(linear_string_t str);
 linear_string_t linear_string_concat(linear_string_t a, linear_string_t b);
 
 // Enhanced linear memory management functions
-void set_auto_deallocation(linear_kb_t* kb, int enabled);
-void add_optional_linear_fact(linear_kb_t* kb, term_t* fact);
-void add_exponential_linear_fact(linear_kb_t* kb, term_t* fact);
-size_t estimate_term_memory_size(term_t* term);
-void auto_deallocate_resource(linear_kb_t* kb, linear_resource_t* resource);
-int get_memory_usage_estimate(linear_kb_t* kb);
-void print_memory_state(linear_kb_t* kb, const char* context);
+void set_auto_deallocation(struct linear_kb* kb, int enabled);
+void add_optional_linear_fact(struct linear_kb* kb, struct term* fact);
+void add_exponential_linear_fact(struct linear_kb* kb, struct term* fact);
+size_t estimate_term_memory_size(struct term* term);
+void auto_deallocate_resource(struct linear_kb* kb, struct linear_resource* resource);
+int get_memory_usage_estimate(struct linear_kb* kb);
+void print_memory_state(struct linear_kb* kb, const char* context);
 
 // Compiler-directed memory management functions
-void register_consumption_metadata(linear_kb_t* kb, const char* resource_name, const char* consumption_point, 
+void register_consumption_metadata(struct linear_kb* kb, const char* resource_name, const char* consumption_point, 
                                    int is_optional, int is_persistent, size_t estimated_size);
-consumption_metadata_t* find_consumption_metadata(linear_kb_t* kb, const char* resource_name);
-void free_linear_resource(linear_kb_t* kb, linear_resource_t* resource);
-int should_deallocate_resource(linear_kb_t* kb, const char* resource_name, const char* current_point);
+struct consumption_metadata* find_consumption_metadata(struct linear_kb* kb, const char* resource_name);
+void free_linear_resource(struct linear_kb* kb, struct linear_resource* resource);
+int should_deallocate_resource(struct linear_kb* kb, const char* resource_name, const char* current_point);
 
 #endif // MEMORY_H

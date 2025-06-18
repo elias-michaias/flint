@@ -97,9 +97,9 @@ size_t estimate_term_memory_size(term_t* term) {
             break;
         case TERM_COMPOUND:
             // functor_id is already accounted for in sizeof(term_t)
-            size += term->data.compound.arity * sizeof(term_t*);
-            for (int i = 0; i < term->data.compound.arity; i++) {
-                size += estimate_term_memory_size(term->data.compound.args[i]);
+            size += term->arity * sizeof(term_t*);
+            for (int i = 0; i < term->arity; i++) {
+                size += estimate_term_memory_size(term->args[i]);
             }
             break;
         case TERM_CLONE:
@@ -115,46 +115,44 @@ size_t estimate_term_memory_size(term_t* term) {
 
 // Automatic deallocation when resource is consumed
 void auto_deallocate_resource(linear_kb_t* kb, linear_resource_t* resource) {
-    if (!kb->auto_deallocate || resource->persistent) {
+    if (!kb->auto_deallocate || GET_PERSISTENT(resource) != 0) {
         return;  // Don't deallocate persistent or when auto-deallocation is disabled
     }
     
-    if (!resource->deallocated) {
-        #ifdef DEBUG
-        printf("DEBUG: Auto-deallocating consumed resource: ");
-        print_term(resource->fact, kb->symbols);
-        printf(" (freed %hu bytes)\n", resource->memory_size);
-        #endif
-        
-        // Mark as deallocated but don't actually free yet (for debugging)
-        resource->deallocated = 1;
-        
-        // In a production system, you might actually free the memory here:
-        // free_term(resource->fact);
-        // resource->fact = NULL;
+    #ifdef DEBUG
+    printf("DEBUG: Auto-deallocating consumed resource: ");
+    print_term(resource->fact, kb->symbols);
+    printf(" (freed %hu bytes)\n", resource->memory_size);
+    #endif
+    
+    // Update memory tracking
+    if (kb->total_memory_allocated >= resource->memory_size) {
+        kb->total_memory_allocated -= resource->memory_size;
     }
+    
+    // In debug mode, we keep the resource around but mark it as logically freed
+    // In production, we could actually free the memory here:
+    // free_term(resource->fact);
+    // resource->fact = NULL;
 }
 
 // Compiler-directed resource deallocation (immediate, precise)
 void free_linear_resource(linear_kb_t* kb, linear_resource_t* resource) {
-    if (resource && !resource->deallocated && !resource->persistent) {
+    if (resource && GET_PERSISTENT(resource) == 0) {
         #ifdef DEBUG
         printf("DEBUG: Compiler-directed deallocation of resource: ");
         print_term(resource->fact, kb->symbols);
         printf(" (freed %hu bytes)\n", resource->memory_size);
         #endif
         
-        // Mark as deallocated
-        resource->deallocated = 1;
-        
-        // In production, actually free the memory:
-        // free_term(resource->fact);
-        // resource->fact = NULL;
-        
         // Update memory tracking
         if (kb->total_memory_allocated >= resource->memory_size) {
             kb->total_memory_allocated -= resource->memory_size;
         }
+        
+        // In production, actually free the memory:
+        // free_term(resource->fact);
+        // resource->fact = NULL;
     }
 }
 
@@ -167,28 +165,18 @@ void print_memory_state(linear_kb_t* kb, const char* context) {
     #ifdef DEBUG
     printf("DEBUG: MEMORY STATE [%s]:\n", context);
     
-    size_t total_allocated = 0;
     size_t total_active = 0;
-    size_t total_deallocated = 0;
     int active_count = 0;
-    int deallocated_count = 0;
     
     linear_resource_t* current = kb->resources;
     while (current != NULL) {
-        total_allocated += current->memory_size;
+        total_active += current->memory_size;
+        active_count++;
         
-        if (current->deallocated) {
-            total_deallocated += current->memory_size;
-            deallocated_count++;
-            printf("  [FREED] ");
+        if (IS_CONSUMED(current)) {
+            printf("  [CONSUMED] ");
         } else {
-            total_active += current->memory_size;
-            active_count++;
-            if (current->consumed) {
-                printf("  [CONSUMED] ");
-            } else {
-                printf("  [ACTIVE] ");
-            }
+            printf("  [ACTIVE] ");
         }
         
         print_term(current->fact, kb->symbols);
@@ -197,8 +185,8 @@ void print_memory_state(linear_kb_t* kb, const char* context) {
         current = current->next;
     }
     
-    printf("  SUMMARY: %d active (%zu bytes), %d deallocated (%zu bytes), total allocated: %zu bytes\n",
-           active_count, total_active, deallocated_count, total_deallocated, total_allocated);
+    printf("  SUMMARY: %d resources (%zu bytes total allocated)\n",
+           active_count, total_active);
     printf("DEBUG: END MEMORY STATE\n\n");
     #endif
 }

@@ -17,26 +17,25 @@ typedef enum {
     TERM_CLONE      // reference to another term
 } term_type_t;
 
-// Compact term structure - much smaller memory footprint
+// Compact term structure - aggressively optimized for memory
 typedef struct term {
-    uint8_t type;           // 1 byte instead of 4
+    uint8_t type;           // 1 byte
+    uint8_t arity;          // 1 byte - moved out of compound union for better packing
+    uint16_t padding;       // 2 bytes explicit padding for alignment
     union {
-        symbol_id_t atom_id;   // 2 bytes instead of 8-byte pointer + string
-        var_id_t var_id;       // 2 bytes instead of 8-byte pointer + string
-        int64_t integer;    // 8 bytes (unchanged)
-        struct {
-            symbol_id_t functor_id;  // 2 bytes instead of 8-byte pointer + string
-            struct term** args;   // 8 bytes (pointer to args array)
-            uint8_t arity;        // 1 byte instead of 4
-        } compound;
-        struct term* cloned;      // 8 bytes (unchanged)
+        symbol_id_t atom_id;   // 2 bytes
+        var_id_t var_id;       // 2 bytes
+        int64_t integer;       // 8 bytes
+        symbol_id_t functor_id; // 2 bytes - for compound terms
+        struct term* cloned;   // 8 bytes
     } data;
+    struct term** args;     // 8 bytes - args array pointer (NULL if not compound)
 } term_t;
 
-// Memory usage: 
-// - ATOM/VAR: 3 bytes total (1 + 2) vs previous ~24+ bytes
-// - COMPOUND: 12 bytes + args vs previous ~32+ bytes + strings
-// - INTEGER: 9 bytes vs previous 12 bytes
+// Memory usage with better packing:
+// - ATOM/VAR: 16 bytes total (due to pointer padding) vs previous 32 bytes
+// - COMPOUND: 16 bytes + args vs previous 32+ bytes
+// - INTEGER: 16 bytes vs previous 32 bytes
 
 // Pair type for tensor products
 typedef struct {

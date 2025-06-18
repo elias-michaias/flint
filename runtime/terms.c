@@ -22,10 +22,10 @@ int terms_equal(term_t* t1, term_t* t2) {
         case TERM_VAR:
             return t1->data.var_id == t2->data.var_id;
         case TERM_COMPOUND:
-            if (t1->data.compound.functor_id != t2->data.compound.functor_id) return 0;
-            if (t1->data.compound.arity != t2->data.compound.arity) return 0;
-            for (int i = 0; i < t1->data.compound.arity; i++) {
-                if (!terms_equal(t1->data.compound.args[i], t2->data.compound.args[i])) {
+            if (t1->data.functor_id != t2->data.functor_id) return 0;
+            if (t1->arity != t2->arity) return 0;
+            for (int i = 0; i < t1->arity; i++) {
+                if (!terms_equal(t1->args[i], t2->args[i])) {
                     return 0;
                 }
             }
@@ -69,16 +69,16 @@ term_t* create_integer(int64_t value) {
 term_t* create_compound(symbol_table_t* symbols, const char* functor, term_t** args, int arity) {
     term_t* term = malloc(sizeof(term_t));
     term->type = TERM_COMPOUND;
-    term->data.compound.functor_id = symbol_table_intern(symbols, functor);
-    term->data.compound.arity = arity;
+    term->data.functor_id = symbol_table_intern(symbols, functor);
+    term->arity = arity;
     
     if (arity > 0) {
-        term->data.compound.args = malloc(sizeof(term_t*) * arity);
+        term->args = malloc(sizeof(term_t*) * arity);
         for (int i = 0; i < arity; i++) {
-            term->data.compound.args[i] = args[i];
+            term->args[i] = args[i];
         }
     } else {
-        term->data.compound.args = NULL;
+        term->args = NULL;
     }
     
     return term;
@@ -103,11 +103,11 @@ void free_term(term_t* term) {
             break;
         case TERM_COMPOUND:
             // No functor string to free - just the ID
-            if (term->data.compound.args) {
-                for (int i = 0; i < term->data.compound.arity; i++) {
-                    free_term(term->data.compound.args[i]);
+            if (term->args) {
+                for (int i = 0; i < term->arity; i++) {
+                    free_term(term->args[i]);
                 }
-                free(term->data.compound.args);
+                free(term->args);
             }
             break;
         case TERM_INTEGER:
@@ -145,16 +145,16 @@ term_t* copy_term(term_t* term) {
         case TERM_COMPOUND: {
             term_t* new_term = malloc(sizeof(term_t));
             new_term->type = TERM_COMPOUND;
-            new_term->data.compound.functor_id = term->data.compound.functor_id;
-            new_term->data.compound.arity = term->data.compound.arity;
+            new_term->data.functor_id = term->data.functor_id;
+            new_term->arity = term->arity;
             
-            if (term->data.compound.arity > 0) {
-                new_term->data.compound.args = malloc(sizeof(term_t*) * term->data.compound.arity);
-                for (int i = 0; i < term->data.compound.arity; i++) {
-                    new_term->data.compound.args[i] = copy_term(term->data.compound.args[i]);
+            if (term->arity > 0) {
+                new_term->args = malloc(sizeof(term_t*) * term->arity);
+                for (int i = 0; i < term->arity; i++) {
+                    new_term->args[i] = copy_term(term->args[i]);
                 }
             } else {
-                new_term->data.compound.args = NULL;
+                new_term->args = NULL;
             }
             return new_term;
         }
@@ -175,7 +175,7 @@ term_t* apply_substitution(term_t* term, substitution_t* subst) {
         case TERM_VAR:
             // Look for this variable in the substitution
             for (int i = 0; i < subst->count; i++) {
-                if (term->data.var_id == subst->bindings[i].var_id) {
+                if (term->data.var_id == subst->bindings[subst->count].var_id) {
                     return copy_term(subst->bindings[i].term);
                 }
             }
@@ -184,18 +184,18 @@ term_t* apply_substitution(term_t* term, substitution_t* subst) {
             
         case TERM_COMPOUND:
             // Apply substitution recursively to all arguments
-            if (term->data.compound.arity == 0) {
+            if (term->arity == 0) {
                 return copy_term(term);
             }
             
             term_t* new_term = malloc(sizeof(term_t));
             new_term->type = TERM_COMPOUND;
-            new_term->data.compound.functor_id = term->data.compound.functor_id;
-            new_term->data.compound.arity = term->data.compound.arity;
-            new_term->data.compound.args = malloc(sizeof(term_t*) * term->data.compound.arity);
+            new_term->data.functor_id = term->data.functor_id;
+            new_term->arity = term->arity;
+            new_term->args = malloc(sizeof(term_t*) * term->arity);
             
-            for (int i = 0; i < term->data.compound.arity; i++) {
-                new_term->data.compound.args[i] = apply_substitution(term->data.compound.args[i], subst);
+            for (int i = 0; i < term->arity; i++) {
+                new_term->args[i] = apply_substitution(term->args[i], subst);
             }
             
             return new_term;
@@ -233,12 +233,12 @@ void print_term(term_t* term, symbol_table_t* symbols) {
             printf("%lld", term->data.integer);
             break;
         case TERM_COMPOUND:
-            printf("%s", symbol_table_get_string(symbols, term->data.compound.functor_id));
-            if (term->data.compound.arity > 0) {
+            printf("%s", symbol_table_get_string(symbols, term->data.functor_id));
+            if (term->arity > 0) {
                 printf("(");
-                for (int i = 0; i < term->data.compound.arity; i++) {
+                for (int i = 0; i < term->arity; i++) {
                     if (i > 0) printf(", ");
-                    print_term(term->data.compound.args[i], symbols);
+                    print_term(term->args[i], symbols);
                 }
                 printf(")");
             }
@@ -258,8 +258,8 @@ int occurs_in_term(var_id_t var_id, term_t* term) {
             return var_id == term->data.var_id;
             
         case TERM_COMPOUND:
-            for (int i = 0; i < term->data.compound.arity; i++) {
-                if (occurs_in_term(var_id, term->data.compound.args[i])) {
+            for (int i = 0; i < term->arity; i++) {
+                if (occurs_in_term(var_id, term->args[i])) {
                     return 1;
                 }
             }
@@ -343,16 +343,16 @@ term_t* create_atom_id(symbol_id_t atom_id) {
 term_t* create_compound_id(symbol_id_t functor_id, term_t** args, uint8_t arity) {
     term_t* term = malloc(sizeof(term_t));
     term->type = TERM_COMPOUND;
-    term->data.compound.functor_id = functor_id;
-    term->data.compound.arity = arity;
+    term->data.functor_id = functor_id;
+    term->arity = arity;
     
     if (arity > 0) {
-        term->data.compound.args = malloc(sizeof(term_t*) * arity);
+        term->args = malloc(sizeof(term_t*) * arity);
         for (int i = 0; i < arity; i++) {
-            term->data.compound.args[i] = args[i];
+            term->args[i] = args[i];
         }
     } else {
-        term->data.compound.args = NULL;
+        term->args = NULL;
     }
     
     return term;

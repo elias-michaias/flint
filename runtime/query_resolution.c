@@ -48,7 +48,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     for (linear_resource_t* r = kb->resources; r != NULL; r = r->next) {
         printf("DEBUG: Resource: ");
         print_term(r->fact, kb->symbols);
-        printf(" (consumed: %d)\n", r->consumed);
+        printf(" (consumed: %d)\n", IS_CONSUMED(r) ? 1 : 0);
     }
     for (int i = 0; i < kb->rule_count; i++) {
         printf("DEBUG: Rule %d head: ", i);
@@ -138,15 +138,15 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     
                     // Try to find a resource that matches this substituted body term
                     for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-                        if (!resource->consumed && !resource->deallocated) {
+                        if (!IS_CONSUMED(resource)) {
                             substitution_t match_subst = {0};
                             init_substitution(&match_subst);
                             
                             if (unify_terms(substituted_body_term, resource->fact, &match_subst)) {
                                 // Found a matching resource
-                                if (resource->persistent == 0) {
+                                if (GET_PERSISTENT(resource) == 0) {
                                     // Linear resource: consume and deallocate it
-                                    resource->consumed = 1;
+                                    SET_CONSUMED(resource);
                                     consumed_resources[consumed_count++] = resource;
                                     
                                     #ifdef DEBUG
@@ -194,7 +194,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                     term_t* substituted_production = apply_substitution(rule->production, &rule_subst);
                     linear_resource_t* new_resource = malloc(sizeof(linear_resource_t));
                     new_resource->fact = substituted_production;
-                    new_resource->consumed = 0;
+                    new_resource->flags = 0;  // Clear all flags (not consumed, not deallocated, linear)
                     new_resource->next = kb->resources;
                     kb->resources = new_resource;
                     
@@ -219,7 +219,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                 } else if (!can_apply) {
                     // Restore consumed resources for this failed attempt
                     for (int i = 0; i < consumed_count; i++) {
-                        consumed_resources[i]->consumed = 0;
+                        CLEAR_CONSUMED(consumed_resources[i]);
                     }
                 }
             }
@@ -229,7 +229,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
     
     // Check if we have a direct fact that matches this goal
     for (linear_resource_t* resource = kb->resources; resource != NULL; resource = resource->next) {
-        if (!resource->consumed) {
+        if (!IS_CONSUMED(resource)) {
             substitution_t temp_subst = {0};
             if (unify(current_goal, resource->fact, &temp_subst)) {
                 #ifdef DEBUG
@@ -239,7 +239,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                 #endif
                 
                 // Found a matching fact, consume it and continue with remaining goals
-                resource->consumed = 1;
+                SET_CONSUMED(resource);
                 
                 // Compose the substitution
                 if (global_subst) {
@@ -258,7 +258,7 @@ int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int 
                 }
                 
                 // Only restore if no remaining goals or they all failed
-                resource->consumed = 0;
+                CLEAR_CONSUMED(resource);
             }
         }
     }

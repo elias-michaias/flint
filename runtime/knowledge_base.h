@@ -15,22 +15,30 @@
 // More compact linear resource representation
 typedef struct linear_resource {
     term_t* fact;
-    uint8_t consumed;      // 1 bit needed, but 1 byte for alignment
-    uint8_t deallocated;   // 1 bit needed, but 1 byte for alignment  
-    uint8_t persistent;    // 1 bit needed, but 1 byte for alignment
+    uint8_t flags;         // Bit-packed: bits 0-1=persistent(0-3), bit 2=consumed
     uint16_t memory_size;  // 2 bytes instead of 8 (sufficient for most resources)
     symbol_id_t allocation_site; // 2 bytes for interned allocation site string
     struct linear_resource* next; // 8 bytes (unchanged)
 } linear_resource_t;
 
-// Total: ~17 bytes vs previous ~32+ bytes
+// Bit manipulation macros for flags
+#define RESOURCE_PERSISTENT_MASK 0x03  // 2 bits for persistent (0-3)
+#define RESOURCE_CONSUMED        0x04  // bit 2
+
+#define GET_PERSISTENT(r)       ((r)->flags & RESOURCE_PERSISTENT_MASK)
+#define IS_CONSUMED(r)          ((r)->flags & RESOURCE_CONSUMED)
+
+#define SET_PERSISTENT(r, val)  ((r)->flags = ((r)->flags & ~RESOURCE_PERSISTENT_MASK) | ((val) & RESOURCE_PERSISTENT_MASK))
+#define SET_CONSUMED(r)         ((r)->flags |= RESOURCE_CONSUMED)
+#define CLEAR_CONSUMED(r)       ((r)->flags &= ~RESOURCE_CONSUMED)
+
+// Total: ~14 bytes vs previous ~17 bytes
 
 typedef struct {
     term_t* head;
     term_t** body;
     uint8_t body_size;     // 1 byte instead of 4
     term_t* production;    // Optional production term (NULL if no production)
-    uint8_t is_recursive;  // 1 byte instead of 4
 } clause_t;
 
 // Type mapping for terms

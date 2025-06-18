@@ -102,9 +102,7 @@ linear_kb_t* create_kb_copy(linear_kb_t* kb) {
 void add_linear_fact(linear_kb_t* kb, term_t* fact) {
     linear_resource_t* resource = malloc(sizeof(linear_resource_t));
     resource->fact = copy_term(fact);
-    resource->consumed = 0;
-    resource->persistent = 0; // Mark as linear (consumable)
-    resource->deallocated = 0;
+    resource->flags = 0;  // Clear all flags (consumed=0, deallocated=0, persistent=0)
     resource->memory_size = estimate_term_memory_size(fact);
     resource->allocation_site = symbol_table_intern(kb->symbols, "fact");
     resource->next = kb->resources;
@@ -131,7 +129,6 @@ void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_
             kb->rules[kb->rule_count].body = NULL;
         }
         kb->rules[kb->rule_count].production = production ? copy_term(production) : NULL;
-        kb->rules[kb->rule_count].is_recursive = 0;  // Default to non-recursive
         kb->rule_count++;
     }
 }
@@ -272,9 +269,8 @@ void set_auto_deallocation(linear_kb_t* kb, int enabled) {
 void add_optional_linear_fact(linear_kb_t* kb, term_t* fact) {
     linear_resource_t* resource = malloc(sizeof(linear_resource_t));
     resource->fact = fact;
-    resource->consumed = 0;
-    resource->deallocated = 0;
-    resource->persistent = 0;  // Linear but optional
+    resource->flags = 0;  // Clear all flags (persistent=0, consumed=0, deallocated=0)
+    SET_PERSISTENT(resource, 0);  // Linear but optional
     resource->memory_size = estimate_term_memory_size(fact);
     resource->allocation_site = symbol_table_intern(kb->symbols, "optional_fact");
     resource->next = kb->resources;
@@ -293,9 +289,8 @@ void add_exponential_linear_fact(linear_kb_t* kb, term_t* fact) {
     // Exponential facts are essentially persistent but with different semantics
     linear_resource_t* resource = malloc(sizeof(linear_resource_t));
     resource->fact = fact;
-    resource->consumed = 0;
-    resource->deallocated = 0;
-    resource->persistent = 2;  // 2 = exponential (can be used multiple times)
+    resource->flags = 0;  // Clear all flags
+    SET_PERSISTENT(resource, 2);  // 2 = exponential (can be used multiple times)
     resource->memory_size = estimate_term_memory_size(fact);
     resource->allocation_site = symbol_table_intern(kb->symbols, "exponential_fact");
     resource->next = kb->resources;
@@ -314,7 +309,7 @@ int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution
     linear_resource_t* current = kb->resources;
     
     while (current != NULL) {
-        if (!current->consumed && !current->deallocated) {
+        if (!IS_CONSUMED(current)) {
             // Try to unify with the goal
             substitution_t temp_subst = {0};
             init_substitution(&temp_subst);
@@ -322,9 +317,9 @@ int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution
             
             if (unify_terms(current->fact, goal, &temp_subst)) {
                 // Resource matches - for persistent resources, don't mark as consumed
-                if (current->persistent == 0) {
+                if (GET_PERSISTENT(current) == 0) {
                     // Linear resource: consume it  
-                    current->consumed = 1;
+                    SET_CONSUMED(current);
                     #ifdef DEBUG
                     printf("DEBUG: Consumed linear resource: ");
                     print_term(current->fact, kb->symbols);
@@ -342,7 +337,7 @@ int consume_linear_resource_enhanced(linear_kb_t* kb, term_t* goal, substitution
                 copy_substitution(subst, &temp_subst);
                 
                 // Auto-deallocate if enabled and not persistent/exponential
-                if (current->persistent == 0) {  // Only auto-deallocate truly linear resources
+                if (GET_PERSISTENT(current) == 0) {  // Only auto-deallocate truly linear resources
                     auto_deallocate_resource(kb, current);
                 }
                 
