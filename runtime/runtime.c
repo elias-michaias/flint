@@ -36,9 +36,16 @@ void flint_init_runtime(void) {
     
     // Initialize built-in C interop functions
     flint_init_builtin_c_functions();
+    
+    // Initialize async system with structured concurrency
+    flint_init_async_system(global_env);
+    flint_register_async_functions();
 }
 
 void flint_cleanup_runtime(void) {
+    // Cleanup async system
+    flint_cleanup_async_system();
+    
     // Cleanup C interop functions
     flint_cleanup_c_interop();
     

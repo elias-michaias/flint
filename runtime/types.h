@@ -195,7 +195,8 @@ typedef enum {
     LINEAR_OP_DESTRUCTURE,
     LINEAR_OP_PATTERN_MATCH,
     LINEAR_OP_ASSIGNMENT,
-    LINEAR_OP_EXPLICIT_CONSUME
+    LINEAR_OP_EXPLICIT_CONSUME,
+    LINEAR_OP_CHANNEL_SEND
 } LinearOp;
 
 // Trail entry for tracking consumed values

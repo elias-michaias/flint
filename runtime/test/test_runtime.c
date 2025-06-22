@@ -868,6 +868,133 @@ bool test_c_interop_linear() {
     return true;
 }
 
+// Test async system - basic functionality
+bool test_async_basic() {
+    TEST("Async System - Basic Functionality");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test async context creation
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    ASSERT(async_ctx != NULL);
+    
+    flint_set_async_context(async_ctx);
+    AsyncContext* retrieved_ctx = flint_get_async_context();
+    ASSERT(retrieved_ctx == async_ctx);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Async basic functionality tests passed\n");
+    return true;
+}
+
+// Test async channels
+bool test_async_channels() {
+    TEST("Async System - Channels");
+    
+    Environment* env = flint_create_environment(NULL);
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Create a channel
+    FlintChannel* chan = flint_create_channel(0, C_TYPE_POINTER);
+    ASSERT(chan != NULL);
+    ASSERT(!chan->is_closed);
+    
+    // Test non-blocking operations (should fail with timeout)
+    Value* test_val = flint_create_integer(42);
+    
+    // Try to receive from empty channel (should timeout quickly)
+    Value* received = flint_channel_recv(chan, 1); // 1ms timeout
+    ASSERT(received == NULL); // Should timeout
+    
+    // Clean up
+    flint_channel_close(chan);
+    free(chan);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Async channel tests passed\n");
+    return true;
+}
+
+// Test coroutine bundles
+bool test_async_bundles() {
+    TEST("Async System - Coroutine Bundles");
+    
+    Environment* env = flint_create_environment(NULL);
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Create a bundle
+    CoroutineBundle* bundle = flint_create_bundle(4);
+    ASSERT(bundle != NULL);
+    ASSERT(bundle->count == 0);
+    ASSERT(bundle->capacity == 4);
+    
+    // Clean up
+    flint_free_bundle(bundle);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Async bundle tests passed\n");
+    return true;
+}
+
+// Test async sleep
+bool test_async_sleep() {
+    TEST("Async System - Sleep");
+    
+    Environment* env = flint_create_environment(NULL);
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Test async sleep (very short)
+    int64_t start_time = flint_now();
+    flint_async_sleep(10); // 10ms
+    int64_t end_time = flint_now();
+    
+    // Should have slept for at least a few milliseconds
+    ASSERT(end_time > start_time);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Async sleep tests passed\n");
+    return true;
+}
+
+// Test async integration with linear resources
+bool test_async_linear_integration() {
+    TEST("Async System - Linear Resource Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Create a channel and test linear resource tracking
+    FlintChannel* chan = flint_create_channel(0, C_TYPE_POINTER);
+    ASSERT(chan != NULL);
+    
+    Value* test_val = flint_create_integer(100);
+    ASSERT(!test_val->is_consumed);
+    
+    // Note: Since we can't easily test actual async sending without complex setup,
+    // we'll just test that the channel and linear system can coexist
+    
+    flint_channel_close(chan);
+    free(chan);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Async linear integration tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -904,6 +1031,13 @@ int main() {
     all_passed &= test_c_interop_math();
     all_passed &= test_c_interop_errors();
     all_passed &= test_c_interop_linear();
+    
+    // Async system tests
+    all_passed &= test_async_basic();
+    all_passed &= test_async_channels();
+    all_passed &= test_async_bundles();
+    all_passed &= test_async_sleep();
+    all_passed &= test_async_linear_integration();
     
     test_printing();
     

@@ -3,8 +3,8 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
-INCLUDES = -I.
-LDFLAGS = -lm
+INCLUDES = -I. -Ilib/libdill/libdill-install/include
+LDFLAGS = -lm lib/libdill/libdill-install/lib/libdill.a
 
 # Directories
 OBJDIR = object
@@ -12,7 +12,7 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c interop.c
+SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c interop.c async.c
 HEADERS = types.h runtime.h
 
 # Object files (in object directory)
@@ -75,3 +75,4 @@ $(OBJDIR)/environment.o: environment.c runtime.h types.h
 $(OBJDIR)/pattern_matching.o: pattern_matching.c runtime.h types.h
 $(OBJDIR)/linear.o: linear.c runtime.h types.h
 $(OBJDIR)/interop.o: interop.c runtime.h types.h
+$(OBJDIR)/async.o: async.c runtime.h types.h

@@ -255,5 +255,69 @@ void flint_init_builtin_c_functions(void);
 void flint_cleanup_c_interop(void);
 
 // =============================================================================
+// ASYNCHRONOUS OPERATIONS AND STRUCTURED CONCURRENCY
+// =============================================================================
+
+// Forward declarations for async types
+typedef struct AsyncContext AsyncContext;
+
+// Channel wrapper for Flint values
+typedef struct FlintChannel {
+    int dill_channel[2];           // libdill channel handle (send and recv)
+    bool is_closed;                // Whether the channel is closed
+    size_t capacity;               // Channel capacity (0 = synchronous)
+    CType value_type;              // Type of values in this channel
+} FlintChannel;
+
+// Bundle for managing multiple coroutines
+typedef struct CoroutineBundle {
+    FlintChannel** result_channels;
+    size_t count;
+    size_t capacity;
+} CoroutineBundle;
+
+// Async context management
+AsyncContext* flint_create_async_context(Environment* env);
+void flint_set_async_context(AsyncContext* ctx);
+AsyncContext* flint_get_async_context(void);
+void flint_free_async_context(AsyncContext* ctx);
+
+// Channel operations
+FlintChannel* flint_create_channel(size_t capacity, CType value_type);
+bool flint_channel_send(FlintChannel* chan, Value* value, int timeout_ms);
+Value* flint_channel_recv(FlintChannel* chan, int timeout_ms);
+void flint_channel_close(FlintChannel* chan);
+
+// Coroutine operations
+FlintChannel* flint_spawn_coroutine(Value* (*func)(Value**, size_t, Environment*),
+                                   Value** args, size_t arg_count, Environment* env);
+Value* flint_await_coroutine(FlintChannel* result_channel, int timeout_ms);
+
+// Structured concurrency (bundles)
+CoroutineBundle* flint_create_bundle(size_t initial_capacity);
+bool flint_bundle_spawn(CoroutineBundle* bundle, 
+                       Value* (*func)(Value**, size_t, Environment*),
+                       Value** args, size_t arg_count, Environment* env);
+Value** flint_bundle_wait_all(CoroutineBundle* bundle, int timeout_ms);
+Value* flint_bundle_wait_any(CoroutineBundle* bundle, size_t* completed_index, int timeout_ms);
+void flint_free_bundle(CoroutineBundle* bundle);
+
+// Async I/O operations
+Value* flint_async_read_file(const char* filename);
+void flint_async_sleep(int milliseconds);
+
+// Get current time in milliseconds (for timing measurements)
+int64_t flint_now(void);
+
+// Integration with Flint runtime
+void flint_init_async_system(Environment* env);
+void flint_cleanup_async_system(void);
+void flint_register_async_functions(void);
+
+// Narrowing functions for async operations
+Value* flint_narrow_async_spawn(Value** args, size_t arg_count, Environment* env);
+Value* flint_narrow_async_await(Value** args, size_t arg_count, Environment* env);
+
+// =============================================================================
 
 #endif // FLINT_RUNTIME_H

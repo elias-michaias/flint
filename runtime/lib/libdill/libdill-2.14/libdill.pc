@@ -1,0 +1,12 @@
+prefix=/Users/emskeirik/Projects/flint-new/runtime/lib/libdill-2.14/../libdill-install
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libdill
+Description: coroutine library
+URL: http://libdill.org/
+Version: 25.0.5
+Requires:
+Libs: -L${libdir} -ldill 
+Cflags: -I${includedir}
