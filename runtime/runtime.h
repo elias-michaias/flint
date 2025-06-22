@@ -33,6 +33,10 @@ Value* flint_create_record(char** field_names, Value** field_values, size_t fiel
 Value* flint_create_function(const char* name, int arity, void* impl);
 Value* flint_create_partial_app(Value* func, Value** args, int applied_count);
 
+// Function application and higher-order operations
+Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environment* env);
+bool flint_is_fully_applied(Value* func);
+
 // Create logical variables
 Value* flint_create_logical_var(bool is_linear);
 LogicalVar* flint_get_logical_var(Value* val);
@@ -166,6 +170,50 @@ Value* flint_create_choice(Value** alternatives, size_t count, Environment* env)
 
 // Get all solutions for a non-deterministic computation
 Value** flint_get_all_solutions(Value* expr, Environment* env, size_t* solution_count);
+
+// =============================================================================
+// LINEAR RESOURCE MANAGEMENT
+// =============================================================================
+
+// Initialize/cleanup the linear resource management system
+void flint_init_linear_system(void);
+void flint_cleanup_linear_system(void);
+
+// Core linear resource operations
+void flint_mark_linear(Value* value);
+void flint_mark_consumed(Value* value, LinearOp operation);
+bool flint_is_consumed(Value* value);
+Value* flint_consume_value(Value* value, LinearOp operation);
+
+// Opt-in non-consumptive operations
+Value* flint_copy_for_sharing(Value* value);
+Value* flint_deep_copy_value(Value* value);
+
+// Linear operations with automatic consumption
+Value* flint_linear_unify(Value* val1, Value* val2, Environment* env);
+Value* flint_linear_apply_function(Value* func, Value** args, size_t arg_count, Environment* env);
+Value* flint_linear_list_access(Value* list, size_t index);
+LinearListDestructure flint_linear_list_destructure(Value* list);
+
+// Trail management for backtracking
+LinearTrail* flint_create_linear_trail(void);
+void flint_free_linear_trail(LinearTrail* trail);
+void flint_trail_record_consumption(LinearTrail* trail, Value* value, LinearOp operation);
+LinearCheckpoint flint_trail_create_checkpoint(LinearTrail* trail);
+void flint_trail_rollback_to_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoint);
+void flint_trail_commit_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoint);
+
+// Additional convenience functions for the linear system
+void flint_set_linear_context(Environment* env);
+Value* flint_share_value(Value* value);
+LinearCheckpoint flint_linear_checkpoint(LinearTrail* trail);
+void flint_linear_restore(LinearTrail* trail, LinearCheckpoint checkpoint);
+LinearListDestructure flint_linear_destructure_list(Value* list);
+
+// Choice point integration
+LinearCheckpoint flint_choice_create_linear_checkpoint(void);
+void flint_choice_rollback_linear(LinearCheckpoint checkpoint);
+void flint_choice_commit_linear(LinearCheckpoint checkpoint);
 
 // =============================================================================
 

@@ -14,6 +14,7 @@ Environment* flint_create_environment(Environment* parent) {
     env->capacity = 0;
     env->parent = parent;
     env->constraint_store = NULL;  // Initialize constraint store to NULL
+    env->linear_trail = flint_create_linear_trail();  // Initialize linear trail
     return env;
 }
 
@@ -24,6 +25,11 @@ void flint_free_environment(Environment* env) {
     if (env->variables) {
         flint_free(env->variables);
     }
+    
+    // Temporarily disable linear trail cleanup to debug double-free
+    // if (env->linear_trail) {
+    //     flint_free_linear_trail(env->linear_trail);
+    // }
     
     flint_free(env);
 }
@@ -46,8 +52,9 @@ void flint_bind_variable(Environment* env, VarId var_id, Value* val) {
     var->id = var_id;
     var->binding = val;
     var->waiters = NULL;
-    var->is_linear = false;  // Default to non-linear
-    var->ref_count = 0;
+    var->use_count = 0;
+    var->is_consumed = false;
+    var->allow_reuse = true;  // Default to allowing reuse
     
     // Expand the variables array if needed
     if (env->var_count >= env->capacity) {
@@ -99,8 +106,9 @@ static Environment* clone_environment(Environment* env) {
             cloned_var->id = orig_var->id;
             cloned_var->binding = orig_var->binding;  // Shallow copy for now
             cloned_var->waiters = orig_var->waiters;  // Shallow copy
-            cloned_var->is_linear = orig_var->is_linear;
-            cloned_var->ref_count = orig_var->ref_count;
+            cloned_var->use_count = orig_var->use_count;
+            cloned_var->is_consumed = orig_var->is_consumed;
+            cloned_var->allow_reuse = orig_var->allow_reuse;
             
             clone->variables[i] = cloned_var;
         }

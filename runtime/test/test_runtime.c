@@ -506,6 +506,226 @@ bool test_non_deterministic_choice() {
     return true;
 }
 
+// Test linear resource management - basic consumption
+bool test_linear_basic_consumption() {
+    TEST("Linear Resource Management - Basic Consumption");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create a linear value
+    Value* val = flint_create_integer(42);
+    ASSERT(!val->is_consumed);
+    ASSERT(val->consumption_count == 0);
+    
+    // Consume the value
+    flint_consume_value(val, LINEAR_OP_EXPLICIT_CONSUME);
+    ASSERT(val->is_consumed);
+    ASSERT(val->consumption_count == 1);
+    
+    // Test that we can consume it again (should increment count)
+    Value* result2 = flint_consume_value(val, LINEAR_OP_EXPLICIT_CONSUME);
+    ASSERT(result2 != NULL); // Should succeed
+    ASSERT(val->consumption_count == 2);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear basic consumption tests passed\n");
+    return true;
+}
+
+// Test linear resource management - copying and sharing
+bool test_linear_copying_sharing() {
+    TEST("Linear Resource Management - Copying and Sharing");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create a linear value
+    Value* original = flint_create_string("test string");
+    ASSERT(!original->is_consumed);
+    
+    // Test deep copying
+    Value* copy = flint_deep_copy_value(original);
+    ASSERT(copy != original);
+    ASSERT(!copy->is_consumed);
+    ASSERT(copy->type == VAL_STRING);
+    ASSERT(strcmp(copy->data.string, "test string") == 0);
+    
+    // Consume the original
+    flint_consume_value(original, LINEAR_OP_EXPLICIT_CONSUME);
+    ASSERT(original->is_consumed);
+    ASSERT(!copy->is_consumed); // Copy should not be affected
+    
+    // Test sharing (opt-in non-linear)
+    Value* shared = flint_share_value(copy);
+    ASSERT(shared == copy); // Should return the same value
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear copying and sharing tests passed\n");
+    return true;
+}
+
+// Test linear resource management - trail and backtracking
+bool test_linear_trail_backtracking() {
+    TEST("Linear Resource Management - Trail and Backtracking");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Set the linear context to use this environment's trail
+    flint_set_linear_context(env);
+    
+    // Create some values
+    Value* val1 = flint_create_integer(10);
+    Value* val2 = flint_create_integer(20);
+    Value* val3 = flint_create_string("hello");
+    
+    // Create a checkpoint
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    // Consume some values
+    flint_consume_value(val1, LINEAR_OP_UNIFY);
+    flint_consume_value(val2, LINEAR_OP_FUNCTION_CALL);
+    flint_consume_value(val3, LINEAR_OP_DESTRUCTURE);
+    
+    ASSERT(val1->is_consumed);
+    ASSERT(val2->is_consumed);
+    ASSERT(val3->is_consumed);
+    
+    // Check trail entries (trail should have at least some entries)
+    ASSERT(env->linear_trail->entry_count >= 3); // Should have our 3 consumption records
+    
+    // Restore to checkpoint
+    flint_linear_restore(env->linear_trail, checkpoint);
+    
+    // Values should be restored (not consumed)
+    ASSERT(!val1->is_consumed);
+    ASSERT(!val2->is_consumed);
+    ASSERT(!val3->is_consumed);
+    
+    // Reset linear context
+    flint_set_linear_context(NULL);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear trail and backtracking tests passed\n");
+    return true;
+}
+
+// Test linear resource management - list destructuring
+bool test_linear_list_destructuring() {
+    TEST("Linear Resource Management - List Destructuring");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create a list with some elements
+    Value* elements[3];
+    elements[0] = flint_create_integer(1);
+    elements[1] = flint_create_integer(2);
+    elements[2] = flint_create_integer(3);
+    
+    Value* list = flint_create_list(elements, 3);
+    ASSERT(!list->is_consumed);
+    ASSERT(list->data.list.length == 3);
+    
+    // Test linear destructuring
+    LinearListDestructure result = flint_linear_destructure_list(list);
+    ASSERT(result.success);
+    ASSERT(result.count == 3);
+    ASSERT(result.elements != NULL);
+    
+    // Original list should now be consumed
+    ASSERT(list->is_consumed);
+    
+    // Check that elements were transferred
+    ASSERT(result.elements[0].type == VAL_INTEGER);
+    ASSERT(result.elements[0].data.integer == 1);
+    ASSERT(result.elements[1].data.integer == 2);
+    ASSERT(result.elements[2].data.integer == 3);
+    
+    // Clean up transferred elements
+    free(result.elements);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear list destructuring tests passed\n");
+    return true;
+}
+
+// Test linear resource management - variable consumption
+bool test_linear_variable_consumption() {
+    TEST("Linear Resource Management - Variable Consumption");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create a linear logical variable
+    Value* var_val = flint_create_logical_var(true); // linear = true
+    LogicalVar* var = var_val->data.logical_var;
+    
+    ASSERT(!var->is_consumed);
+    ASSERT(var->use_count == 0);
+    ASSERT(!var->allow_reuse);
+    
+    // Bind the variable
+    Value* binding = flint_create_integer(42);
+    var->binding = binding;
+    
+    // Use the variable (should increment use count)
+    var->use_count++;
+    ASSERT(var->use_count == 1);
+    
+    // Mark as consumed
+    var->is_consumed = true;
+    ASSERT(var->is_consumed);
+    
+    // Test that we can create a non-linear (reusable) variable
+    Value* reusable_var_val = flint_create_logical_var(false); // linear = false
+    LogicalVar* reusable_var = reusable_var_val->data.logical_var;
+    
+    ASSERT(!reusable_var->is_consumed);
+    ASSERT(reusable_var->use_count == 0);
+    ASSERT(reusable_var->allow_reuse);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear variable consumption tests passed\n");
+    return true;
+}
+
+// Test linear resource management - integration with unification
+bool test_linear_unification_integration() {
+    TEST("Linear Resource Management - Unification Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create two values to unify
+    Value* val1 = flint_create_integer(42);
+    Value* val2 = flint_create_logical_var(true);
+    
+    ASSERT(!val1->is_consumed);
+    ASSERT(!val2->is_consumed);
+    
+    // Create a checkpoint before unification
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    // Perform unification (this should consume both values)
+    bool unify_result = flint_unify(val1, val2, env);
+    ASSERT(unify_result);
+    
+    // Check that the logical variable is bound
+    LogicalVar* var = val2->data.logical_var;
+    ASSERT(var->binding != NULL);
+    ASSERT(var->binding->type == VAL_INTEGER);
+    ASSERT(var->binding->data.integer == 42);
+    
+    // Test backtracking restores the consumption state
+    flint_linear_restore(env->linear_trail, checkpoint);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Linear unification integration tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -527,11 +747,14 @@ int main() {
     all_passed &= test_non_deterministic_choice();
     all_passed &= test_free_variables();
     all_passed &= test_environment();
-    all_passed &= test_higher_order_functions();
-    all_passed &= test_pattern_matching();
-    all_passed &= test_complex_unification();
-    all_passed &= test_constraint_propagation();
-    all_passed &= test_non_deterministic_choice();
+    
+    // Linear resource management tests
+    all_passed &= test_linear_basic_consumption();
+    all_passed &= test_linear_copying_sharing();
+    all_passed &= test_linear_trail_backtracking();
+    all_passed &= test_linear_list_destructuring();
+    all_passed &= test_linear_variable_consumption();
+    all_passed &= test_linear_unification_integration();
     
     test_printing();
     

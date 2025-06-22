@@ -12,7 +12,7 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c
+SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c
 HEADERS = types.h runtime.h
 
 # Object files (in object directory)
@@ -73,3 +73,4 @@ $(OBJDIR)/unification.o: unification.c runtime.h types.h
 $(OBJDIR)/narrowing.o: narrowing.c runtime.h types.h
 $(OBJDIR)/environment.o: environment.c runtime.h types.h
 $(OBJDIR)/pattern_matching.o: pattern_matching.c runtime.h types.h
+$(OBJDIR)/linear.o: linear.c runtime.h types.h

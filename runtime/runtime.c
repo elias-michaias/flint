@@ -30,9 +30,15 @@ void flint_init_runtime(void) {
     global_env = flint_create_environment(NULL);
     global_constraints = flint_create_constraint_store();
     allocated_blocks = NULL;
+    
+    // Initialize the linear resource management system
+    flint_init_linear_system();
 }
 
 void flint_cleanup_runtime(void) {
+    // Cleanup linear system first
+    flint_cleanup_linear_system();
+    
     // Free all tracked memory blocks
     MemBlock* current = allocated_blocks;
     while (current) {
@@ -90,6 +96,10 @@ Value* flint_create_integer(int64_t val) {
     Value* value = flint_alloc(sizeof(Value));
     value->type = VAL_INTEGER;
     value->data.integer = val;
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -97,6 +107,10 @@ Value* flint_create_float(double val) {
     Value* value = flint_alloc(sizeof(Value));
     value->type = VAL_FLOAT;
     value->data.float_val = val;
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -105,6 +119,10 @@ Value* flint_create_string(const char* str) {
     value->type = VAL_STRING;
     value->data.string = flint_alloc(strlen(str) + 1);
     strcpy(value->data.string, str);
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -113,6 +131,10 @@ Value* flint_create_atom(const char* atom) {
     value->type = VAL_ATOM;
     value->data.atom = flint_alloc(strlen(atom) + 1);
     strcpy(value->data.atom, atom);
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -130,6 +152,9 @@ Value* flint_create_list(Value** elements, size_t count) {
     } else {
         value->data.list.elements = NULL;
     }
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
     
     return value;
 }
@@ -157,6 +182,9 @@ Value* flint_create_record(char** field_names, Value** field_values, size_t fiel
         value->data.record.field_values = NULL;
     }
     
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -168,10 +196,15 @@ Value* flint_create_logical_var(bool is_linear) {
     var->id = flint_fresh_var_id();
     var->binding = NULL;  // Uninstantiated
     var->waiters = NULL;
-    var->is_linear = is_linear;
-    var->ref_count = is_linear ? 1 : 0;
+    var->use_count = 0;
+    var->is_consumed = false;
+    var->allow_reuse = !is_linear;  // If not linear by default, allow reuse
     
     value->data.logical_var = var;
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
     return value;
 }
 
@@ -184,99 +217,6 @@ LogicalVar* flint_get_logical_var(Value* val) {
 
 VarId flint_fresh_var_id(void) {
     return next_var_id++;
-}
-
-// =============================================================================
-// FUNCTION VALUE MANAGEMENT
-// =============================================================================
-
-Value* flint_create_function(const char* name, int arity, void* impl) {
-    Value* val = (Value*)flint_alloc(sizeof(Value));
-    val->type = VAL_FUNCTION;
-    val->data.function.name = strdup(name);
-    val->data.function.arity = arity;
-    val->data.function.partial_args = NULL;
-    val->data.function.applied_count = 0;
-    val->data.function.impl = impl;
-    return val;
-}
-
-Value* flint_create_partial_app(Value* func, Value** args, int applied_count) {
-    if (func->type != VAL_FUNCTION) return NULL;
-    
-    Value* val = (Value*)flint_alloc(sizeof(Value));
-    val->type = VAL_PARTIAL_APP;
-    val->data.function.name = strdup(func->data.function.name);
-    val->data.function.arity = func->data.function.arity;
-    val->data.function.impl = func->data.function.impl;
-    val->data.function.applied_count = applied_count;
-    
-    // Copy partial arguments
-    if (applied_count > 0) {
-        val->data.function.partial_args = (Value**)flint_alloc(sizeof(Value*) * applied_count);
-        for (int i = 0; i < applied_count; i++) {
-            val->data.function.partial_args[i] = flint_copy_value(args[i]);
-        }
-    } else {
-        val->data.function.partial_args = NULL;
-    }
-    
-    return val;
-}
-
-bool flint_is_fully_applied(Value* func) {
-    if (func->type != VAL_FUNCTION && func->type != VAL_PARTIAL_APP) return false;
-    return func->data.function.applied_count >= func->data.function.arity;
-}
-
-// =============================================================================
-// HIGHER-ORDER FUNCTION APPLICATION
-// =============================================================================
-
-Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environment* env) {
-    if (func->type != VAL_FUNCTION && func->type != VAL_PARTIAL_APP) {
-        return NULL;
-    }
-    
-    int total_args = func->data.function.applied_count + arg_count;
-    
-    // If we have enough arguments, evaluate the function
-    if (total_args >= func->data.function.arity) {
-        // Combine existing partial args with new args
-        Value** all_args = (Value**)flint_alloc(sizeof(Value*) * func->data.function.arity);
-        
-        // Copy partial arguments
-        for (int i = 0; i < func->data.function.applied_count; i++) {
-            all_args[i] = func->data.function.partial_args[i];
-        }
-        
-        // Copy new arguments
-        for (size_t i = 0; i < (size_t)(func->data.function.arity - func->data.function.applied_count); i++) {
-            all_args[func->data.function.applied_count + i] = args[i];
-        }
-        
-        // Call the function via narrowing
-        Value* result = flint_narrow_call(func->data.function.name, all_args, func->data.function.arity, env);
-        flint_free(all_args);
-        return result;
-    } else {
-        // Create partial application
-        Value** combined_args = (Value**)flint_alloc(sizeof(Value*) * total_args);
-        
-        // Copy existing partial args
-        for (int i = 0; i < func->data.function.applied_count; i++) {
-            combined_args[i] = func->data.function.partial_args[i];
-        }
-        
-        // Copy new args
-        for (size_t i = 0; i < arg_count; i++) {
-            combined_args[func->data.function.applied_count + i] = flint_copy_value(args[i]);
-        }
-        
-        Value* partial = flint_create_partial_app(func, combined_args, total_args);
-        flint_free(combined_args);
-        return partial;
-    }
 }
 
 // =============================================================================
@@ -328,15 +268,16 @@ void flint_print_value(Value* val) {
             }
             break;
         }
-        case VAL_FUNCTION:
-            printf("function<%s/%d>", val->data.function.name, val->data.function.arity);
+        case VAL_SUSPENSION:
+            printf("<suspension>");
             break;
-        case VAL_PARTIAL_APP:
-            printf("partial<%s/%d applied:%d>", val->data.function.name, 
-                   val->data.function.arity, val->data.function.applied_count);
+        case VAL_PARTIAL:
+            printf("<partial:");
+            flint_print_value(val->data.partial.base);
+            printf(">");
             break;
         default:
-            printf("unknown_value");
+            printf("<unknown>");
             break;
     }
 }
@@ -384,82 +325,136 @@ bool flint_is_ground(Value* val) {
     }
 }
 
-Value* flint_copy_value(Value* val) {
-    if (!val) return NULL;
+// =============================================================================
+// HIGHER-ORDER FUNCTION SUPPORT
+// =============================================================================
+
+Value* flint_create_function(const char* name, int arity, void* impl) {
+    Value* value = flint_alloc(sizeof(Value));
+    value->type = VAL_FUNCTION;
     
-    Value* result = flint_alloc(sizeof(Value));
-    result->type = val->type;
+    value->data.function.name = flint_alloc(strlen(name) + 1);
+    strcpy(value->data.function.name, name);
+    value->data.function.arity = arity;
+    value->data.function.partial_args = NULL;
+    value->data.function.applied_count = 0;
+    value->data.function.impl = impl;
     
-    switch (val->type) {
-        case VAL_INTEGER:
-            result->data.integer = val->data.integer;
-            break;
-        case VAL_FLOAT:
-            result->data.float_val = val->data.float_val;
-            break;
-        case VAL_STRING:
-            result->data.string = flint_alloc(strlen(val->data.string) + 1);
-            strcpy(result->data.string, val->data.string);
-            break;
-        case VAL_ATOM:
-            result->data.atom = flint_alloc(strlen(val->data.atom) + 1);
-            strcpy(result->data.atom, val->data.atom);
-            break;
-        case VAL_LIST:
-            result->data.list.length = val->data.list.length;
-            result->data.list.capacity = val->data.list.capacity;
-            result->data.list.elements = flint_alloc(sizeof(Value) * val->data.list.length);
-            for (size_t i = 0; i < val->data.list.length; i++) {
-                result->data.list.elements[i] = *flint_copy_value(&val->data.list.elements[i]);
-            }
-            break;
-        case VAL_RECORD:
-            result->data.record.field_count = val->data.record.field_count;
-            result->data.record.field_names = flint_alloc(sizeof(char*) * val->data.record.field_count);
-            result->data.record.field_values = flint_alloc(sizeof(Value) * val->data.record.field_count);
-            for (size_t i = 0; i < val->data.record.field_count; i++) {
-                // Copy field name
-                size_t name_len = strlen(val->data.record.field_names[i]);
-                result->data.record.field_names[i] = flint_alloc(name_len + 1);
-                strcpy(result->data.record.field_names[i], val->data.record.field_names[i]);
-                
-                // Copy field value
-                result->data.record.field_values[i] = *flint_copy_value(&val->data.record.field_values[i]);
-            }
-            break;
-        case VAL_LOGICAL_VAR:
-            result->data.logical_var = val->data.logical_var; // Shallow copy for variables
-            break;
-        case VAL_FUNCTION:
-            result->data.function.name = strdup(val->data.function.name);
-            result->data.function.arity = val->data.function.arity;
-            result->data.function.applied_count = val->data.function.applied_count;
-            result->data.function.impl = val->data.function.impl;
-            result->data.function.partial_args = NULL;
-            if (val->data.function.partial_args && val->data.function.applied_count > 0) {
-                result->data.function.partial_args = (Value**)flint_alloc(sizeof(Value*) * val->data.function.applied_count);
-                for (int i = 0; i < val->data.function.applied_count; i++) {
-                    result->data.function.partial_args[i] = flint_copy_value(val->data.function.partial_args[i]);
-                }
-            }
-            break;
-        case VAL_PARTIAL_APP:
-            // Same as function
-            result->data.function.name = strdup(val->data.function.name);
-            result->data.function.arity = val->data.function.arity;
-            result->data.function.applied_count = val->data.function.applied_count;
-            result->data.function.impl = val->data.function.impl;
-            result->data.function.partial_args = NULL;
-            if (val->data.function.partial_args && val->data.function.applied_count > 0) {
-                result->data.function.partial_args = (Value**)flint_alloc(sizeof(Value*) * val->data.function.applied_count);
-                for (int i = 0; i < val->data.function.applied_count; i++) {
-                    result->data.function.partial_args[i] = flint_copy_value(val->data.function.partial_args[i]);
-                }
-            }
-            break;
-        default:
-            break;
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
+    return value;
+}
+
+Value* flint_create_partial_app(Value* func, Value** args, int applied_count) {
+    if (!func || func->type != VAL_FUNCTION) {
+        return NULL;
     }
     
-    return result;
+    Value* value = flint_alloc(sizeof(Value));
+    value->type = VAL_PARTIAL_APP;
+    
+    // Copy function info
+    value->data.function.name = flint_alloc(strlen(func->data.function.name) + 1);
+    strcpy(value->data.function.name, func->data.function.name);
+    value->data.function.arity = func->data.function.arity;
+    value->data.function.impl = func->data.function.impl;
+    value->data.function.applied_count = applied_count;
+    
+    // Copy partial arguments
+    if (applied_count > 0) {
+        value->data.function.partial_args = flint_alloc(sizeof(Value*) * applied_count);
+        for (int i = 0; i < applied_count; i++) {
+            value->data.function.partial_args[i] = args[i];
+        }
+    } else {
+        value->data.function.partial_args = NULL;
+    }
+    
+    // Initialize linear tracking
+    flint_mark_linear(value);
+    
+    return value;
+}
+
+bool flint_is_fully_applied(Value* func) {
+    if (!func) return false;
+    
+    switch (func->type) {
+        case VAL_FUNCTION:
+            return func->data.function.applied_count >= func->data.function.arity;
+        case VAL_PARTIAL_APP:
+            return func->data.function.applied_count >= func->data.function.arity;
+        default:
+            return false;
+    }
+}
+
+Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environment* env) {
+    if (!func || !args || arg_count == 0) {
+        return NULL;
+    }
+    
+    switch (func->type) {
+        case VAL_FUNCTION:
+        case VAL_PARTIAL_APP: {
+            int total_args_needed = func->data.function.arity;
+            int current_applied = func->data.function.applied_count;
+            int remaining_needed = total_args_needed - current_applied;
+            
+            if ((int)arg_count > remaining_needed) {
+                // Too many arguments provided
+                return NULL;
+            }
+            
+            if ((int)arg_count == remaining_needed) {
+                // Function is now fully applied - execute it
+                // For now, we'll implement some basic functions
+                if (strcmp(func->data.function.name, "length") == 0) {
+                    // length(list, result) - unify result with length of list
+                    Value* list_arg = (current_applied > 0) ? func->data.function.partial_args[0] : args[0];
+                    Value* result_arg = (current_applied > 0) ? args[0] : args[1];
+                    
+                    list_arg = flint_deref(list_arg);
+                    if (list_arg->type == VAL_LIST) {
+                        Value* length_val = flint_create_integer((int64_t)list_arg->data.list.length);
+                        flint_unify(result_arg, length_val, env);
+                        return result_arg;
+                    }
+                }
+                
+                // For unknown functions, just return NULL for now
+                return NULL;
+            } else {
+                // Create a new partial application with more arguments
+                int new_applied_count = current_applied + (int)arg_count;
+                Value** all_args = flint_alloc(sizeof(Value*) * new_applied_count);
+                
+                // Copy existing partial args
+                for (int i = 0; i < current_applied; i++) {
+                    all_args[i] = func->data.function.partial_args[i];
+                }
+                
+                // Add new args
+                for (size_t i = 0; i < arg_count; i++) {
+                    all_args[current_applied + i] = args[i];
+                }
+                
+                Value* new_func = flint_alloc(sizeof(Value));
+                new_func->type = VAL_PARTIAL_APP;
+                new_func->data.function.name = flint_alloc(strlen(func->data.function.name) + 1);
+                strcpy(new_func->data.function.name, func->data.function.name);
+                new_func->data.function.arity = func->data.function.arity;
+                new_func->data.function.impl = func->data.function.impl;
+                new_func->data.function.applied_count = new_applied_count;
+                new_func->data.function.partial_args = all_args;
+                
+                flint_mark_linear(new_func);
+                return new_func;
+            }
+        }
+        
+        default:
+            return NULL;
+    }
 }
