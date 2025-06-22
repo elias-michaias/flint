@@ -456,64 +456,8 @@ Value* flint_linear_apply_function(Value* func, Value** args, size_t arg_count, 
     return flint_apply_function(func, args, arg_count, env);
 }
 
-Value* flint_linear_list_access(Value* list, size_t index) {
-    // This is a non-consumptive operation by default
-    // If you want to consume the list, use flint_linear_list_destructure
-    
-    if (!list || list->type != VAL_LIST || index >= list->data.list.length) {
-        return NULL;
-    }
-    
-    // Return a copy of the element to maintain linearity
-    return flint_copy_for_sharing(&list->data.list.elements[index]);
-}
-
-LinearListDestructure flint_linear_list_destructure(Value* list) {
-    LinearListDestructure result = {0};
-    
-    if (!list || list->type != VAL_LIST) {
-        return result;
-    }
-    
-    // Consume the list
-    list = flint_consume_value(list, LINEAR_OP_DESTRUCTURE);
-    if (!list) return result;
-    
-    // Transfer ownership of elements
-    result.elements = list->data.list.elements;
-    result.count = list->data.list.length;
-    result.success = true;
-    
-    // Mark the list structure as consumed (but elements are now owned by caller)
-    list->data.list.elements = NULL;
-    list->data.list.length = 0;
-    
-    #ifdef DEBUG_LINEAR
-    printf("LINEAR: Destructured list with %zu elements\n", result.count);
-    #endif
-    
-    return result;
-}
-
-// Convenience wrapper functions for the test suite and external use
-Value* flint_share_value(Value* value) {
-    // In our implementation, sharing means marking as reusable
-    if (value && value->type == VAL_LOGICAL_VAR) {
-        value->data.logical_var->allow_reuse = true;
-    }
-    return value; // Return the same value
-}
-
-LinearCheckpoint flint_linear_checkpoint(LinearTrail* trail) {
-    return flint_trail_create_checkpoint(trail);
-}
-
-void flint_linear_restore(LinearTrail* trail, LinearCheckpoint checkpoint) {
-    flint_trail_rollback_to_checkpoint(trail, checkpoint);
-}
-
 LinearListDestructure flint_linear_destructure_list(Value* list) {
-    return flint_linear_list_destructure(list);
+    return flint_list_linear_destructure(list);
 }
 
 // =============================================================================
@@ -541,4 +485,21 @@ void flint_choice_commit_linear(LinearCheckpoint checkpoint) {
     if (trail) {
         flint_trail_commit_checkpoint(trail, checkpoint);
     }
+}
+
+// Convenience wrapper functions for the test suite and external use
+Value* flint_share_value(Value* value) {
+    // In our implementation, sharing means marking as reusable
+    if (value && value->type == VAL_LOGICAL_VAR) {
+        value->data.logical_var->allow_reuse = true;
+    }
+    return value; // Return the same value
+}
+
+LinearCheckpoint flint_linear_checkpoint(LinearTrail* trail) {
+    return flint_trail_create_checkpoint(trail);
+}
+
+void flint_linear_restore(LinearTrail* trail, LinearCheckpoint checkpoint) {
+    flint_trail_rollback_to_checkpoint(trail, checkpoint);
 }

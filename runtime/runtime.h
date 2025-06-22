@@ -374,5 +374,48 @@ Value* flint_narrow_async_spawn(Value** args, size_t arg_count, Environment* env
 Value* flint_narrow_async_await(Value** args, size_t arg_count, Environment* env);
 
 // =============================================================================
+// LIST OPERATIONS
+// =============================================================================
+
+// List creation and basic operations
+Value* flint_list_create(Value** elements, size_t count);
+Value* flint_list_create_empty(void);
+Value* flint_list_create_single(Value* element);
+size_t flint_list_length(Value* list);
+bool flint_list_is_empty(Value* list);
+
+// List access and manipulation
+Value* flint_list_get_element(Value* list, size_t index);
+Value* flint_list_get_head(Value* list);
+Value* flint_list_get_tail(Value* list);
+Value* flint_list_prepend(Value* element, Value* list);
+Value* flint_list_append_element(Value* list, Value* element);
+
+// List operations (append, reverse, etc.)
+Value* flint_list_append(Value* list1, Value* list2);
+Value* flint_list_reverse(Value* list);
+
+// List printing and groundness
+void flint_list_print(Value* list);
+bool flint_list_is_ground(Value* list);
+
+// Linear list operations
+Value* flint_list_linear_access(Value* list, size_t index);
+LinearListDestructure flint_list_linear_destructure(Value* list);
+Value* flint_list_deep_copy(Value* list);
+void flint_list_free(Value* list);
+
+// List pattern matching
+bool flint_list_match_pattern(Value* list_val, Pattern* pattern, Environment* env);
+
+// List unification
+bool flint_list_unify(Value* val1, Value* val2, Environment* env);
+
+// Narrowing operations (constraint-based list operations)
+Value* flint_list_narrow_append(Value** args, size_t arg_count, Environment* env);
+Value* flint_list_narrow_reverse(Value** args, size_t arg_count, Environment* env);
+Value* flint_list_narrow_length(Value** args, size_t arg_count, Environment* env);
+
+// =============================================================================
 
 #endif // FLINT_RUNTIME_H

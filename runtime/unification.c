@@ -87,17 +87,7 @@ bool flint_unify_variables(LogicalVar* var1, LogicalVar* var2, Environment* env)
 }
 
 bool flint_unify_lists(Value* list1, Value* list2, Environment* env) {
-    if (list1->data.list.length != list2->data.list.length) {
-        return false;
-    }
-    
-    for (size_t i = 0; i < list1->data.list.length; i++) {
-        if (!flint_unify(&list1->data.list.elements[i], &list2->data.list.elements[i], env)) {
-            return false;
-        }
-    }
-    
-    return true;
+    return flint_list_unify(list1, list2, env);
 }
 
 bool flint_unify_records(Value* rec1, Value* rec2, Environment* env) {

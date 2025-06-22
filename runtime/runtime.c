@@ -159,27 +159,6 @@ Value* flint_create_atom(const char* atom) {
     return value;
 }
 
-Value* flint_create_list(Value** elements, size_t count) {
-    Value* value = flint_alloc(sizeof(Value));
-    value->type = VAL_LIST;
-    value->data.list.length = count;
-    value->data.list.capacity = count;
-    
-    if (count > 0) {
-        value->data.list.elements = flint_alloc(sizeof(Value) * count);
-        for (size_t i = 0; i < count; i++) {
-            value->data.list.elements[i] = *elements[i];
-        }
-    } else {
-        value->data.list.elements = NULL;
-    }
-    
-    // Initialize linear tracking
-    flint_mark_linear(value);
-    
-    return value;
-}
-
 Value* flint_create_record(char** field_names, Value** field_values, size_t field_count) {
     Value* value = flint_alloc(sizeof(Value));
     value->type = VAL_RECORD;
@@ -264,12 +243,7 @@ void flint_print_value(Value* val) {
             printf("%s", val->data.atom);
             break;
         case VAL_LIST:
-            printf("[");
-            for (size_t i = 0; i < val->data.list.length; i++) {
-                if (i > 0) printf(", ");
-                flint_print_value(&val->data.list.elements[i]);
-            }
-            printf("]");
+            flint_list_print(val);
             break;
         case VAL_RECORD:
             printf("{");
@@ -322,12 +296,7 @@ bool flint_is_ground(Value* val) {
         }
         
         case VAL_LIST:
-            for (size_t i = 0; i < val->data.list.length; i++) {
-                if (!flint_is_ground(&val->data.list.elements[i])) {
-                    return false;
-                }
-            }
-            return true;
+            return flint_list_is_ground(val);
             
         case VAL_RECORD:
             for (size_t i = 0; i < val->data.record.field_count; i++) {
@@ -438,7 +407,7 @@ Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environ
                     
                     list_arg = flint_deref(list_arg);
                     if (list_arg->type == VAL_LIST) {
-                        Value* length_val = flint_create_integer((int64_t)list_arg->data.list.length);
+                        Value* length_val = flint_create_integer((int64_t)flint_list_length(list_arg));
                         flint_unify(result_arg, length_val, env);
                         return result_arg;
                     }
@@ -496,9 +465,7 @@ void flint_free_value(Value* val) {
             }
             break;
         case VAL_LIST:
-            if (val->data.list.elements) {
-                flint_free(val->data.list.elements);
-            }
+            flint_list_free(val);
             break;
         case VAL_RECORD:
             if (val->data.record.field_names) {

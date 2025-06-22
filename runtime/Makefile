@@ -43,7 +43,7 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c matching.c constraint.c linear.c interop.c async.c
+SOURCES = runtime.c unification.c narrowing.c environment.c matching.c constraint.c linear.c interop.c async.c list.c
 HEADERS = types.h runtime.h
 
 # Object files (in object directory)

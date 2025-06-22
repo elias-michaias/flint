@@ -89,7 +89,7 @@ bool flint_pattern_match(Value* val, Pattern* pattern, Environment* env) {
             
         case VAL_LIST:
             if (val->type != VAL_LIST) return false;
-            return flint_match_list_pattern(val, pattern, env);
+            return flint_list_match_pattern(val, pattern, env);
             
         case VAL_RECORD:
             if (val->type != VAL_RECORD) return false;
@@ -97,47 +97,6 @@ bool flint_pattern_match(Value* val, Pattern* pattern, Environment* env) {
             
         default:
             return false;
-    }
-}
-
-bool flint_match_list_pattern(Value* list_val, Pattern* pattern, Environment* env) {
-    if (pattern->data.list_pattern.has_tail) {
-        // Pattern like [H|T] or [A, B|T]
-        if (list_val->data.list.length < pattern->data.list_pattern.count) {
-            return false; // Not enough elements
-        }
-        
-        // Match the head elements
-        for (size_t i = 0; i < pattern->data.list_pattern.count; i++) {
-            if (!flint_pattern_match(&list_val->data.list.elements[i], 
-                                   &pattern->data.list_pattern.elements[i], env)) {
-                return false;
-            }
-        }
-        
-        // Create the tail list and match it
-        size_t tail_length = list_val->data.list.length - pattern->data.list_pattern.count;
-        Value** tail_elements = NULL;
-        if (tail_length > 0) {
-            tail_elements = &list_val->data.list.elements[pattern->data.list_pattern.count];
-        }
-        Value* tail_list = flint_create_list(tail_elements, tail_length);
-        
-        bool result = flint_pattern_match(tail_list, pattern->data.list_pattern.tail, env);
-        return result;
-    } else {
-        // Exact list pattern [A, B, C]
-        if (list_val->data.list.length != pattern->data.list_pattern.count) {
-            return false;
-        }
-        
-        for (size_t i = 0; i < pattern->data.list_pattern.count; i++) {
-            if (!flint_pattern_match(&list_val->data.list.elements[i], 
-                                   &pattern->data.list_pattern.elements[i], env)) {
-                return false;
-            }
-        }
-        return true;
     }
 }
 

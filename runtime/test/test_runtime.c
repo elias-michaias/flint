@@ -55,7 +55,7 @@ bool test_list_operations() {
     Value* elem3 = flint_create_integer(3);
     
     Value* elements[] = {elem1, elem2, elem3};
-    Value* list = flint_create_list(elements, 3);
+    Value* list = flint_list_create(elements, 3);
     
     ASSERT(list->type == VAL_LIST);
     ASSERT(list->data.list.length == 3);
@@ -64,7 +64,7 @@ bool test_list_operations() {
     ASSERT(list->data.list.elements[2].data.integer == 3);
     
     // Test empty list
-    Value* empty_list = flint_create_list(NULL, 0);
+    Value* empty_list = flint_list_create(NULL, 0);
     ASSERT(empty_list->type == VAL_LIST);
     ASSERT(empty_list->data.list.length == 0);
     ASSERT(empty_list->data.list.elements == NULL);
@@ -122,7 +122,7 @@ bool test_unification() {
     // Test occurs check
     Value* var3 = flint_create_logical_var(false);
     Value* list_with_var[] = {var3};
-    Value* list = flint_create_list(list_with_var, 1);
+    Value* list = flint_list_create(list_with_var, 1);
     ASSERT(flint_unify(var3, list, env) == false);  // Should fail occurs check
     
     flint_free_environment(env);
@@ -141,7 +141,7 @@ bool test_narrowing() {
     Value* elem1 = flint_create_integer(1);
     Value* elem2 = flint_create_integer(2);
     Value* elements[] = {elem1, elem2};
-    Value* list = flint_create_list(elements, 2);
+    Value* list = flint_list_create(elements, 2);
     
     Value* result_var = flint_create_logical_var(false);
     Value* length_args[] = {list, result_var};
@@ -183,7 +183,7 @@ bool test_free_variables() {
     Value* int_val = flint_create_integer(42);
     
     Value* elements[] = {var1, int_val, var2};
-    Value* list = flint_create_list(elements, 3);
+    Value* list = flint_list_create(elements, 3);
     
     size_t free_count;
     VarId* free_vars = flint_get_free_vars(list, &free_count);
@@ -266,7 +266,7 @@ void test_printing() {
     Value* elem2 = flint_create_string("two");
     Value* elem3 = flint_create_atom("three");
     Value* elements[] = {elem1, elem2, elem3};
-    Value* list = flint_create_list(elements, 3);
+    Value* list = flint_list_create(elements, 3);
     flint_print_value(list);
     printf("\n");
     
@@ -291,7 +291,7 @@ bool test_higher_order_functions() {
     ASSERT(strcmp(length_func->data.function.name, "length") == 0);
     
     // Test partial application
-    Value* list = flint_create_list(NULL, 0); // Empty list
+    Value* list = flint_list_create(NULL, 0); // Empty list
     Value* partial_args[] = {list};
     Value* partial_length = flint_create_partial_app(length_func, partial_args, 1);
     
@@ -373,12 +373,12 @@ bool test_complex_unification() {
     Value* elem1 = flint_create_integer(1);
     Value* elem2 = flint_create_integer(2);
     Value* elements1[] = {elem1, elem2};
-    Value* list1 = flint_create_list(elements1, 2);
+    Value* list1 = flint_list_create(elements1, 2);
     
     Value* elem3 = flint_create_integer(1);
     Value* elem4 = flint_create_integer(2);
     Value* elements2[] = {elem3, elem4};
-    Value* list2 = flint_create_list(elements2, 2);
+    Value* list2 = flint_list_create(elements2, 2);
     
     ASSERT(flint_unify(list1, list2, env));
     
@@ -401,12 +401,12 @@ bool test_complex_unification() {
     Value* var1 = flint_create_logical_var(false);
     Value* var2 = flint_create_logical_var(false);
     Value* var_elements[] = {var1, var2};
-    Value* var_list = flint_create_list(var_elements, 2);
+    Value* var_list = flint_list_create(var_elements, 2);
     
     Value* ground_elem1 = flint_create_integer(100);
     Value* ground_elem2 = flint_create_integer(200);
     Value* ground_elements[] = {ground_elem1, ground_elem2};
-    Value* ground_list = flint_create_list(ground_elements, 2);
+    Value* ground_list = flint_list_create(ground_elements, 2);
     
     ASSERT(flint_unify(var_list, ground_list, env));
     
@@ -419,9 +419,9 @@ bool test_complex_unification() {
     // Test occurs check with nested structures
     Value* var3 = flint_create_logical_var(false);
     Value* nested_var_elements[] = {var3};
-    Value* nested_list = flint_create_list(nested_var_elements, 1);
+    Value* nested_list = flint_list_create(nested_var_elements, 1);
     Value* outer_elements[] = {nested_list};
-    Value* outer_list = flint_create_list(outer_elements, 1);
+    Value* outer_list = flint_list_create(outer_elements, 1);
     
     ASSERT(!flint_unify(var3, outer_list, env)); // Should fail occurs check
     
@@ -464,9 +464,9 @@ bool test_multi_variable_unification() {
     Value* varD = flint_create_logical_var(false);
     
     Value* inner_vars[] = {varC, varD};
-    Value* inner_list_vars = flint_create_list(inner_vars, 2);
+    Value* inner_list_vars = flint_list_create(inner_vars, 2);
     Value* outer_vars[] = {varA, varB, inner_list_vars};
-    Value* var_structure = flint_create_list(outer_vars, 3);
+    Value* var_structure = flint_list_create(outer_vars, 3);
     
     Value* val1 = flint_create_integer(1);
     Value* val2 = flint_create_integer(2);
@@ -474,9 +474,9 @@ bool test_multi_variable_unification() {
     Value* val4 = flint_create_integer(4);
     
     Value* inner_vals[] = {val3, val4};
-    Value* inner_list_vals = flint_create_list(inner_vals, 2);
+    Value* inner_list_vals = flint_list_create(inner_vals, 2);
     Value* outer_vals[] = {val1, val2, inner_list_vals};
-    Value* ground_structure = flint_create_list(outer_vals, 3);
+    Value* ground_structure = flint_list_create(outer_vals, 3);
     
     ASSERT(flint_unify(var_structure, ground_structure, env));
     
@@ -702,7 +702,7 @@ bool test_linear_list_destructuring() {
     elements[1] = flint_create_integer(2);
     elements[2] = flint_create_integer(3);
     
-    Value* list = flint_create_list(elements, 3);
+    Value* list = flint_list_create(elements, 3);
     ASSERT(!list->is_consumed);
     ASSERT(list->data.list.length == 3);
     
@@ -1490,7 +1490,7 @@ bool test_full_system_integration() {
     VarId shared_id = sharedResult->data.logical_var->id;
     VarId async_id = asyncResult->data.logical_var->id;
     
-    // Register variables with environment for constraint solving
+    // Register variables for constraint solving
     flint_register_variable_with_env(env, resourceA);
     flint_register_variable_with_env(env, resourceB);
     flint_register_variable_with_env(env, sharedResult);
@@ -1518,10 +1518,14 @@ bool test_full_system_integration() {
     ASSERT(minimum != NULL);
     printf("  Added: A >= 10\n");
     
-    printf("\nStep 2: Linear resource checkpoint\n");
-    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    // Create list with constrained linear resources for testing
+    Value* constrained_elements[] = {resourceA, resourceB, sharedResult, asyncResult};
+    Value* constrained_linear_list = flint_list_create(constrained_elements, 4);
+    ASSERT(!constrained_linear_list->is_consumed);
+    printf("  Created list with constrained linear elements\n");
     
-    printf("\nStep 3: Unification with linear resource consumption\n");
+    printf("\nStep 2: Linear checkpoint and unification\n");
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
     
     // Unify resourceA with a value (consuming it linearly)
     Value* val12 = flint_create_integer(12);
@@ -1545,7 +1549,7 @@ bool test_full_system_integration() {
     flint_solve_constraints(store, shared_id, env);
     flint_solve_constraints(store, async_id, env);
     
-    printf("\nStep 4: Constraint propagation and async computation\n");
+    printf("\nStep 3: Constraint propagation and async computation\n");
     
     // Get constraint-computed values
     double shared_value = flint_get_constraint_value(store, shared_id);
@@ -1563,7 +1567,7 @@ bool test_full_system_integration() {
     ASSERT(flint_unify(sharedResult, shared_val, env));
     printf("  Unified SharedResult with constraint value\n");
     
-    printf("\nStep 5: Async channel communication with constraint results\n");
+    printf("\nStep 4: Async channel communication with constraint results\n");
     
     // Create async channel and send constraint result
     FlintChannel* result_channel = flint_create_channel(1, C_TYPE_POINTER);
@@ -1575,13 +1579,13 @@ bool test_full_system_integration() {
     ASSERT(flint_unify(asyncResult, final_result, env));
     printf("  Async computation completed: AsyncResult = %d\n", (int)async_value);
     
-    printf("\nStep 6: Linear resource backtracking\n");
+    printf("\nStep 5: Linear backtracking with list state\n");
     
-    // Test backtracking to restore linear resources
+    // Test backtracking
     flint_linear_restore(env->linear_trail, checkpoint);
-    printf("  Restored to checkpoint - linear resources unconsumed\n");
+    printf("  Restored to checkpoint\n");
     
-    // Verify resources are restored
+    // Verify linear elements are restored
     ASSERT(!resourceA->is_consumed);
     ASSERT(!resourceB->is_consumed);
     printf("  Verified: A and B are no longer consumed\n");
@@ -1595,7 +1599,11 @@ bool test_full_system_integration() {
     printf("  Constraint values preserved: Shared=%.1f, Async=%.1f\n", 
            restored_shared, restored_async);
     
-    printf("\nStep 7: Verification of unification state\n");
+    // List operations should still work
+    ASSERT(flint_list_length(constrained_linear_list) == 4);
+    printf("  List structure preserved\n");
+    
+    printf("\nStep 6: Verification of unification state\n");
     
     // Check that unification bindings are preserved
     Value* deref_a = flint_deref(resourceA);
@@ -1703,6 +1711,446 @@ bool test_constraint_optimization_integration() {
     return true;
 }
 
+// =============================================================================
+// COMPREHENSIVE LIST PROCESSING TESTS
+// =============================================================================
+
+// Test consolidated list operations
+bool test_consolidated_list_operations() {
+    TEST("Consolidated List Operations");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test basic list creation and access
+    Value* elem1 = flint_create_integer(1);
+    Value* elem2 = flint_create_integer(2);
+    Value* elem3 = flint_create_integer(3);
+    Value* elements[] = {elem1, elem2, elem3};
+    
+    Value* list = flint_list_create(elements, 3);
+    ASSERT(list != NULL);
+    ASSERT(flint_list_length(list) == 3);
+    ASSERT(!flint_list_is_empty(list));
+    
+    // Test element access
+    Value* head = flint_list_get_head(list);
+    ASSERT(head->type == VAL_INTEGER && head->data.integer == 1);
+    
+    Value* tail = flint_list_get_tail(list);
+    ASSERT(flint_list_length(tail) == 2);
+    
+    Value* elem = flint_list_get_element(list, 1);
+    ASSERT(elem->type == VAL_INTEGER && elem->data.integer == 2);
+    
+    // Test list manipulation
+    Value* new_elem = flint_create_integer(0);
+    Value* prepended = flint_list_prepend(new_elem, list);
+    ASSERT(flint_list_length(prepended) == 4);
+    ASSERT(flint_list_get_head(prepended)->data.integer == 0);
+    
+    Value* appended = flint_list_append_element(list, flint_create_integer(4));
+    ASSERT(flint_list_length(appended) == 4);
+    ASSERT(flint_list_get_element(appended, 3)->data.integer == 4);
+    
+    // Test list operations
+    Value* list2 = flint_list_create(elements + 1, 2); // [2, 3]
+    Value* concatenated = flint_list_append(list, list2);
+    ASSERT(flint_list_length(concatenated) == 5);
+    
+    Value* reversed = flint_list_reverse(list);
+    ASSERT(flint_list_length(reversed) == 3);
+    ASSERT(flint_list_get_head(reversed)->data.integer == 3);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Consolidated list operations tests passed\n");
+    return true;
+}
+
+// Test list processing with unification
+bool test_list_unification_integration() {
+    TEST("List Processing with Unification");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test basic list unification
+    Value* elem1 = flint_create_integer(10);
+    Value* elem2 = flint_create_integer(20);
+    Value* elements1[] = {elem1, elem2};
+    Value* list1 = flint_list_create(elements1, 2);
+    
+    Value* elem3 = flint_create_integer(10);
+    Value* elem4 = flint_create_integer(20);
+    Value* elements2[] = {elem3, elem4};
+    Value* list2 = flint_list_create(elements2, 2);
+    
+    ASSERT(flint_list_unify(list1, list2, env));
+    
+    // Test list unification with variables
+    Value* var1 = flint_create_logical_var(false);
+    Value* var2 = flint_create_logical_var(false);
+    Value* var_elements[] = {var1, var2};
+    Value* var_list = flint_list_create(var_elements, 2);
+    
+    Value* ground1 = flint_create_integer(100);
+    Value* ground2 = flint_create_integer(200);
+    Value* ground_elements[] = {ground1, ground2};
+    Value* ground_list = flint_list_create(ground_elements, 2);
+    
+    ASSERT(flint_unify(var_list, ground_list, env));
+    
+    // Check that variables got bound
+    Value* deref1 = flint_deref(var1);
+    Value* deref2 = flint_deref(var2);
+    ASSERT(deref1->type == VAL_INTEGER && deref1->data.integer == 100);
+    ASSERT(deref2->type == VAL_INTEGER && deref2->data.integer == 200);
+    
+    // Test narrowing operations
+    Value* append_args[] = {list1, list2, flint_create_logical_var(false)};
+    Value* append_result = flint_list_narrow_append(append_args, 3, env);
+    ASSERT(append_result != NULL);
+    
+    Value* reverse_args[] = {list1, flint_create_logical_var(false)};
+    Value* reverse_result = flint_list_narrow_reverse(reverse_args, 2, env);
+    ASSERT(reverse_result != NULL);
+    
+    Value* length_args[] = {list1, flint_create_logical_var(false)};
+    Value* length_result = flint_list_narrow_length(length_args, 2, env);
+    ASSERT(length_result != NULL);
+    
+    flint_free_environment(env);
+    
+    printf("✓ List-unification integration tests passed\n");
+    return true;
+}
+
+// Test list processing with linear resources
+bool test_list_linear_integration() {
+    TEST("List Processing with Linear Resources");
+    
+    Environment* env = flint_create_environment(NULL);
+    flint_set_linear_context(env);
+    
+    // Create linear list
+    Value* linear_elem1 = flint_create_integer(1);
+    Value* linear_elem2 = flint_create_integer(2);
+    Value* linear_elem3 = flint_create_integer(3);
+    Value* linear_elements[] = {linear_elem1, linear_elem2, linear_elem3};
+    Value* linear_list = flint_list_create(linear_elements, 3);
+    
+    ASSERT(!linear_list->is_consumed);
+    
+    // Test linear access (non-destructive)
+    Value* accessed = flint_list_linear_access(linear_list, 1);
+    ASSERT(accessed != NULL);
+    ASSERT(accessed->type == VAL_INTEGER && accessed->data.integer == 2);
+    ASSERT(!linear_list->is_consumed); // Should not consume the list
+    
+    // Create checkpoint for backtracking
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    // Test linear destructuring (consumptive)
+    LinearListDestructure destructure = flint_list_linear_destructure(linear_list);
+    ASSERT(destructure.success);
+    ASSERT(destructure.count == 3);
+    ASSERT(destructure.elements != NULL);
+    ASSERT(linear_list->is_consumed);
+    
+    // Verify destructured elements
+    ASSERT(destructure.elements[0].type == VAL_INTEGER && destructure.elements[0].data.integer == 1);
+    ASSERT(destructure.elements[1].type == VAL_INTEGER && destructure.elements[1].data.integer == 2);
+    ASSERT(destructure.elements[2].type == VAL_INTEGER && destructure.elements[2].data.integer == 3);
+    
+    // Test backtracking
+    flint_linear_restore(env->linear_trail, checkpoint);
+    ASSERT(!linear_list->is_consumed); // Should be restored
+    
+    // After destructuring and backtracking, the list is no longer consumed but is empty
+    // (elements were transferred away during destructuring - this is correct linear semantics)
+    
+    // Test deep copying for linear lists (create a fresh list for this test)
+    Value* test_elem1 = flint_create_integer(10);
+    Value* test_elem2 = flint_create_integer(20);
+    Value* test_elem3 = flint_create_integer(30);
+    Value* test_elements[] = {test_elem1, test_elem2, test_elem3};
+    Value* test_list = flint_list_create(test_elements, 3);
+    
+    Value* deep_copy = flint_list_deep_copy(test_list);
+    ASSERT(deep_copy != NULL);
+    ASSERT(deep_copy != test_list);
+    ASSERT(flint_list_length(deep_copy) == 3);
+    
+    // Original and copy should be independent
+    flint_consume_value(test_list, LINEAR_OP_EXPLICIT_CONSUME);
+    ASSERT(test_list->is_consumed);
+    ASSERT(!deep_copy->is_consumed);
+    
+    flint_set_linear_context(NULL);
+    flint_free_environment(env);
+    
+    printf("✓ List-linear integration tests passed\n");
+    return true;
+}
+
+// Test list processing with constraints
+bool test_list_constraint_integration() {
+    TEST("List Processing with Constraints");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    // Create lists with constraint variables
+    Value* constrained_var1 = flint_create_logical_var(false);
+    Value* constrained_var2 = flint_create_logical_var(false);
+    Value* result_var = flint_create_logical_var(false);
+    
+    VarId var1_id = constrained_var1->data.logical_var->id;
+    VarId var2_id = constrained_var2->data.logical_var->id;
+    VarId result_id = result_var->data.logical_var->id;
+    
+    // Register variables
+    flint_register_variable_with_env(env, constrained_var1);
+    flint_register_variable_with_env(env, constrained_var2);
+    flint_register_variable_with_env(env, result_var);
+    
+    // Add constraint: var1 + var2 = result
+    ASSERT(flint_add_sum_constraint(env, var1_id, var2_id, result_id, STRENGTH_REQUIRED));
+    
+    // Create list with constrained elements
+    Value* constrained_elements[] = {constrained_var1, constrained_var2};
+    Value* constrained_list = flint_list_create(constrained_elements, 2);
+    
+    // Unify first element with a value using constraint-aware unification
+    Value* val5 = flint_create_integer(5);
+    ASSERT(flint_unify_with_constraints(constrained_var1, val5, env));
+    
+    // Unify second element with a value
+    Value* val7 = flint_create_integer(7);
+    ASSERT(flint_unify_with_constraints(constrained_var2, val7, env));
+    
+    // Check that constraint propagated
+    double result_value = flint_get_constraint_value(store, result_id);
+    ASSERT(result_value >= 11.9 && result_value <= 12.1); // Should be approximately 12
+    
+    // Test list operations with constrained elements
+    Value* constraint_result = flint_create_integer((int)result_value);
+    ASSERT(flint_unify(result_var, constraint_result, env));
+    
+    // Verify that list groundness check works with constrained elements
+    ASSERT(flint_list_is_ground(constrained_list));
+    
+    // Test narrowing operations with constrained lists
+    Value* length_args[] = {constrained_list, flint_create_logical_var(false)};
+    Value* length_result = flint_list_narrow_length(length_args, 2, env);
+    ASSERT(length_result != NULL);
+    
+    flint_free_environment(env);
+    
+    printf("✓ List-constraint integration tests passed\n");
+    return true;
+}
+
+// Test list processing with async operations
+bool test_list_async_integration() {
+    TEST("List Processing with Async Operations");
+    
+    Environment* env = flint_create_environment(NULL);
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Create lists for async processing
+    Value* async_elem1 = flint_create_integer(10);
+    Value* async_elem2 = flint_create_integer(20);
+    Value* async_elem3 = flint_create_integer(30);
+    Value* async_elements[] = {async_elem1, async_elem2, async_elem3};
+    Value* async_list = flint_list_create(async_elements, 3);
+    
+    // Create channel for list communication
+    FlintChannel* list_channel = flint_create_channel(1, C_TYPE_POINTER);
+    ASSERT(list_channel != NULL);
+    
+    // In a real async scenario, we'd spawn coroutines to process the list
+    // For testing, we'll simulate async list processing
+    
+    // Test async-compatible list operations
+    Value* async_head = flint_list_get_head(async_list);
+    ASSERT(async_head != NULL);
+    ASSERT(async_head->type == VAL_INTEGER && async_head->data.integer == 10);
+    
+    Value* async_tail = flint_list_get_tail(async_list);
+    ASSERT(async_tail != NULL);
+    ASSERT(flint_list_length(async_tail) == 2);
+    
+    // Test async list append operations
+    Value* async_new_elem = flint_create_integer(40);
+    Value* async_appended = flint_list_append_element(async_list, async_new_elem);
+    ASSERT(flint_list_length(async_appended) == 4);
+    
+    // Test that list operations are compatible with async context
+    Value* async_reversed = flint_list_reverse(async_list);
+    ASSERT(async_reversed != NULL);
+    ASSERT(flint_list_get_head(async_reversed)->data.integer == 30);
+    
+    // Clean up async resources
+    flint_channel_close(list_channel);
+    free(list_channel);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ List-async integration tests passed\n");
+    return true;
+}
+
+// Test comprehensive list system integration
+bool test_list_full_system_integration() {
+    TEST("List Processing - Full System Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    flint_set_linear_context(env);
+    
+    printf("\n=== List Full System Integration Demo ===\n");
+    printf("Testing lists with unification + constraints + linear resources + async\n\n");
+    
+    // Create linear logical variables for list elements
+    Value* linear_var1 = flint_create_logical_var(true);  // linear
+    Value* linear_var2 = flint_create_logical_var(true);  // linear
+    Value* shared_result = flint_create_logical_var(false); // non-linear
+    
+    VarId var1_id = linear_var1->data.logical_var->id;
+    VarId var2_id = linear_var2->data.logical_var->id;
+    VarId result_id = shared_result->data.logical_var->id;
+    
+    // Register variables for constraint solving
+    flint_register_variable_with_env(env, linear_var1);
+    flint_register_variable_with_env(env, linear_var2);
+    flint_register_variable_with_env(env, shared_result);
+    
+    printf("Step 1: Creating constrained list with linear elements\n");
+    
+    // Add constraint: var1 + var2 = shared_result
+    ASSERT(flint_add_sum_constraint(env, var1_id, var2_id, result_id, STRENGTH_REQUIRED));
+    printf("  Added constraint: LinearVar1 + LinearVar2 = SharedResult\n");
+    
+    // Create list with linear elements
+    Value* linear_elements[] = {linear_var1, linear_var2};
+    Value* constrained_linear_list = flint_list_create(linear_elements, 2);
+    ASSERT(!constrained_linear_list->is_consumed);
+    printf("  Created list with linear constrained elements\n");
+    
+    printf("\nStep 2: Linear checkpoint and unification\n");
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    // Unify linear_var1 with a value (consuming it linearly)
+    Value* val12 = flint_create_integer(12);
+    ASSERT(flint_unify(linear_var1, val12, env));
+    flint_consume_value(linear_var1, LINEAR_OP_UNIFY);
+    printf("  Unified LinearVar1 = 12 (linear resource consumed)\n");
+    
+    // Solve constraints after first variable is bound
+    flint_solve_constraints(store, var1_id, env);
+    
+    // Unify linear_var2 with a value
+    Value* val8 = flint_create_integer(8);
+    ASSERT(flint_unify(linear_var2, val8, env));
+    flint_consume_value(linear_var2, LINEAR_OP_UNIFY);
+    printf("  Unified LinearVar2 = 8 (linear resource consumed)\n");
+    
+    // Solve constraints after second variable is bound
+    flint_solve_constraints(store, var2_id, env);
+    
+    // Trigger constraint solving for the computed variables to propagate constraints
+    flint_solve_constraints(store, result_id, env);
+    
+    printf("\nStep 3: Constraint propagation and async computation\n");
+    
+    // Get constraint-computed values
+    double shared_value = flint_get_constraint_value(store, result_id);
+    
+    printf("  Computed SharedResult = %.1f (via constraints)\n", shared_value);
+    
+    // Verify constraint satisfaction
+    ASSERT(shared_value >= 19.9 && shared_value <= 20.1); // LinearVar1 + LinearVar2 = 12 + 8 = 20
+    
+    // Unify the shared result with the constraint-computed value
+    Value* shared_val = flint_create_integer((int)shared_value);
+    ASSERT(flint_unify(shared_result, shared_val, env));
+    printf("  Unified SharedResult with constraint value\n");
+    
+    printf("\nStep 4: Async channel communication with constraint results\n");
+    
+    // Create async channel and send constraint result
+    FlintChannel* result_channel = flint_create_channel(1, C_TYPE_POINTER);
+    ASSERT(result_channel != NULL);
+    
+    // Create async result based on shared computation
+    Value* async_result = flint_create_logical_var(false);
+    Value* final_result = flint_create_integer((int)shared_value * 2);
+    ASSERT(flint_unify(async_result, final_result, env));
+    printf("  Async computation completed: AsyncResult = %d\n", (int)shared_value * 2);
+    
+    printf("\nStep 5: Linear backtracking with list state\n");
+    
+    // Test backtracking
+    flint_linear_restore(env->linear_trail, checkpoint);
+    printf("  Restored to checkpoint\n");
+    
+    // Verify linear elements are restored
+    ASSERT(!linear_var1->is_consumed);
+    ASSERT(!linear_var2->is_consumed);
+    printf("  Verified: LinearVar1 and LinearVar2 are no longer consumed\n");
+    
+    // Constraint values should still be available (constraint system is persistent)
+    double restored_shared = flint_get_constraint_value(store, result_id);
+    
+    ASSERT(restored_shared >= 19.9 && restored_shared <= 20.1);
+    printf("  Constraint values preserved: Shared=%.1f\n", restored_shared);
+    
+    // List operations should still work
+    ASSERT(flint_list_length(constrained_linear_list) == 2);
+    printf("  List structure preserved\n");
+    
+    printf("\nStep 6: Verification of unification state\n");
+    
+    // Check that unification bindings are preserved
+    Value* deref_var1 = flint_deref(linear_var1);
+    Value* deref_var2 = flint_deref(linear_var2);
+    Value* deref_shared = flint_deref(shared_result);
+    Value* deref_async = flint_deref(async_result);
+    
+    ASSERT(deref_var1->type == VAL_INTEGER && deref_var1->data.integer == 12);
+    ASSERT(deref_var2->type == VAL_INTEGER && deref_var2->data.integer == 8);
+    ASSERT(deref_shared->type == VAL_INTEGER && deref_shared->data.integer == 20);
+    ASSERT(deref_async->type == VAL_INTEGER && deref_async->data.integer == 40);
+    
+    printf("  Verified unification: LinearVar1=12, LinearVar2=8, Shared=20, Async=40\n");
+    
+    printf("\n=== Integration Test Summary ===\n");
+    printf("✓ Constraint solving integrated with unification\n");
+    printf("✓ Linear resource management with constraint propagation\n");
+    printf("✓ Async operations with constraint-driven computation\n");
+    printf("✓ Backtracking preserves constraint state\n");
+    printf("✓ All systems work together seamlessly\n");
+    printf("=====================================\n\n");
+    
+    // Clean up
+    flint_channel_close(result_channel);
+    free(result_channel);
+    
+    flint_set_linear_context(NULL);
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ List full system integration tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -1762,6 +2210,14 @@ int main() {
     all_passed &= test_constraint_linear_integration();
     all_passed &= test_constraint_async_integration();
     all_passed &= test_full_system_integration();
+    
+    // Comprehensive list processing tests
+    all_passed &= test_consolidated_list_operations();
+    all_passed &= test_list_unification_integration();
+    all_passed &= test_list_linear_integration();
+    all_passed &= test_list_constraint_integration();
+    all_passed &= test_list_async_integration();
+    all_passed &= test_list_full_system_integration();
     
     test_printing();
     

@@ -156,124 +156,13 @@ Value* flint_narrow_call(char* func_name, Value** args, size_t arg_count, Enviro
 // =============================================================================
 
 Value* narrow_append(Value** args, size_t arg_count, Environment* env) {
-    // append(list1, list2, result)
-    Value* list1 = flint_deref(args[0]);
-    Value* list2 = flint_deref(args[1]);
-    Value* result = flint_deref(args[2]);
-    
-    // Case 1: append([], Ys, Ys)
-    if (list1->type == VAL_LIST && list1->data.list.length == 0) {
-        if (flint_unify(list2, result, env)) {
-            return result;
-        }
-        return NULL;
-    }
-    
-    // Case 2: append([H|T], Ys, [H|R]) :- append(T, Ys, R)
-    if (list1->type == VAL_LIST && list1->data.list.length > 0) {
-        // Extract head and tail
-        Value* head = &list1->data.list.elements[0];
-        
-        // Create tail list
-        Value* tail = flint_alloc(sizeof(Value));
-        tail->type = VAL_LIST;
-        tail->data.list.length = list1->data.list.length - 1;
-        tail->data.list.capacity = tail->data.list.length;
-        
-        if (tail->data.list.length > 0) {
-            tail->data.list.elements = flint_alloc(sizeof(Value) * tail->data.list.length);
-            for (size_t i = 0; i < tail->data.list.length; i++) {
-                tail->data.list.elements[i] = list1->data.list.elements[i + 1];
-            }
-        } else {
-            tail->data.list.elements = NULL;
-        }
-        
-        // Create result with head prepended
-        if (result->type == VAL_LOGICAL_VAR) {
-            // Result is a variable, create the structure
-            Value* new_result = flint_alloc(sizeof(Value));
-            new_result->type = VAL_LIST;
-            new_result->data.list.length = 1;  // We'll extend this recursively
-            new_result->data.list.capacity = 1;
-            new_result->data.list.elements = flint_alloc(sizeof(Value));
-            new_result->data.list.elements[0] = *head;
-            
-            // Recursive call for the tail
-            Value* tail_result = flint_create_logical_var(false);
-            Value* recursive_args[] = {tail, list2, tail_result};
-            Value* tail_append_result = narrow_append(recursive_args, 3, env);
-            
-            if (tail_append_result) {
-                // Extend the result list
-                tail_append_result = flint_deref(tail_append_result);
-                if (tail_append_result->type == VAL_LIST) {
-                    size_t new_length = 1 + tail_append_result->data.list.length;
-                    new_result->data.list.elements = realloc(new_result->data.list.elements, 
-                                                            sizeof(Value) * new_length);
-                    new_result->data.list.length = new_length;
-                    new_result->data.list.capacity = new_length;
-                    
-                    for (size_t i = 0; i < tail_append_result->data.list.length; i++) {
-                        new_result->data.list.elements[i + 1] = tail_append_result->data.list.elements[i];
-                    }
-                }
-            }
-            
-            if (flint_unify(result, new_result, env)) {
-                return result;
-            }
-        }
-    }
-    
-    return NULL;
+    return flint_list_narrow_append(args, arg_count, env);
 }
 
 Value* narrow_reverse(Value** args, size_t arg_count, Environment* env) {
-    // reverse(list, result)
-    Value* list = flint_deref(args[0]);
-    Value* result = flint_deref(args[1]);
-    
-    if (list->type != VAL_LIST) {
-        return NULL;
-    }
-    
-    // Create reversed list
-    Value* reversed = flint_alloc(sizeof(Value));
-    reversed->type = VAL_LIST;
-    reversed->data.list.length = list->data.list.length;
-    reversed->data.list.capacity = list->data.list.length;
-    
-    if (list->data.list.length > 0) {
-        reversed->data.list.elements = flint_alloc(sizeof(Value) * list->data.list.length);
-        for (size_t i = 0; i < list->data.list.length; i++) {
-            reversed->data.list.elements[i] = list->data.list.elements[list->data.list.length - 1 - i];
-        }
-    } else {
-        reversed->data.list.elements = NULL;
-    }
-    
-    if (flint_unify(result, reversed, env)) {
-        return result;
-    }
-    
-    return NULL;
+    return flint_list_narrow_reverse(args, arg_count, env);
 }
 
 Value* narrow_length(Value** args, size_t arg_count, Environment* env) {
-    // length(list, result)
-    Value* list = flint_deref(args[0]);
-    Value* result = flint_deref(args[1]);
-    
-    if (list->type != VAL_LIST) {
-        return NULL;
-    }
-    
-    Value* length_val = flint_create_integer((int64_t)list->data.list.length);
-    
-    if (flint_unify(result, length_val, env)) {
-        return result;
-    }
-    
-    return NULL;
+    return flint_list_narrow_length(args, arg_count, env);
 }
