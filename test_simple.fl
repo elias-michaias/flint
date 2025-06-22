@@ -1,8 +1,0 @@
-// Test program with correct syntax
-main :: main
-
-main () => {
-    let x = 42
-    let y = "hello" 
-    x
-}

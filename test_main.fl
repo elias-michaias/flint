@@ -1,6 +1,0 @@
-// Test program with correct syntax for main declaration
-main :: start
-
-start :: () => {
-    42
-}
