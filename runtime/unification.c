@@ -1,218 +1,296 @@
-#include <stdio.h>
+#include "runtime.h"
 #include <stdlib.h>
 #include <string.h>
-#include "unification.h"
-#include "terms.h"
-#include "symbol_table.h"
+#include <stdio.h>
 
-// TODO: Extract unification functions from runtime.c
-// This is a placeholder - implementations will be moved from runtime.c
+// =============================================================================
+// UNIFICATION ENGINE
+// =============================================================================
 
-int unify(term_t* t1, term_t* t2, substitution_t* subst) {
-    if (!t1 || !t2) return 0;
+Value* flint_deref(Value* val) {
+    if (!val) return NULL;
     
-    // Apply current substitution
-    term_t* term1 = apply_substitution(t1, subst);
-    term_t* term2 = apply_substitution(t2, subst);
-    
-    int result = 0;
-    
-    // Handle cloned terms by using their inner term
-    if (term1->type == TERM_CLONE) {
-        result = unify(term1->data.cloned, term2, subst);
-    } else if (term2->type == TERM_CLONE) {
-        result = unify(term1, term2->data.cloned, subst);
-    }
-    // Variable unification
-    else if (term1->type == TERM_VAR) {
-        // Occurs check: don't bind a variable to a term containing itself
-        if (!occurs_in_term(term1->data.var_id, term2)) {
-            if (subst->count < MAX_VARS) {
-                subst->bindings[subst->count].var_id = term1->data.var_id;
-                subst->bindings[subst->count].term = copy_term(term2);
-                subst->count++;
-                result = 1;
-            }
-        }
-    } else if (term2->type == TERM_VAR) {
-        // Occurs check: don't bind a variable to a term containing itself
-        if (!occurs_in_term(term2->data.var_id, term1)) {
-            if (subst->count < MAX_VARS) {
-                subst->bindings[subst->count].var_id = term2->data.var_id;
-                subst->bindings[subst->count].term = copy_term(term1);
-                subst->count++;
-                result = 1;
-            }
-        }
-    }
-    // Atom unification
-    else if (term1->type == TERM_ATOM && term2->type == TERM_ATOM) {
-        result = term1->data.atom_id == term2->data.atom_id;
-    }
-    // Integer unification
-    else if (term1->type == TERM_INTEGER && term2->type == TERM_INTEGER) {
-        result = term1->data.integer == term2->data.integer;
-    }
-    // Compound term unification
-    else if (term1->type == TERM_COMPOUND && term2->type == TERM_COMPOUND) {
-        if (term1->data.compound.functor_id == term2->data.compound.functor_id &&
-            term1->arity == term2->arity) {
-            result = 1;
-            for (int i = 0; i < term1->arity && result; i++) {
-                result = unify(term1->data.compound.args[i], term2->data.compound.args[i], subst);
-            }
+    if (val->type == VAL_LOGICAL_VAR) {
+        LogicalVar* var = val->data.logical_var;
+        if (var->binding) {
+            // Follow the binding chain
+            return flint_deref(var->binding);
         }
     }
     
-    free_term(term1);
-    free_term(term2);
-    return result;
+    return val;
 }
 
-int unify_terms(term_t* term1, term_t* term2, substitution_t* subst) {
-    if (!term1 || !term2) return 0;
+bool flint_occurs_check(VarId var_id, Value* val) {
+    if (!val) return false;
     
-    // Extract inner terms from persistent resources (cloned terms)
-    term_t* actual_term1 = get_inner_term(term1);
-    term_t* actual_term2 = get_inner_term(term2);
+    val = flint_deref(val);
     
-    if (actual_term1->type == TERM_VAR) {
-        // Variable unifies with anything
-        return add_binding(subst, actual_term1->data.var_id, actual_term2);
-    }
-    
-    if (actual_term2->type == TERM_VAR) {
-        // Variable unifies with anything  
-        return add_binding(subst, actual_term2->data.var_id, actual_term1);
-    }
-    
-    if (actual_term1->type == TERM_ATOM && actual_term2->type == TERM_ATOM) {
-        return actual_term1->data.atom_id == actual_term2->data.atom_id;
-    }
-    
-    if (actual_term1->type == TERM_INTEGER && actual_term2->type == TERM_INTEGER) {
-        return actual_term1->data.integer == actual_term2->data.integer;
-    }
-    
-    if (actual_term1->type == TERM_COMPOUND && actual_term2->type == TERM_COMPOUND) {
-        if (actual_term1->data.compound.functor_id != actual_term2->data.compound.functor_id) {
-            return 0;
+    switch (val->type) {
+        case VAL_LOGICAL_VAR: {
+            LogicalVar* var = val->data.logical_var;
+            return var->id == var_id;
         }
-        if (actual_term1->arity != actual_term2->arity) {
-            return 0;
-        }
-        for (int i = 0; i < actual_term1->arity; i++) {
-            if (!unify_terms(actual_term1->data.compound.args[i], actual_term2->data.compound.args[i], subst)) {
-                return 0;
+        
+        case VAL_LIST:
+            for (size_t i = 0; i < val->data.list.length; i++) {
+                if (flint_occurs_check(var_id, &val->data.list.elements[i])) {
+                    return true;
+                }
             }
-        }
-        return 1;
-    }
-    
-    return 0; // Different types don't unify
-}
-
-int add_binding(substitution_t* subst, var_id_t var_id, term_t* term) {
-    if (!subst || subst->count >= MAX_VARS) return 0;
-    
-    subst->bindings[subst->count].var_id = var_id;
-    subst->bindings[subst->count].term = copy_term(term);
-    subst->count++;
-    return 1;
-}
-
-void copy_substitution(substitution_t* dest, substitution_t* src) {
-    if (!dest || !src) return;
-    dest->count = src->count;
-    for (int i = 0; i < src->count && i < MAX_VARS; i++) {
-        dest->bindings[i] = src->bindings[i];
+            return false;
+            
+        case VAL_RECORD:
+            for (size_t i = 0; i < val->data.record.field_count; i++) {
+                if (flint_occurs_check(var_id, &val->data.record.field_values[i])) {
+                    return true;
+                }
+            }
+            return false;
+            
+        case VAL_PARTIAL:
+            return flint_occurs_check(var_id, val->data.partial.base);
+            
+        default:
+            return false;
     }
 }
 
-void compose_substitutions(substitution_t* dest, substitution_t* src) {
-    if (!dest || !src) return;
-    
-    // Apply src to all terms in dest
-    for (int i = 0; i < dest->count; i++) {
-        term_t* new_term = apply_substitution(dest->bindings[i].term, src);
-        free_term(dest->bindings[i].term);
-        dest->bindings[i].term = new_term;
+bool flint_unify_variables(LogicalVar* var1, LogicalVar* var2, Environment* env) {
+    // Handle variable-variable unification
+    if (var1->id == var2->id) {
+        return true;  // Same variable
     }
     
-    // Add bindings from src that are not in dest
-    for (int i = 0; i < src->count; i++) {
-        int found = 0;
-        for (int j = 0; j < dest->count; j++) {
-            if (src->bindings[i].var_id == dest->bindings[j].var_id) {
-                found = 1;
-                break;
-            }
+    // Choose which variable to bind (prefer binding the younger variable)
+    LogicalVar* bind_var = (var1->id < var2->id) ? var2 : var1;
+    LogicalVar* bind_to = (var1->id < var2->id) ? var1 : var2;
+    
+    // Create a value wrapper for the target variable
+    Value* target_val = flint_alloc(sizeof(Value));
+    target_val->type = VAL_LOGICAL_VAR;
+    target_val->data.logical_var = bind_to;
+    
+    // Bind the variable
+    bind_var->binding = target_val;
+    
+    // Resume any suspensions waiting on the bound variable
+    flint_resume_suspensions(bind_var->id, env);
+    
+    return true;
+}
+
+bool flint_unify_lists(Value* list1, Value* list2, Environment* env) {
+    if (list1->data.list.length != list2->data.list.length) {
+        return false;
+    }
+    
+    for (size_t i = 0; i < list1->data.list.length; i++) {
+        if (!flint_unify(&list1->data.list.elements[i], &list2->data.list.elements[i], env)) {
+            return false;
         }
-        if (!found && dest->count < MAX_VARS) {
-            dest->bindings[dest->count].var_id = src->bindings[i].var_id;
-            dest->bindings[dest->count].term = copy_term(src->bindings[i].term);
-            dest->count++;
+    }
+    
+    return true;
+}
+
+bool flint_unify_records(Value* rec1, Value* rec2, Environment* env) {
+    if (rec1->data.record.field_count != rec2->data.record.field_count) {
+        return false;
+    }
+    
+    // Check that all field names match (order matters for now - could be improved)
+    for (size_t i = 0; i < rec1->data.record.field_count; i++) {
+        if (strcmp(rec1->data.record.field_names[i], rec2->data.record.field_names[i]) != 0) {
+            return false;
         }
+        
+        if (!flint_unify(&rec1->data.record.field_values[i], &rec2->data.record.field_values[i], env)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+bool flint_unify(Value* val1, Value* val2, Environment* env) {
+    if (!val1 || !val2) return false;
+    
+    // Dereference both values to get their actual values
+    val1 = flint_deref(val1);
+    val2 = flint_deref(val2);
+    
+    // Handle logical variables
+    if (val1->type == VAL_LOGICAL_VAR && val2->type == VAL_LOGICAL_VAR) {
+        return flint_unify_variables(val1->data.logical_var, val2->data.logical_var, env);
+    }
+    
+    if (val1->type == VAL_LOGICAL_VAR) {
+        LogicalVar* var = val1->data.logical_var;
+        
+        // Occurs check
+        if (flint_occurs_check(var->id, val2)) {
+            return false;
+        }
+        
+        // Bind the variable
+        var->binding = val2;
+        
+        // Resume suspensions
+        flint_resume_suspensions(var->id, env);
+        
+        return true;
+    }
+    
+    if (val2->type == VAL_LOGICAL_VAR) {
+        LogicalVar* var = val2->data.logical_var;
+        
+        // Occurs check
+        if (flint_occurs_check(var->id, val1)) {
+            return false;
+        }
+        
+        // Bind the variable
+        var->binding = val1;
+        
+        // Resume suspensions
+        flint_resume_suspensions(var->id, env);
+        
+        return true;
+    }
+    
+    // Handle unification of ground terms
+    if (val1->type != val2->type) {
+        return false;
+    }
+    
+    switch (val1->type) {
+        case VAL_INTEGER:
+            return val1->data.integer == val2->data.integer;
+            
+        case VAL_FLOAT:
+            return val1->data.float_val == val2->data.float_val;
+            
+        case VAL_STRING:
+            return strcmp(val1->data.string, val2->data.string) == 0;
+            
+        case VAL_ATOM:
+            return strcmp(val1->data.atom, val2->data.atom) == 0;
+            
+        case VAL_LIST:
+            return flint_unify_lists(val1, val2, env);
+            
+        case VAL_RECORD:
+            return flint_unify_records(val1, val2, env);
+            
+        case VAL_SUSPENSION:
+            // Suspensions don't unify directly
+            return false;
+            
+        case VAL_PARTIAL:
+            // Partial structures require special handling
+            return flint_unify(val1->data.partial.base, val2->data.partial.base, env);
+            
+        default:
+            return false;
     }
 }
 
-void print_substitution(substitution_t* subst, symbol_table_t* symbols) {
-    if (!subst || subst->count == 0) {
-        printf("{}");
+bool flint_can_unify(Value* val1, Value* val2) {
+    // This is a non-destructive check - we don't actually perform the unification
+    // For now, we'll use a simple heuristic
+    
+    val1 = flint_deref(val1);
+    val2 = flint_deref(val2);
+    
+    // Variables can unify with anything (subject to occurs check)
+    if (val1->type == VAL_LOGICAL_VAR || val2->type == VAL_LOGICAL_VAR) {
+        return true;
+    }
+    
+    // Same type ground terms might unify
+    if (val1->type == val2->type) {
+        switch (val1->type) {
+            case VAL_INTEGER:
+                return val1->data.integer == val2->data.integer;
+            case VAL_FLOAT:
+                return val1->data.float_val == val2->data.float_val;
+            case VAL_STRING:
+                return strcmp(val1->data.string, val2->data.string) == 0;
+            case VAL_ATOM:
+                return strcmp(val1->data.atom, val2->data.atom) == 0;
+            case VAL_LIST:
+                return val1->data.list.length == val2->data.list.length;
+            case VAL_RECORD:
+                return val1->data.record.field_count == val2->data.record.field_count;
+            default:
+                return false;
+        }
+    }
+    
+    return false;
+}
+
+// =============================================================================
+// FREE VARIABLE EXTRACTION
+// =============================================================================
+
+static void collect_free_vars_recursive(Value* val, VarId** vars, size_t* count, size_t* capacity) {
+    if (!val) return;
+    
+    val = flint_deref(val);
+    
+    if (val->type == VAL_LOGICAL_VAR) {
+        LogicalVar* var = val->data.logical_var;
+        if (!var->binding) {  // Only uninstantiated variables
+            // Check if we already have this variable
+            for (size_t i = 0; i < *count; i++) {
+                if ((*vars)[i] == var->id) {
+                    return;  // Already in the list
+                }
+            }
+            
+            // Expand array if needed
+            if (*count >= *capacity) {
+                *capacity = (*capacity == 0) ? 8 : (*capacity * 2);
+                *vars = realloc(*vars, sizeof(VarId) * (*capacity));
+            }
+            
+            (*vars)[*count] = var->id;
+            (*count)++;
+        }
         return;
     }
     
-    printf("{");
-    for (int i = 0; i < subst->count; i++) {
-        if (i > 0) printf(", ");
-        printf("%s/", symbol_table_get_var_name(symbols, subst->bindings[subst->count].var_id));
-        print_term(subst->bindings[i].term, symbols);
-    }
-    printf("}");
-}
-
-int substitutions_equal(substitution_t* s1, substitution_t* s2) {
-    (void)s1;
-    (void)s2;
-    // TODO: Move implementation from runtime.c
-    return 0;
-}
-
-int solutions_are_equivalent(substitution_t* s1, substitution_t* s2) {
-    (void)s1;
-    (void)s2;
-    // TODO: Move implementation from runtime.c
-    return 0;
-}
-
-void create_filtered_substitution(substitution_t* full_subst, var_id_t* target_vars, int target_count, substitution_t* filtered_subst) {
-    (void)full_subst;
-    (void)target_vars;
-    (void)target_count;
-    (void)filtered_subst;
-    // TODO: Move implementation from runtime.c
-}
-
-int all_variables_bound(var_id_t* vars, int var_count, substitution_t* subst) {
-    (void)vars;
-    (void)var_count;
-    (void)subst;
-    // TODO: Move implementation from runtime.c
-    return 0;
-}
-
-void init_substitution(substitution_t* subst) {
-    if (subst) {
-        subst->count = 0;
+    // Recursively collect from compound structures
+    switch (val->type) {
+        case VAL_LIST:
+            for (size_t i = 0; i < val->data.list.length; i++) {
+                collect_free_vars_recursive(&val->data.list.elements[i], vars, count, capacity);
+            }
+            break;
+            
+        case VAL_RECORD:
+            for (size_t i = 0; i < val->data.record.field_count; i++) {
+                collect_free_vars_recursive(&val->data.record.field_values[i], vars, count, capacity);
+            }
+            break;
+            
+        case VAL_PARTIAL:
+            collect_free_vars_recursive(val->data.partial.base, vars, count, capacity);
+            break;
+            
+        default:
+            break;
     }
 }
 
-void free_substitution(substitution_t* subst) {
-    if (!subst) return;
+VarId* flint_get_free_vars(Value* val, size_t* count) {
+    VarId* vars = NULL;
+    size_t capacity = 0;
+    *count = 0;
     
-    for (int i = 0; i < subst->count; i++) {
-        // No need to free var_id - it's just an integer
-        free_term(subst->bindings[i].term);
-    }
-    subst->count = 0;
+    collect_free_vars_recursive(val, &vars, count, &capacity);
+    
+    return vars;
 }
