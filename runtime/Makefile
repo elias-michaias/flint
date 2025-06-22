@@ -4,7 +4,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
 INCLUDES = -I.
-LDFLAGS = 
+LDFLAGS = -lm
 
 # Directories
 OBJDIR = object
@@ -12,7 +12,7 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c
+SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c interop.c
 HEADERS = types.h runtime.h
 
 # Object files (in object directory)
@@ -48,7 +48,7 @@ test: $(TEST_PROGRAMS)
 	done
 
 $(TESTDIR)/%: $(TESTDIR)/%.c $(LIBRARY)
-	$(CC) $(CFLAGS) $(INCLUDES) $< -L$(OUTDIR) -lflint_runtime -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $< -L$(OUTDIR) -lflint_runtime $(LDFLAGS) -o $@
 
 install: $(LIBRARY)
 	cp $(LIBRARY) /usr/local/lib/
@@ -74,3 +74,4 @@ $(OBJDIR)/narrowing.o: narrowing.c runtime.h types.h
 $(OBJDIR)/environment.o: environment.c runtime.h types.h
 $(OBJDIR)/pattern_matching.o: pattern_matching.c runtime.h types.h
 $(OBJDIR)/linear.o: linear.c runtime.h types.h
+$(OBJDIR)/interop.o: interop.c runtime.h types.h

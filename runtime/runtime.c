@@ -33,9 +33,15 @@ void flint_init_runtime(void) {
     
     // Initialize the linear resource management system
     flint_init_linear_system();
+    
+    // Initialize built-in C interop functions
+    flint_init_builtin_c_functions();
 }
 
 void flint_cleanup_runtime(void) {
+    // Cleanup C interop functions
+    flint_cleanup_c_interop();
+    
     // Cleanup linear system first
     flint_cleanup_linear_system();
     

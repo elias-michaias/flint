@@ -217,5 +217,43 @@ void flint_choice_rollback_linear(LinearCheckpoint checkpoint);
 void flint_choice_commit_linear(LinearCheckpoint checkpoint);
 
 // =============================================================================
+// C INTEROPERABILITY
+// =============================================================================
+
+// C type enumeration for interop
+typedef enum {
+    C_TYPE_VOID,
+    C_TYPE_INT,
+    C_TYPE_LONG,
+    C_TYPE_DOUBLE,
+    C_TYPE_STRING,      // char*
+    C_TYPE_POINTER      // void*
+} CType;
+
+// Register C functions with Flint
+bool flint_register_c_function(const char* name, void* func_ptr, 
+                               CType return_type, CType* param_types, size_t param_count,
+                               bool consumes_args);
+
+// Call a registered C function from Flint (deterministic computation)
+Value* flint_call_c_function(const char* name, Value** args, size_t arg_count, Environment* env);
+
+// Integration with narrowing system
+Value* flint_narrow_c_function(const char* name, Value** args, size_t arg_count, Environment* env);
+
+// Convenience functions for common C function signatures
+bool flint_register_c_int_function(const char* name, int (*func)(int));
+bool flint_register_c_string_function(const char* name, char* (*func)(char*));
+bool flint_register_c_math_function(const char* name, double (*func)(double));
+bool flint_register_c_binary_int_function(const char* name, int (*func)(int, int));
+
+// Create Flint function wrapper for C function
+Value* flint_create_c_function_wrapper(const char* c_func_name);
+
+// Initialize and cleanup C interop
+void flint_init_builtin_c_functions(void);
+void flint_cleanup_c_interop(void);
+
+// =============================================================================
 
 #endif // FLINT_RUNTIME_H

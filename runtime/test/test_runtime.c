@@ -726,6 +726,148 @@ bool test_linear_unification_integration() {
     return true;
 }
 
+// =============================================================================
+// C INTEROP TESTS
+// =============================================================================
+
+// Test C interop - basic deterministic functions
+bool test_c_interop_basic() {
+    TEST("C Interop - Basic Functions");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test c_add function (should be registered by init)
+    Value* arg1 = flint_create_integer(10);
+    Value* arg2 = flint_create_integer(20);
+    Value* args[] = {arg1, arg2};
+    
+    Value* result = flint_call_c_function("c_add", args, 2, env);
+    ASSERT(result != NULL);
+    ASSERT(result->type == VAL_INTEGER);
+    ASSERT(result->data.integer == 30);
+    
+    // Test c_factorial function
+    Value* n = flint_create_integer(5);
+    Value* factorial_args[] = {n};
+    
+    Value* factorial_result = flint_call_c_function("c_factorial", factorial_args, 1, env);
+    ASSERT(factorial_result != NULL);
+    ASSERT(factorial_result->type == VAL_INTEGER);
+    ASSERT(factorial_result->data.integer == 120); // 5! = 120
+    
+    flint_free_environment(env);
+    
+    printf("✓ C interop basic function tests passed\n");
+    return true;
+}
+
+// Test C interop - string functions
+bool test_c_interop_strings() {
+    TEST("C Interop - String Functions");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test c_reverse_string function
+    Value* str = flint_create_string("hello");
+    Value* str_args[] = {str};
+    
+    Value* reversed = flint_call_c_function("c_reverse_string", str_args, 1, env);
+    ASSERT(reversed != NULL);
+    ASSERT(reversed->type == VAL_STRING);
+    ASSERT(strcmp(reversed->data.string, "olleh") == 0);
+    
+    flint_free_environment(env);
+    
+    printf("✓ C interop string function tests passed\n");
+    return true;
+}
+
+// Test C interop - math functions
+bool test_c_interop_math() {
+    TEST("C Interop - Math Functions");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test c_sin function
+    Value* angle = flint_create_float(1.0); // sin(1.0) ≈ 0.841
+    Value* sin_args[] = {angle};
+    
+    Value* sin_result = flint_call_c_function("c_sin", sin_args, 1, env);
+    ASSERT(sin_result != NULL);
+    ASSERT(sin_result->type == VAL_FLOAT);
+    // Check that sin(1.0) is approximately 0.841
+    ASSERT(sin_result->data.float_val > 0.84 && sin_result->data.float_val < 0.85);
+    
+    // Test c_sqrt function
+    Value* number = flint_create_float(16.0);
+    Value* sqrt_args[] = {number};
+    
+    Value* sqrt_result = flint_call_c_function("c_sqrt", sqrt_args, 1, env);
+    ASSERT(sqrt_result != NULL);
+    ASSERT(sqrt_result->type == VAL_FLOAT);
+    ASSERT(sqrt_result->data.float_val == 4.0);
+    
+    flint_free_environment(env);
+    
+    printf("✓ C interop math function tests passed\n");
+    return true;
+}
+
+// Test C interop - error handling
+bool test_c_interop_errors() {
+    TEST("C Interop - Error Handling");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test calling non-existent function
+    Value* arg = flint_create_integer(42);
+    Value* args[] = {arg};
+    
+    Value* result = flint_call_c_function("nonexistent_function", args, 1, env);
+    ASSERT(result == NULL); // Should return NULL for non-existent function
+    
+    // Test wrong argument count
+    Value* wrong_result = flint_call_c_function("c_add", args, 1, env); // c_add expects 2 args
+    ASSERT(wrong_result == NULL); // Should return NULL for wrong arg count
+    
+    flint_free_environment(env);
+    
+    printf("✓ C interop error handling tests passed\n");
+    return true;
+}
+
+// Test C interop - linear resource handling
+bool test_c_interop_linear() {
+    TEST("C Interop - Linear Resource Handling");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Create values for testing
+    Value* val1 = flint_create_integer(10);
+    Value* val2 = flint_create_integer(20);
+    
+    ASSERT(!val1->is_consumed);
+    ASSERT(!val2->is_consumed);
+    
+    // Register a C function that consumes its arguments
+    // (In practice, we'd register a different function or variant)
+    Value* args[] = {val1, val2};
+    Value* result = flint_call_c_function("c_add", args, 2, env);
+    
+    ASSERT(result != NULL);
+    ASSERT(result->type == VAL_INTEGER);
+    ASSERT(result->data.integer == 30);
+    
+    // The original function doesn't consume args, so they should still be available
+    ASSERT(!val1->is_consumed);
+    ASSERT(!val2->is_consumed);
+    
+    flint_free_environment(env);
+    
+    printf("✓ C interop linear resource tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -755,6 +897,13 @@ int main() {
     all_passed &= test_linear_list_destructuring();
     all_passed &= test_linear_variable_consumption();
     all_passed &= test_linear_unification_integration();
+    
+    // C interoperability tests
+    all_passed &= test_c_interop_basic();
+    all_passed &= test_c_interop_strings();
+    all_passed &= test_c_interop_math();
+    all_passed &= test_c_interop_errors();
+    all_passed &= test_c_interop_linear();
     
     test_printing();
     
