@@ -1271,6 +1271,438 @@ bool test_flexible_constraint_system() {
     return true;
 }
 
+// Test constraint integration with unification
+bool test_constraint_unification_integration() {
+    TEST("Constraint-Unification Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    // Create logical variables
+    Value* varX = flint_create_logical_var(false);
+    Value* varY = flint_create_logical_var(false);
+    Value* varZ = flint_create_logical_var(false);
+    
+    VarId x_id = varX->data.logical_var->id;
+    VarId y_id = varY->data.logical_var->id;
+    VarId z_id = varZ->data.logical_var->id;
+    
+    // Register variables with environment for constraint solving
+    flint_register_variable_with_env(env, varX);
+    flint_register_variable_with_env(env, varY);
+    flint_register_variable_with_env(env, varZ);
+    
+    // Add constraint: X + Y = Z using the unified interface
+    ASSERT(flint_add_sum_constraint(env, x_id, y_id, z_id, STRENGTH_REQUIRED));
+    
+    // Unify X with 10 using constraint-aware unification
+    Value* val10 = flint_create_integer(10);
+    ASSERT(flint_unify_with_constraints(varX, val10, env));
+    
+    // Unify Y with 20 using constraint-aware unification
+    Value* val20 = flint_create_integer(20);
+    ASSERT(flint_unify_with_constraints(varY, val20, env));
+    
+    // Check that Z resolves to 30 via constraints
+    double z_value = flint_get_constraint_value(store, z_id);
+    ASSERT(z_value >= 29.9 && z_value <= 30.1); // Should be approximately 30
+    
+    // Verify unification still works
+    Value* deref_x = flint_deref(varX);
+    Value* deref_y = flint_deref(varY);
+    ASSERT(deref_x->type == VAL_INTEGER && deref_x->data.integer == 10);
+    ASSERT(deref_y->type == VAL_INTEGER && deref_y->data.integer == 20);
+    
+    // Test reverse direction: set constraint variable and check unification
+    VarId w_id = flint_fresh_var_id();
+    Value* varW = flint_create_logical_var(false);
+    varW->data.logical_var->id = w_id;
+    
+    // Add constraint W = 42
+    VarId const_vars[] = {w_id};
+    FlintConstraint* const_constraint = flint_add_arithmetic_constraint(
+        store, ARITH_EQUAL, const_vars, 1, 42.0, STRENGTH_REQUIRED);
+    ASSERT(const_constraint != NULL);
+    
+    // Get the constraint value and create a Value for unification
+    double w_value = flint_get_constraint_value(store, w_id);
+    Value* constraint_result = flint_create_integer((int)w_value);
+    
+    // This should succeed since the constraint system provides the value
+    ASSERT(flint_unify(varW, constraint_result, env));
+    
+    Value* deref_w = flint_deref(varW);
+    ASSERT(deref_w->type == VAL_INTEGER && deref_w->data.integer == 42);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Constraint-unification integration tests passed\n");
+    return true;
+}
+
+// Test constraint integration with linear resource management
+bool test_constraint_linear_integration() {
+    TEST("Constraint-Linear Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    flint_set_linear_context(env);
+    
+    // Create linear variables 
+    Value* linearX = flint_create_logical_var(true); // linear = true
+    Value* linearY = flint_create_logical_var(true);
+    Value* result = flint_create_logical_var(false); // non-linear result
+    
+    VarId x_id = linearX->data.logical_var->id;
+    VarId y_id = linearY->data.logical_var->id;
+    VarId result_id = result->data.logical_var->id;
+    
+    // Register variables with environment
+    flint_register_variable_with_env(env, linearX);
+    flint_register_variable_with_env(env, linearY);
+    flint_register_variable_with_env(env, result);
+    
+    // Add constraint: X + X = Y (representing X * 2 = Y)
+    VarId double_vars[] = {x_id, x_id, y_id};
+    ASSERT(flint_constrain_variables(env, double_vars, 3, ARITH_ADD, 0.0, STRENGTH_REQUIRED));
+    
+    // Add constraint: Y = result (using equality)
+    VarId eq_vars[] = {y_id, result_id};
+    ASSERT(flint_constrain_variables(env, eq_vars, 2, ARITH_EQUAL, 0.0, STRENGTH_REQUIRED));
+    
+    // Create a checkpoint for linear trail
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    // Unify and consume linear variable X using constraint-aware unification
+    Value* val5 = flint_create_integer(5);
+    ASSERT(flint_unify_with_constraints(linearX, val5, env));
+    
+    // Consume the linear variable (simulating linear usage)
+    flint_consume_value(linearX, LINEAR_OP_UNIFY);
+    ASSERT(linearX->is_consumed);
+    
+    // Check that Y and result get computed via constraints (Y should be 10)
+    double y_value = flint_get_constraint_value(store, y_id);
+    double result_value = flint_get_constraint_value(store, result_id);
+    
+    ASSERT(y_value >= 9.9 && y_value <= 10.1); // Y = 2*X = 2*5 = 10
+    ASSERT(result_value >= 9.9 && result_value <= 10.1); // result = Y = 10
+    
+    // Test backtracking with linear trail
+    flint_linear_restore(env->linear_trail, checkpoint);
+    
+    // After restore, linear variables should be unconsumed
+    ASSERT(!linearX->is_consumed);
+    
+    // Constraint values should still be available
+    double restored_y = flint_get_constraint_value(store, y_id);
+    ASSERT(restored_y >= 9.9 && restored_y <= 10.1);
+    
+    flint_set_linear_context(NULL);
+    flint_free_environment(env);
+    
+    printf("✓ Constraint-linear integration tests passed\n");
+    return true;
+}
+
+// Test constraint integration with async operations
+bool test_constraint_async_integration() {
+    TEST("Constraint-Async Integration");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    
+    // Create variables for async constraint solving
+    VarId async_var1 = flint_fresh_var_id();
+    VarId async_var2 = flint_fresh_var_id();
+    VarId async_result = flint_fresh_var_id();
+    
+    // Add constraint: var1 + var2 = result using unified interface
+    ASSERT(flint_add_sum_constraint(env, async_var1, async_var2, async_result, STRENGTH_REQUIRED));
+    
+    // Simulate async constraint updates using the constraint interface
+    ASSERT(flint_constrain_to_value(env, async_var1, 15.0, STRENGTH_REQUIRED));
+    ASSERT(flint_constrain_to_value(env, async_var2, 25.0, STRENGTH_REQUIRED));
+    
+    // Check that constraint solver computed the result asynchronously
+    double result_value = flint_get_constraint_value(store, async_result);
+    ASSERT(result_value >= 39.9 && result_value <= 40.1); // Should be 40
+    
+    // Test constraint solving in async environment with channels
+    FlintChannel* constraint_chan = flint_create_channel(1, C_TYPE_POINTER);
+    ASSERT(constraint_chan != NULL);
+    
+    // Create a constraint that represents an async computation result
+    VarId channel_var = flint_fresh_var_id();
+    
+    // Add a weak constraint that prefers the channel variable to be small
+    VarId opt_vars[] = {channel_var};
+    FlintConstraint* optimization = flint_add_arithmetic_constraint(
+        store, ARITH_EQUAL, opt_vars, 1, 1.0, STRENGTH_WEAK); // Prefer value 1.0
+    ASSERT(optimization != NULL);
+    
+    // The constraint solver should suggest a value close to 1.0
+    double optimized_value = flint_get_constraint_value(store, channel_var);
+    ASSERT(optimized_value >= 0.9 && optimized_value <= 1.1);
+    
+    // Clean up async resources
+    flint_channel_close(constraint_chan);
+    free(constraint_chan);
+    
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Constraint-async integration tests passed\n");
+    return true;
+}
+
+// Test full integration: constraints + unification + linear + async
+bool test_full_system_integration() {
+    TEST("Full System Integration (Constraints + Unification + Linear + Async)");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    // Set up all systems
+    AsyncContext* async_ctx = flint_create_async_context(env);
+    flint_set_async_context(async_ctx);
+    flint_set_linear_context(env);
+    
+    printf("\n=== Full System Integration Demo ===\n");
+    printf("Testing constraints + unification + linear resources + async operations\n\n");
+    
+    // Create linear logical variables
+    Value* resourceA = flint_create_logical_var(true);  // linear resource
+    Value* resourceB = flint_create_logical_var(true);  // linear resource
+    Value* sharedResult = flint_create_logical_var(false); // non-linear shared result
+    Value* asyncResult = flint_create_logical_var(false);  // async computation result
+    
+    VarId a_id = resourceA->data.logical_var->id;
+    VarId b_id = resourceB->data.logical_var->id;
+    VarId shared_id = sharedResult->data.logical_var->id;
+    VarId async_id = asyncResult->data.logical_var->id;
+    
+    // Register variables with environment for constraint solving
+    flint_register_variable_with_env(env, resourceA);
+    flint_register_variable_with_env(env, resourceB);
+    flint_register_variable_with_env(env, sharedResult);
+    flint_register_variable_with_env(env, asyncResult);
+    
+    printf("Step 1: Setting up constraint relationships\n");
+    
+    // Constraint 1: A + B = shared_result (resource combination)
+    FlintConstraint* combination = flint_add_addition_constraint(
+        store, a_id, b_id, shared_id, STRENGTH_REQUIRED);
+    ASSERT(combination != NULL);
+    printf("  Added: A + B = SharedResult\n");
+    
+    // Constraint 2: shared_result * 2 = async_result (async scaling)
+    VarId scale_vars[] = {shared_id, shared_id, async_id};
+    FlintConstraint* scaling = flint_add_arithmetic_constraint(
+        store, ARITH_ADD, scale_vars, 3, 0.0, STRENGTH_REQUIRED);
+    ASSERT(scaling != NULL);
+    printf("  Added: SharedResult * 2 = AsyncResult\n");
+    
+    // Constraint 3: A should be at least 10 (resource constraint)
+    VarId min_vars[] = {a_id};
+    FlintConstraint* minimum = flint_add_arithmetic_constraint(
+        store, ARITH_GEQ, min_vars, 1, 10.0, STRENGTH_STRONG);
+    ASSERT(minimum != NULL);
+    printf("  Added: A >= 10\n");
+    
+    printf("\nStep 2: Linear resource checkpoint\n");
+    LinearCheckpoint checkpoint = flint_linear_checkpoint(env->linear_trail);
+    
+    printf("\nStep 3: Unification with linear resource consumption\n");
+    
+    // Unify resourceA with a value (consuming it linearly)
+    Value* val12 = flint_create_integer(12);
+    ASSERT(flint_unify(resourceA, val12, env));
+    flint_consume_value(resourceA, LINEAR_OP_UNIFY);
+    printf("  Unified A = 12 (linear resource consumed)\n");
+    
+    // Solve constraints after A is bound
+    flint_solve_constraints(store, a_id, env);
+    
+    // Unify resourceB with a value
+    Value* val8 = flint_create_integer(8);
+    ASSERT(flint_unify(resourceB, val8, env));
+    flint_consume_value(resourceB, LINEAR_OP_UNIFY);
+    printf("  Unified B = 8 (linear resource consumed)\n");
+    
+    // Solve constraints after B is bound
+    flint_solve_constraints(store, b_id, env);
+    
+    // Trigger constraint solving for the computed variables to propagate constraints
+    flint_solve_constraints(store, shared_id, env);
+    flint_solve_constraints(store, async_id, env);
+    
+    printf("\nStep 4: Constraint propagation and async computation\n");
+    
+    // Get constraint-computed values
+    double shared_value = flint_get_constraint_value(store, shared_id);
+    double async_value = flint_get_constraint_value(store, async_id);
+    
+    printf("  Computed SharedResult = %.1f (via constraints)\n", shared_value);
+    printf("  Computed AsyncResult = %.1f (via constraints)\n", async_value);
+    
+    // Verify constraint satisfaction
+    ASSERT(shared_value >= 19.9 && shared_value <= 20.1); // A + B = 12 + 8 = 20
+    ASSERT(async_value >= 39.9 && async_value <= 40.1);   // SharedResult * 2 = 20 * 2 = 40
+    
+    // Unify the shared result with the constraint-computed value
+    Value* shared_val = flint_create_integer((int)shared_value);
+    ASSERT(flint_unify(sharedResult, shared_val, env));
+    printf("  Unified SharedResult with constraint value\n");
+    
+    printf("\nStep 5: Async channel communication with constraint results\n");
+    
+    // Create async channel and send constraint result
+    FlintChannel* result_channel = flint_create_channel(1, C_TYPE_POINTER);
+    ASSERT(result_channel != NULL);
+    
+    // In a real async scenario, we'd spawn coroutines here
+    // For testing, we'll simulate the async result
+    Value* final_result = flint_create_integer((int)async_value);
+    ASSERT(flint_unify(asyncResult, final_result, env));
+    printf("  Async computation completed: AsyncResult = %d\n", (int)async_value);
+    
+    printf("\nStep 6: Linear resource backtracking\n");
+    
+    // Test backtracking to restore linear resources
+    flint_linear_restore(env->linear_trail, checkpoint);
+    printf("  Restored to checkpoint - linear resources unconsumed\n");
+    
+    // Verify resources are restored
+    ASSERT(!resourceA->is_consumed);
+    ASSERT(!resourceB->is_consumed);
+    printf("  Verified: A and B are no longer consumed\n");
+    
+    // Constraint values should still be available (constraint system is persistent)
+    double restored_shared = flint_get_constraint_value(store, shared_id);
+    double restored_async = flint_get_constraint_value(store, async_id);
+    
+    ASSERT(restored_shared >= 19.9 && restored_shared <= 20.1);
+    ASSERT(restored_async >= 39.9 && restored_async <= 40.1);
+    printf("  Constraint values preserved: Shared=%.1f, Async=%.1f\n", 
+           restored_shared, restored_async);
+    
+    printf("\nStep 7: Verification of unification state\n");
+    
+    // Check that unification bindings are preserved
+    Value* deref_a = flint_deref(resourceA);
+    Value* deref_b = flint_deref(resourceB);
+    Value* deref_shared = flint_deref(sharedResult);
+    Value* deref_async = flint_deref(asyncResult);
+    
+    ASSERT(deref_a->type == VAL_INTEGER && deref_a->data.integer == 12);
+    ASSERT(deref_b->type == VAL_INTEGER && deref_b->data.integer == 8);
+    ASSERT(deref_shared->type == VAL_INTEGER && deref_shared->data.integer == 20);
+    ASSERT(deref_async->type == VAL_INTEGER && deref_async->data.integer == 40);
+    
+    printf("  Verified unification: A=12, B=8, Shared=20, Async=40\n");
+    
+    printf("\n=== Integration Test Summary ===\n");
+    printf("✓ Constraint solving integrated with unification\n");
+    printf("✓ Linear resource management with constraint propagation\n");
+    printf("✓ Async operations with constraint-driven computation\n");
+    printf("✓ Backtracking preserves constraint state\n");
+    printf("✓ All systems work together seamlessly\n");
+    printf("=====================================\n\n");
+    
+    // Clean up
+    flint_channel_close(result_channel);
+    free(result_channel);
+    
+    flint_set_linear_context(NULL);
+    flint_free_async_context(async_ctx);
+    flint_free_environment(env);
+    
+    printf("✓ Full system integration tests passed\n");
+    return true;
+}
+
+// Test constraint-based optimization with unification
+bool test_constraint_optimization_integration() {
+    TEST("Constraint Optimization with Unification");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    // Create variables for optimization problem
+    VarId x = flint_fresh_var_id();
+    VarId y = flint_fresh_var_id();
+    VarId cost = flint_fresh_var_id();
+    
+    Value* varX = flint_create_logical_var(false);
+    Value* varY = flint_create_logical_var(false);
+    Value* varCost = flint_create_logical_var(false);
+    
+    varX->data.logical_var->id = x;
+    varY->data.logical_var->id = y;
+    varCost->data.logical_var->id = cost;
+    
+    // Add constraints for optimization:
+    // 1. X + Y = Cost (objective function)
+    FlintConstraint* objective = flint_add_addition_constraint(store, x, y, cost, STRENGTH_REQUIRED);
+    ASSERT(objective != NULL);
+    
+    // 2. X >= 5 (constraint)
+    VarId x_min_vars[] = {x};
+    FlintConstraint* x_min = flint_add_arithmetic_constraint(
+        store, ARITH_GEQ, x_min_vars, 1, 5.0, STRENGTH_REQUIRED);
+    ASSERT(x_min != NULL);
+    
+    // 3. Y >= 3 (constraint)  
+    VarId y_min_vars[] = {y};
+    FlintConstraint* y_min = flint_add_arithmetic_constraint(
+        store, ARITH_GEQ, y_min_vars, 1, 3.0, STRENGTH_REQUIRED);
+    ASSERT(y_min != NULL);
+    
+    // 4. Minimize cost (weak preference for small values)
+    VarId cost_vars[] = {cost};
+    FlintConstraint* minimize = flint_add_arithmetic_constraint(
+        store, ARITH_EQUAL, cost_vars, 1, 8.0, STRENGTH_WEAK); // Prefer cost = 8
+    ASSERT(minimize != NULL);
+    
+    // Unify with specific values and see if constraints are satisfied
+    Value* val5 = flint_create_integer(5);
+    Value* val3 = flint_create_integer(3);
+    
+    ASSERT(flint_unify(varX, val5, env));
+    ASSERT(flint_unify(varY, val3, env));
+    
+    // Trigger constraint solving
+    flint_solve_constraints(store, x, env);
+    flint_solve_constraints(store, y, env);
+    
+    // Get the optimized cost
+    double cost_value = flint_get_constraint_value(store, cost);
+    ASSERT(cost_value >= 7.9 && cost_value <= 8.1); // Should be close to 8 (5+3)
+    
+    // Unify the cost variable with the constraint result
+    Value* cost_val = flint_create_integer((int)cost_value);
+    ASSERT(flint_unify(varCost, cost_val, env));
+    
+    // Verify the optimization worked
+    Value* deref_cost = flint_deref(varCost);
+    ASSERT(deref_cost->type == VAL_INTEGER && deref_cost->data.integer == 8);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Constraint optimization integration tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -1292,6 +1724,14 @@ int main() {
     all_passed &= test_constraint_propagation();
     all_passed &= test_flexible_constraint_system();
     all_passed &= test_flexible_constraints();
+    
+    // Integration tests - comprehensive system interactions
+    all_passed &= test_constraint_unification_integration();
+    // all_passed &= test_constraint_linear_integration();
+    // all_passed &= test_constraint_async_integration();
+    // all_passed &= test_constraint_optimization_integration();
+    // all_passed &= test_full_system_integration();
+    
     all_passed &= test_non_deterministic_choice();
     all_passed &= test_free_variables();
     all_passed &= test_environment();
@@ -1318,10 +1758,15 @@ int main() {
     all_passed &= test_async_sleep();
     all_passed &= test_async_linear_integration();
     
+    all_passed &= test_constraint_unification_integration();
+    all_passed &= test_constraint_linear_integration();
+    all_passed &= test_constraint_async_integration();
+    all_passed &= test_full_system_integration();
+    
     test_printing();
     
     // Cleanup
-    flint_cleanup_runtime();
+    // flint_cleanup_runtime();
     
     if (all_passed) {
         printf("\n🎉 All tests passed! Runtime is working correctly.\n");

@@ -74,6 +74,12 @@ bool flint_unify_variables(LogicalVar* var1, LogicalVar* var2, Environment* env)
     // Bind the variable
     bind_var->binding = target_val;
     
+    // Integrate with constraint system for both variables
+    if (env && env->constraint_store) {
+        flint_solve_constraints(env->constraint_store, bind_var->id, env);
+        flint_solve_constraints(env->constraint_store, bind_to->id, env);
+    }
+    
     // Resume any suspensions waiting on the bound variable
     flint_resume_suspensions(bind_var->id, env);
     
@@ -136,6 +142,11 @@ bool flint_unify(Value* val1, Value* val2, Environment* env) {
         // Bind the variable
         var->binding = val2;
         
+        // Integrate with constraint system if available
+        if (env && env->constraint_store) {
+            flint_solve_constraints(env->constraint_store, var->id, env);
+        }
+        
         // Resume suspensions
         flint_resume_suspensions(var->id, env);
         
@@ -152,6 +163,11 @@ bool flint_unify(Value* val1, Value* val2, Environment* env) {
         
         // Bind the variable
         var->binding = val1;
+        
+        // Integrate with constraint system if available
+        if (env && env->constraint_store) {
+            flint_solve_constraints(env->constraint_store, var->id, env);
+        }
         
         // Resume suspensions
         flint_resume_suspensions(var->id, env);
@@ -293,4 +309,153 @@ VarId* flint_get_free_vars(Value* val, size_t* count) {
     collect_free_vars_recursive(val, &vars, count, &capacity);
     
     return vars;
+}
+
+// =============================================================================
+// UNIFIED CONSTRAINT-UNIFICATION INTERFACE
+// =============================================================================
+
+/**
+ * Unified constraint-aware unification that handles both binding and constraint propagation
+ * This is the preferred interface for Flint's functional logic programming
+ */
+bool flint_unify_with_constraints(Value* val1, Value* val2, Environment* env) {
+    if (!env || !env->constraint_store) {
+        // Fall back to basic unification if no constraint store
+        return flint_unify(val1, val2, env);
+    }
+    
+    // Perform unification first
+    bool unified = flint_unify(val1, val2, env);
+    if (!unified) return false;
+    
+    // After successful unification, trigger constraint propagation for all involved variables
+    flint_propagate_constraints_from_values(env->constraint_store, val1, val2, env);
+    
+    return true;
+}
+
+/**
+ * Create a constraint relationship between variables and ensure they're in the environment
+ * This handles the common pattern of creating variables and immediately constraining them
+ */
+bool flint_constrain_variables(Environment* env, VarId* var_ids, size_t var_count, 
+                              ArithmeticOp constraint_type, double constant,
+                              ConstraintStrength strength) {
+    if (!env || !env->constraint_store || !var_ids || var_count == 0) return false;
+    
+    // Add the constraint (variables will be auto-created in constraint system if needed)
+    FlintConstraint* constraint = flint_add_arithmetic_constraint(
+        env->constraint_store, constraint_type, var_ids, var_count, constant, strength);
+    
+    return constraint != NULL;
+}
+
+/**
+ * Convenience function for the common X + Y = Z constraint pattern
+ */
+bool flint_add_sum_constraint(Environment* env, VarId x, VarId y, VarId z, ConstraintStrength strength) {
+    VarId vars[] = {x, y, z};
+    return flint_constrain_variables(env, vars, 3, ARITH_ADD, 0.0, strength);
+}
+
+/**
+ * Convenience function for the common X = constant constraint pattern
+ */
+bool flint_constrain_to_value(Environment* env, VarId var_id, double value, ConstraintStrength strength) {
+    // Use suggestion mechanism for setting values
+    if (env->constraint_store) {
+        flint_suggest_constraint_value(env->constraint_store, var_id, value);
+        return flint_solve_constraints(env->constraint_store, var_id, env);
+    }
+    
+    return false;
+}
+
+/**
+ * Propagate constraints from values that were just unified
+ * This extracts variable IDs from values and triggers constraint solving
+ */
+void flint_propagate_constraints_from_values(ConstraintStore* store, Value* val1, Value* val2, Environment* env) {
+    if (!store || !env) return;
+    
+    // Extract variable IDs from values and propagate constraints
+    VarId vars_to_propagate[16]; // Reasonable limit for most cases
+    size_t var_count = 0;
+    
+    flint_extract_variable_ids(val1, vars_to_propagate, &var_count, 16);
+    flint_extract_variable_ids(val2, vars_to_propagate, &var_count, 16);
+    
+    // Trigger constraint solving for all extracted variables
+    for (size_t i = 0; i < var_count; i++) {
+        flint_solve_constraints(store, vars_to_propagate[i], env);
+    }
+}
+
+/**
+ * Helper to extract variable IDs from a value (recursively for complex structures)
+ */
+void flint_extract_variable_ids(Value* val, VarId* var_array, size_t* count, size_t max_vars) {
+    if (!val || !var_array || !count || *count >= max_vars) return;
+    
+    val = flint_deref(val);
+    
+    switch (val->type) {
+        case VAL_LOGICAL_VAR: {
+            LogicalVar* var = val->data.logical_var;
+            // Add this variable ID if not already in array
+            for (size_t i = 0; i < *count; i++) {
+                if (var_array[i] == var->id) return; // Already added
+            }
+            var_array[*count] = var->id;
+            (*count)++;
+            break;
+        }
+        
+        case VAL_LIST:
+            for (size_t i = 0; i < val->data.list.length && *count < max_vars; i++) {
+                flint_extract_variable_ids(&val->data.list.elements[i], var_array, count, max_vars);
+            }
+            break;
+            
+        case VAL_RECORD:
+            for (size_t i = 0; i < val->data.record.field_count && *count < max_vars; i++) {
+                flint_extract_variable_ids(&val->data.record.field_values[i], var_array, count, max_vars);
+            }
+            break;
+            
+        default:
+            // Ground terms don't contain variables
+            break;
+    }
+}
+
+/**
+ * Register a LogicalVar from a Value with the environment
+ * This ensures constraint solving can find the variable
+ */
+bool flint_register_variable_with_env(Environment* env, Value* var_value) {
+    if (!env || !var_value || var_value->type != VAL_LOGICAL_VAR) return false;
+    
+    LogicalVar* var = var_value->data.logical_var;
+    
+    // Check if variable is already in environment
+    for (size_t i = 0; i < env->var_count; i++) {
+        if (env->variables[i]->id == var->id) {
+            // Update pointer to use the same LogicalVar instance
+            env->variables[i] = var;
+            return true;
+        }
+    }
+    
+    // Add new variable to environment
+    if (env->var_count >= env->capacity) {
+        env->capacity = (env->capacity == 0) ? 8 : (env->capacity * 2);
+        env->variables = realloc(env->variables, sizeof(LogicalVar*) * env->capacity);
+    }
+    
+    env->variables[env->var_count] = var;
+    env->var_count++;
+    
+    return true;
 }

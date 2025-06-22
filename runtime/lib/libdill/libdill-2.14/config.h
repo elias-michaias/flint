@@ -27,4 +27,3 @@
 #define HAVE_UNISTD_H 1
 #define HAVE_DLFCN_H 1
 #define LT_OBJDIR ".libs/"
-#define DILL_SHARED 1

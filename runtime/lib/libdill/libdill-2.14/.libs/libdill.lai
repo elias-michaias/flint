@@ -5,10 +5,10 @@
 # It is necessary for linking the library.
 
 # The name that we can dlopen(3).
-dlname='libdill.20.dylib'
+dlname=''
 
 # Names of this library.
-library_names='libdill.20.dylib libdill.dylib'
+library_names=''
 
 # The name of the static archive.
 old_library='libdill.a'
@@ -38,4 +38,4 @@ dlopen=''
 dlpreopen=''
 
 # Directory that this library needs to be installed in:
-libdir='/Users/emskeirik/Projects/flint-new/runtime/lib/libdill-2.14/../libdill-install/lib'
+libdir='/Users/emskeirik/Projects/flint-new/runtime/lib/libdill/libdill-install/lib'

@@ -63,6 +63,35 @@ bool flint_occurs_check(VarId var_id, Value* val);
 // Dereference a value (follow variable bindings)
 Value* flint_deref(Value* val);
 
+// Safe dereference with null checking (used internally)
+Value* flint_deref_value(Value* val);
+
+// =============================================================================
+// UNIFIED CONSTRAINT-UNIFICATION INTERFACE
+// =============================================================================
+
+// Unified constraint-aware unification (preferred for functional logic programming)
+bool flint_unify_with_constraints(Value* val1, Value* val2, Environment* env);
+
+// Create constraint relationships with automatic variable management
+bool flint_constrain_variables(Environment* env, VarId* var_ids, size_t var_count, 
+                              ArithmeticOp constraint_type, double constant,
+                              ConstraintStrength strength);
+
+// Convenience functions for common constraint patterns
+bool flint_add_sum_constraint(Environment* env, VarId x, VarId y, VarId z, ConstraintStrength strength);
+bool flint_constrain_to_value(Environment* env, VarId var_id, double value, ConstraintStrength strength);
+
+// Constraint propagation helpers
+void flint_propagate_constraints_from_values(ConstraintStore* store, Value* val1, Value* val2, Environment* env);
+void flint_extract_variable_ids(Value* val, VarId* var_array, size_t* count, size_t max_vars);
+
+// Variable registration helper
+bool flint_register_variable_with_env(Environment* env, Value* var_value);
+
+// Variable registration with environment
+bool flint_register_variable_with_env(Environment* env, Value* var_value);
+
 // =============================================================================
 // NARROWING ENGINE  
 // =============================================================================

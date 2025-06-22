@@ -122,12 +122,22 @@ FlintConstraintVar* flint_get_or_create_constraint_var(ConstraintStore* store, V
 void flint_suggest_constraint_value(ConstraintStore* store, VarId var_id, double value) {
     if (!store) return;
     
-    FlintConstraintVar* var = find_constraint_var(store, var_id);
-    if (!var) return;
+    printf("DEBUG: flint_suggest_constraint_value called for var %llu with value %f\n", (unsigned long long)var_id, value);
     
-    // Add edit constraint and suggest value
-    am_addedit(var->amoeba_var, AM_MEDIUM);
-    am_suggest(var->amoeba_var, (am_Num)value);
+    FlintConstraintVar* var = find_constraint_var(store, var_id);
+    if (!var) {
+        printf("DEBUG: Constraint variable %llu not found, creating it\n", (unsigned long long)var_id);
+        var = flint_get_or_create_constraint_var(store, var_id, NULL);
+    }
+    
+    if (var) {
+        printf("DEBUG: Adding edit constraint and suggesting value %f\n", value);
+        // Add edit constraint and suggest value
+        am_addedit(var->amoeba_var, AM_MEDIUM);
+        am_suggest(var->amoeba_var, (am_Num)value);
+    } else {
+        printf("DEBUG: Failed to create constraint variable for %llu\n", (unsigned long long)var_id);
+    }
 }
 
 double flint_get_constraint_value(ConstraintStore* store, VarId var_id) {
@@ -181,8 +191,8 @@ FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store,
             if (var_count >= 3) {
                 am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
                 am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, 1.0);
+                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, -1.0);  // Z gets -1.0 coefficient
                 am_setrelation(amoeba_constraint, AM_EQUAL);
-                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, 1.0);
                 if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
             }
             break;
@@ -192,18 +202,24 @@ FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store,
             if (var_count >= 3) {
                 am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
                 am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, -1.0);
+                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, -1.0);  // Z gets -1.0 coefficient
                 am_setrelation(amoeba_constraint, AM_EQUAL);
-                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, 1.0);
                 if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
             }
             break;
             
         case ARITH_EQUAL:
-            // X = Y  ->  X - Y = 0
-            if (var_count >= 2) {
+            // Handle both X = Y and X = constant cases
+            if (var_count == 1 && constant != 0.0) {
+                // X = constant  ->  X = constant
                 am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
                 am_setrelation(amoeba_constraint, AM_EQUAL);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, 1.0);
+                am_addconstant(amoeba_constraint, (am_Num)constant);
+            } else if (var_count >= 2) {
+                // X = Y  ->  X - Y = 0
+                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
+                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, -1.0);  // Y gets -1.0 coefficient
+                am_setrelation(amoeba_constraint, AM_EQUAL);
                 if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
             }
             break;
@@ -269,26 +285,62 @@ FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store,
 bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* env) {
     if (!store || !store->solver) return true;
     
-    // The amoeba solver automatically maintains consistency
-    // We just need to handle unification constraints separately
+    printf("DEBUG: flint_solve_constraints called for var %llu\n", (unsigned long long)var_id);
     
-    // Handle unification constraints (not managed by amoeba)
+    // Handle unification constraints - propagate values from unification to constraints
     LogicalVar* var = flint_lookup_variable(env, var_id);
-    if (!var) return true;
-    
-    // If this variable is bound, try to suggest its value to the constraint solver
-    if (var->binding && var->binding->type == VAL_INTEGER) {
-        flint_suggest_constraint_value(store, var_id, (double)var->binding->data.integer);
-    } else if (var->binding && var->binding->type == VAL_FLOAT) {
-        flint_suggest_constraint_value(store, var_id, var->binding->data.float_val);
+    if (var && var->binding) {
+        Value* binding = flint_deref_value(var->binding);
+        
+        printf("DEBUG: Variable %llu has binding of type %d\n", (unsigned long long)var_id, binding->type);
+        
+        // If this variable is bound to a concrete value, suggest it to the constraint solver
+        if (binding->type == VAL_INTEGER) {
+            printf("DEBUG: Suggesting integer value %lld for var %llu\n", (long long)binding->data.integer, (unsigned long long)var_id);
+            flint_suggest_constraint_value(store, var_id, (double)binding->data.integer);
+        } else if (binding->type == VAL_FLOAT) {
+            printf("DEBUG: Suggesting float value %f for var %llu\n", binding->data.float_val, (unsigned long long)var_id);
+            flint_suggest_constraint_value(store, var_id, binding->data.float_val);
+        }
+    } else {
+        printf("DEBUG: Variable %llu has no binding\n", (unsigned long long)var_id);
     }
     
-    // Update all variables in the constraint system
-    if (!store->auto_update) {
-        am_updatevars(store->solver);
+    // Update all variables in the constraint system to propagate constraints
+    printf("DEBUG: Updating constraint variables\n");
+    am_updatevars(store->solver);
+    
+    // Now propagate constraint values back to unification if needed
+    FlintConstraintVar* constraint_var = flint_get_or_create_constraint_var(store, var_id, NULL);
+    if (constraint_var) {
+        double constraint_value = am_value(constraint_var->amoeba_var);
+        printf("DEBUG: Constraint variable %llu has value %f\n", (unsigned long long)var_id, constraint_value);
+        
+        // Only propagate constraint values to unbound variables if the constraint value seems determined
+        // and the variable doesn't already have a unification binding
+        if (!var || !var->binding) {
+            // Don't auto-bind variables to constraint values - let unification drive the process
+            printf("DEBUG: Not auto-binding unbound variable %llu to constraint value %f\n", (unsigned long long)var_id, constraint_value);
+        }
+    } else {
+        printf("DEBUG: No constraint variable found for var %llu\n", (unsigned long long)var_id);
     }
     
     return true;
+}
+
+// Helper function to safely dereference values
+Value* flint_deref_value(Value* val) {
+    if (!val) return NULL;
+    
+    if (val->type == VAL_LOGICAL_VAR) {
+        LogicalVar* var = val->data.logical_var;
+        if (var->binding) {
+            return flint_deref_value(var->binding);
+        }
+    }
+    
+    return val;
 }
 
 // Legacy functions for compatibility (now redirects to new constraint system)
