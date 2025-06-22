@@ -1,2 +1,28 @@
+# Rust build artifacts
 /target
+
+# VS Code settings
 .vscode
+
+# Runtime build artifacts
+runtime/object/
+runtime/out/
+runtime/test/test_runtime
+runtime/test/*.dSYM/
+runtime/test/*.o
+runtime/.deps/
+
+# C build artifacts (general)
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# macOS debug symbols
+*.dSYM/
+
+# Backup files
+*~
+*.bak
+*.swp

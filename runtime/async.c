@@ -448,7 +448,7 @@ int64_t flint_now(void) {
 void flint_init_async_system(Environment* env) {
     AsyncContext* ctx = flint_create_async_context(env);
     flint_set_async_context(ctx);
-    printf("Async system initialized with structured concurrency support\n");
+    // printf("Async system initialized with structured concurrency support\n");
 }
 
 // Cleanup the async system
@@ -487,5 +487,5 @@ Value* flint_narrow_async_await(Value** args, size_t arg_count, Environment* env
 void flint_register_async_functions(void) {
     // These would be registered with the narrowing system
     // Implementation depends on how the narrowing registry works
-    printf("Async functions registered with narrowing system\n");
+    // printf("Async functions registered with narrowing system\n");
 }

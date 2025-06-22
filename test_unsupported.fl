@@ -1,0 +1,5 @@
+// Test program with unsupported features
+fn main() -> Unit {
+    let x = λy -> y + 1  // Lambda expression - should trigger unsupported feature error
+    x
+}

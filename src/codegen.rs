@@ -1,119 +1,174 @@
+// Code generation for Flint functional logic language
 use crate::ast::*;
-use crate::resource::{LinearUsageAnalysis, LinearError};
+use crate::diagnostic::{Diagnostic, SourceLocation};
 use std::collections::HashMap;
 use std::fmt::Write;
 
-/// Memory management strategy for generated code
+#[derive(Debug, thiserror::Error)]
+pub enum CodegenError {
+    #[error("Code generation error")]
+    Diagnostic(Diagnostic),
+    
+    #[error("IO error: {0}")]
+    IoError(#[from] std::fmt::Error),
+}
+
+impl CodegenError {
+    pub fn unsupported_feature(feature: &str) -> Self {
+        let diagnostic = Diagnostic::error(format!("Unsupported feature: {}", feature))
+            .with_help("This feature is not yet implemented in the code generator".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn unsupported_feature_at(feature: &str, location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error(format!("Unsupported feature: {}", feature))
+            .with_location(location)
+            .with_help("This feature is not yet implemented in the code generator".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn invalid_ast(message: &str) -> Self {
+        let diagnostic = Diagnostic::error(format!("Invalid AST: {}", message))
+            .with_help("The AST structure is malformed or contains invalid data".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn invalid_ast_at(message: &str, location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error(format!("Invalid AST: {}", message))
+            .with_location(location)
+            .with_help("The AST structure is malformed or contains invalid data".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn type_error(message: &str) -> Self {
+        let diagnostic = Diagnostic::error(format!("Type error: {}", message))
+            .with_help("There is a type mismatch or invalid type usage".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn type_error_at(message: &str, location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error(format!("Type error: {}", message))
+            .with_location(location)
+            .with_help("There is a type mismatch or invalid type usage".to_string());
+        Self::Diagnostic(diagnostic)
+    }
+}
+
+// Metadata for resource consumption tracking
 #[derive(Debug, Clone)]
-pub enum MemoryStrategy {
-    /// Compiler generates explicit free() calls at consumption points
-    CompilerDirected,
-    /// Runtime manages deallocation using compiler metadata  
-    RuntimeManaged,
-    /// Hybrid: compiler metadata + optional direct calls for optimization
-    Hybrid { optimize: bool },
+struct ConsumptionMetadata {
+    resource_name: String,
+    consumption_point: String,
+    is_optional: bool,
+    is_persistent: bool,
+    estimated_size: usize,
 }
 
-/// Metadata about resource consumption for runtime
+// Information about functions for analysis
 #[derive(Debug, Clone)]
-pub struct ConsumptionMetadata {
-    /// Resource name that gets consumed
-    pub resource_name: String,
-    /// Point in execution where consumption happens
-    pub consumption_point: String,
-    /// Whether this is an optional resource
-    pub is_optional: bool,
-    /// Whether this is a persistent resource (doesn't get deallocated)
-    pub is_persistent: bool,
-    /// Estimated memory size
-    pub estimated_size: usize,
+struct FunctionInfo {
+    name: String,
+    is_deterministic: bool,
+    has_logic_vars: bool,
+    effects: Vec<String>,
 }
 
-/// Information about a recursive rule pattern
+// Information about effect handlers
 #[derive(Debug, Clone)]
-pub struct RecursiveRuleInfo {
-    /// The name of the recursive predicate
-    pub predicate_name: String,
-    /// Whether it's direct recursion (predicate appears in both head and body)
-    pub is_direct_recursion: bool,
-    /// Whether it's transitive (like ancestor relation)
-    pub is_transitive: bool,
-    /// Base case rule index (if any)
-    pub base_case_rule: Option<usize>,
-    /// Recursive rule index
-    pub recursive_rule: usize,
+struct EffectHandlerInfo {
+    effect_name: String,
+    handler_name: String,
+    operation_functions: HashMap<String, String>,
 }
 
-pub struct CodeGenerator {
-    /// Counter for generating unique variable names
-    var_counter: usize,
-    /// Counter for generating unique label names
-    label_counter: usize,
-    /// Function definitions
-    functions: HashMap<String, Function>,
-    /// Generated C code
-    output: String,
-    /// Enable debug output
-    debug: bool,
-    /// Memory management strategy
-    memory_strategy: MemoryStrategy,
-    /// Consumption metadata for runtime
-    consumption_metadata: Vec<ConsumptionMetadata>,
-    /// Linear usage analysis results
-    usage_analysis: Option<LinearUsageAnalysis>,
-    /// Detected recursive rules
-    recursive_rules: Vec<RecursiveRuleInfo>,
+// Compilation context for expressions
+#[derive(Debug, Clone)]
+struct CompilationContext {
+    in_logic_context: bool,
+    effect_handlers: Vec<String>,
+    filename: String,
+    source: String,
 }
 
-impl CodeGenerator {
-    pub fn new() -> Self {
+impl CompilationContext {
+    fn new() -> Self {
         Self {
-            var_counter: 0,
-            label_counter: 0,
-            functions: HashMap::new(),
-            output: String::new(),
-            debug: false,
-            memory_strategy: MemoryStrategy::Hybrid { optimize: true },
-            consumption_metadata: Vec::new(),
-            usage_analysis: None,
-            recursive_rules: Vec::new(),
+            in_logic_context: false,
+            effect_handlers: Vec::new(),
+            filename: "<unknown>".to_string(),
+            source: String::new(),
         }
     }
     
+    fn with_source(filename: String, source: String) -> Self {
+        Self {
+            in_logic_context: false,
+            effect_handlers: Vec::new(),
+            filename,
+            source,
+        }
+    }
+}
+
+/// Code generator for Flint functional logic language
+pub struct CodeGenerator {
+    output: String,
+    var_counter: usize,
+    label_counter: usize,
+    consumption_metadata: Vec<ConsumptionMetadata>,
+    functions: HashMap<String, FunctionInfo>,
+    effect_handlers: HashMap<String, EffectHandlerInfo>,
+    debug: bool,
+}
+
+impl CodeGenerator {
+    /// Create a new code generator
+    pub fn new() -> Self {
+        Self {
+            output: String::new(),
+            var_counter: 0,
+            label_counter: 0,
+            consumption_metadata: Vec::new(),
+            functions: HashMap::new(),
+            effect_handlers: HashMap::new(),
+            debug: false,
+        }
+    }
+
+    /// Enable debug output
     pub fn with_debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self
     }
-    
-    pub fn with_memory_strategy(mut self, strategy: MemoryStrategy) -> Self {
-        self.memory_strategy = strategy;
-        self
-    }
-    
-    pub fn with_usage_analysis(mut self, analysis: LinearUsageAnalysis) -> Self {
-        self.usage_analysis = Some(analysis);
-        self
-    }
-    
+
     fn fresh_var(&mut self) -> String {
         let var = format!("v{}", self.var_counter);
         self.var_counter += 1;
         var
     }
-    
+
     fn fresh_label(&mut self) -> String {
         let label = format!("L{}", self.label_counter);
         self.label_counter += 1;
         label
     }
-    
-    pub fn generate_unique_var(&mut self, prefix: &str) -> String {
+
+    fn fresh_var_with_prefix(&mut self, prefix: &str) -> String {
         let var = format!("{}_{}", prefix, self.var_counter);
         self.var_counter += 1;
         var
     }
-    
-    /// Generate consumption metadata for a resource
+
+    /// Convert a Flint variable to a C variable name
+    fn var_to_c_name(&self, var: &Variable) -> String {
+        if var.is_logic_var {
+            format!("logic_{}", var.name)
+        } else {
+            format!("var_{}", var.name)
+        }
+    }
+
+    /// Add consumption metadata for a resource
     fn add_consumption_metadata(&mut self, resource_name: String, point: String, is_optional: bool, is_persistent: bool) {
         self.consumption_metadata.push(ConsumptionMetadata {
             resource_name,
@@ -123,916 +178,729 @@ impl CodeGenerator {
             estimated_size: 64, // Default estimate
         });
     }
-    
-    /// Generate C code for compiler-directed deallocation
-    fn generate_direct_deallocation(&mut self, resource_name: &str) -> Result<(), std::fmt::Error> {
-        match self.memory_strategy {
-            MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { optimize: true } => {
-                writeln!(self.output, "    // Compiler-directed deallocation of {}", resource_name)?;
-                writeln!(self.output, "    if (resource_{} && !resource_{}->persistent) {{", resource_name, resource_name)?;
-                writeln!(self.output, "        free_linear_resource(kb, resource_{});", resource_name)?;
-                writeln!(self.output, "        resource_{} = NULL; // Prevent use-after-free", resource_name)?;
-                writeln!(self.output, "    }}")?;
-            }
-            _ => {
-                // For runtime-managed, just add metadata
-                writeln!(self.output, "    // Runtime will handle deallocation of {}", resource_name)?;
-            }
-        }
-        Ok(())
-    }
-    
-    /// Generate metadata registration for runtime memory management  
-    fn generate_consumption_metadata(&mut self) -> Result<(), std::fmt::Error> {
-        if matches!(self.memory_strategy, MemoryStrategy::RuntimeManaged | MemoryStrategy::Hybrid { .. }) {
-            writeln!(self.output, "    // Register consumption metadata for runtime memory management")?;
-            for metadata in &self.consumption_metadata {
-                writeln!(self.output, 
-                    "    register_consumption_metadata(kb, \"{}\", \"{}\", {}, {}, {});",
-                    metadata.resource_name,
-                    metadata.consumption_point,
-                    if metadata.is_optional { 1 } else { 0 },
-                    if metadata.is_persistent { 1 } else { 0 },
-                    metadata.estimated_size
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
 
-impl CodeGenerator {
-    pub fn generate(&mut self, program: &Program) -> Result<String, std::fmt::Error> {
+    /// Generate C code for a complete program
+    pub fn generate(&mut self, program: &Program) -> Result<String, CodegenError> {
+        self.generate_with_context(program, "<unknown>", "")
+    }
+    
+    /// Generate C code for a complete program with source context
+    pub fn generate_with_context(&mut self, program: &Program, filename: &str, source: &str) -> Result<String, CodegenError> {
         self.output.clear();
         
-        // Detect recursive rule patterns
-        self.detect_recursive_rules(program);
+        let mut ctx = CompilationContext::with_source(filename.to_string(), source.to_string());
         
-        // Generate C header
+        // Generate C header includes
         self.generate_header()?;
         
-        // Generate type system for subtyping support
-        self.generate_type_system(&program.type_definitions)?;
-        
-        // Store function definitions
-        for func in &program.functions {
-            self.functions.insert(func.name.clone(), func.clone());
+        // Process C imports first
+        for import in program.c_imports() {
+            self.process_c_import(import)?;
         }
         
-        // Generate function declarations
-        for func in &program.functions {
-            self.generate_function_declaration(func)?;
+        // Generate type definitions
+        for typedef in program.types() {
+            self.generate_type_def(typedef, &ctx)?;
         }
         
-        // Always generate logical runtime for logic programs
-        self.generate_logical_runtime()?;
-        
-        // Generate logical programming structures
-        if !program.queries.is_empty() {
-            // When we have queries, we'll generate clauses inline in the main function
-            // so we just need the basic KB structure
-            self.generate_empty_kb()?;
-        } else if !program.clauses.is_empty() {
-            self.generate_clauses(&program.clauses)?;
-        } else {
-            // Even with no clauses, we need the basic KB structure
-            self.generate_empty_kb()?;
+        // Generate effect declarations
+        for effect in program.effects() {
+            self.generate_effect_decl(effect, &ctx)?;
         }
         
-        // Generate function definitions
-        for func in &program.functions {
-            self.generate_function_definition(func)?;
+        // Generate effect handlers
+        for handler in program.handlers() {
+            self.generate_effect_handler(handler, &mut ctx)?;
+        }
+        
+        // Generate function declarations first (skip main function - it's handled specially)
+        for func in program.functions() {
+            if func.name != "main" {
+                self.generate_function_declaration(func, &ctx)?;
+            }
+        }
+        
+        // Generate function definitions (skip main function - it's handled specially)
+        for func in program.functions() {
+            if func.name != "main" {
+                self.generate_function_definition(func, &mut ctx)?;
+            }
         }
         
         // Generate main function
-        if let Some(ref main_query) = program.main_goal {
-            // TODO: Generate main from query instead of expression
-            // self.generate_main_query(main_query)?;
-            self.generate_multiple_queries_main(&program.clauses, &[main_query.clone()], &program.term_types, &program.type_definitions)?;
-        } else if !program.queries.is_empty() {
-            // Use the multiple queries version which we'll need to implement
-            self.generate_multiple_queries_main(&program.clauses, &program.queries, &program.term_types, &program.type_definitions)?;
+        if let Some(main_func_name) = program.main_function() {
+            self.generate_main_function_with_body(program, main_func_name, &ctx)?;
+        } else if let Some(main_func) = program.functions().iter().find(|f| f.name == "main") {
+            // If there's a function named "main", embed its body in the C main
+            self.generate_main_function_with_body(program, "main", &ctx)?;
         } else {
-            // Default main for logic programs
-            self.generate_logic_main(&program.clauses)?;
+            self.generate_default_main()?;
         }
+        
+        // Generate runtime functions
+        self.generate_runtime_functions()?;
         
         Ok(self.output.clone())
     }
-    
-    fn generate_header(&mut self) -> Result<(), std::fmt::Error> {
+
+    fn generate_header(&mut self) -> Result<(), CodegenError> {
+        writeln!(self.output, "// Generated by Flint compiler")?;
         writeln!(self.output, "#include <stdio.h>")?;
         writeln!(self.output, "#include <stdlib.h>")?;
-        writeln!(self.output, "#include <stdint.h>")?;
         writeln!(self.output, "#include <string.h>")?;
-        writeln!(self.output, "#include \"runtime.h\"")?;
-        writeln!(self.output)?;
-        Ok(())
-    }
-    
-    fn generate_type_system(&mut self, type_definitions: &[TypeDefinition]) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "// Generated type system for subtyping support")?;
+        writeln!(self.output, "#include <stdbool.h>")?;
+        writeln!(self.output, "#include <stdint.h>")?;
+        writeln!(self.output, "#include \"../runtime/runtime.h\"")?;
         writeln!(self.output)?;
         
-        // Generate additional type index constants for user-defined types
-        writeln!(self.output, "// Additional type indices for user-defined types")?;
-        for (i, type_def) in type_definitions.iter().enumerate() {
-            let type_index = i + 3; // TYPE_IDX_USER_START = 3
-            writeln!(self.output, "#define TYPE_IDX_{} {}", 
-                type_def.name.to_uppercase(), type_index)?;
+        // Forward declarations for common types
+        writeln!(self.output, "// Type definitions")?;
+        writeln!(self.output, "typedef struct flint_list flint_list_t;")?;
+        writeln!(self.output, "typedef struct flint_record flint_record_t;")?;
+        writeln!(self.output, "typedef void* flint_value_t;")?;
+        writeln!(self.output, "typedef void (*function_ptr_t)(void);")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn process_c_import(&mut self, import: &CImport) -> Result<(), CodegenError> {
+        // List of headers that are already included by default
+        let default_headers = ["stdio.h", "stdlib.h", "string.h", "stdbool.h", "stdint.h"];
+        
+        if default_headers.contains(&import.header_file.as_str()) {
+            writeln!(self.output, "// C Import: {} as {} (already included)", import.header_file, import.alias)?;
+        } else {
+            writeln!(self.output, "// C Import: {} as {}", import.header_file, import.alias)?;
+            writeln!(self.output, "#include \"{}\"", import.header_file)?;
         }
         writeln!(self.output)?;
-        
-        // Generate type ID constants for user-defined types
-        writeln!(self.output, "// Type ID constants for user-defined types")?;
-        for type_def in type_definitions {
-            let distinct = if type_def.distinct { "true" } else { "false" };
-            writeln!(self.output, "#define TYPE_{} MAKE_TYPE_ID(TYPE_IDX_{}, {})",
-                type_def.name.to_uppercase(),
-                type_def.name.to_uppercase(),
-                distinct)?;
-        }
-        writeln!(self.output)?;
-        
-        // Generate symbol ID constants for user-defined types
-        writeln!(self.output, "// Symbol ID constants for user-defined types")?;
-        for (i, type_def) in type_definitions.iter().enumerate() {
-            writeln!(self.output, "#define SYM_{} {}", 
-                type_def.name.to_uppercase(), i + 10)?; // Start after built-in symbols
-        }
-        writeln!(self.output)?;
-        
-        // Generate type metadata table
-        writeln!(self.output, "// Type metadata for inheritance and compatibility")?;
-        writeln!(self.output, "static const type_metadata_t TYPE_METADATA_TABLE[] = {{")?;
-        
-        // Base types
-        writeln!(self.output, "    {{TYPE_ATOM, SYM_ATOM, 0xFFFFFFFF}},     // atom (root)")?;
-        writeln!(self.output, "    {{TYPE_INTEGER, SYM_INTEGER, 0x00000002}}, // integer")?;
-        writeln!(self.output, "    {{TYPE_VARIABLE, SYM_VARIABLE, 0x00000004}}, // variable")?;
-        
-        // User-defined types
-        for (i, type_def) in type_definitions.iter().enumerate() {
-            let parent_type = match &type_def.supertype {
-                Some(LogicType::Atom) => "TYPE_ATOM".to_string(),
-                Some(LogicType::Integer) => "TYPE_INTEGER".to_string(),
-                Some(LogicType::Named(name)) => format!("TYPE_{}", name.to_uppercase()),
-                _ => "TYPE_ATOM".to_string(), // Default to atom
-            };
-            
-            // Generate simple compatibility mask (for now, just self + parent)
-            let self_bit = 1u32 << (i + 3);
-            let parent_bit = match &type_def.supertype {
-                Some(LogicType::Atom) => 1u32,      // Bit 0 for atom
-                Some(LogicType::Integer) => 1u32 << 1, // Bit 1 for integer
-                _ => 1u32, // Default to atom
-            };
-            let compatibility_mask = if type_def.distinct {
-                self_bit // Distinct types only compatible with themselves
-            } else {
-                self_bit | parent_bit // Non-distinct compatible with self and parent
-            };
-            
-            writeln!(self.output, "    {{{}, {}, 0x{:08X}}}, // {}",
-                parent_type,
-                format!("SYM_{}", type_def.name.to_uppercase()),
-                compatibility_mask,
-                type_def.name)?;
-        }
-        
-        writeln!(self.output, "}};")?;
-        writeln!(self.output)?;
-        
-        // Generate type system initialization
-        writeln!(self.output, "// Initialize type system")?;
-        writeln!(self.output, "static void init_generated_type_system() {{")?;
-        writeln!(self.output, "    extern const type_metadata_t* TYPE_METADATA;")?;
-        writeln!(self.output, "    extern size_t TYPE_COUNT;")?;
-        writeln!(self.output, "    TYPE_METADATA = TYPE_METADATA_TABLE;")?;
-        writeln!(self.output, "    TYPE_COUNT = sizeof(TYPE_METADATA_TABLE) / sizeof(type_metadata_t);")?;
-        writeln!(self.output, "}}")?;
-        writeln!(self.output)?;
-        
         Ok(())
     }
-    
-    fn generate_function_declaration(&mut self, func: &Function) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int64_t {}(int64_t {});", func.name, func.param)?;
-        Ok(())
-    }
-    
-    fn generate_function_definition(&mut self, func: &Function) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int64_t {}(int64_t {}) {{", func.name, func.param)?;
-        
-        // Generate function body
-        let mut env = HashMap::new();
-        env.insert(func.param.clone(), func.param.clone());
-        
-        let result_var = self.generate_expr(&func.body, &mut env)?;
-        writeln!(self.output, "    return {};", result_var)?;
-        writeln!(self.output, "}}")?;
-        writeln!(self.output)?;
-        
-        Ok(())
-    }
-    
-    fn generate_main(&mut self, expr: &Expr) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int main() {{")?;
-        
-        let mut env = HashMap::new();
-        let result_var = self.generate_expr(expr, &mut env)?;
-        
-        writeln!(self.output, "    printf(\"%lld\\n\", {});", result_var)?;
-        writeln!(self.output, "    return 0;")?;
-        writeln!(self.output, "}}")?;
-        
-        Ok(())
-    }
-    
-    fn generate_expr(&mut self, expr: &Expr, env: &mut HashMap<String, String>) -> Result<String, std::fmt::Error> {
-        match expr {
-            Expr::Var(name) => {
-                Ok(env.get(name).cloned().unwrap_or_else(|| name.clone()))
-            }
-            
-            Expr::Int(n) => Ok(n.to_string()),
-            
-            Expr::Str(s) => {
-                // For simplicity, we'll just use the string as a comment
-                // In a real implementation, you'd want proper string handling
-                Ok(format!("/* {} */ 0", s))
-            }
-            
-            Expr::App { func, args } => {
-                if args.len() != 1 {
-                    return Ok("0".to_string()); // Error case
+
+    fn generate_type_def(&mut self, typedef: &TypeDef, _ctx: &CompilationContext) -> Result<(), CodegenError> {
+        match typedef {
+            TypeDef::Record { name, fields } => {
+                writeln!(self.output, "// Record type: {}", name)?;
+                writeln!(self.output, "typedef struct {}_struct {{", name)?;
+                
+                for (field_name, field_type) in fields.iter() {
+                    writeln!(self.output, "    {} {};", 
+                           self.flint_type_to_c_type(field_type), field_name)?;
                 }
                 
-                let arg_var = self.generate_expr(&args[0], env)?;
-                let result_var = self.fresh_var();
+                writeln!(self.output, "}} {}_t;", name)?;
                 
-                writeln!(self.output, "    int64_t {} = {}({});", result_var, func, arg_var)?;
-                Ok(result_var)
-            }
-            
-            Expr::Lambda { param, body } => {
-                // Lambda expressions are compiled as anonymous functions
-                // For simplicity, we'll generate them inline
-                let lambda_name = format!("lambda_{}", self.var_counter);
-                self.var_counter += 1;
+                // Generate constructor function
+                writeln!(self.output, "{}_t* create_{}(", name, name)?;
+                for (i, (field_name, field_type)) in fields.iter().enumerate() {
+                    if i > 0 { write!(self.output, ", ")?; }
+                    write!(self.output, "{} {}", 
+                           self.flint_type_to_c_type(field_type), field_name)?;
+                }
+                writeln!(self.output, ") {{")?;
+                writeln!(self.output, "    {}_t* record = malloc(sizeof({}_t));", name, name)?;
+                writeln!(self.output, "    if (!record) {{")?;
+                writeln!(self.output, "        flint_runtime_error(\"Out of memory\");")?;
+                writeln!(self.output, "    }}")?;
                 
-                // Generate lambda as a separate function
-                writeln!(self.output, "int64_t {}(int64_t {}) {{", lambda_name, param)?;
+                for (field_name, _) in fields.iter() {
+                    writeln!(self.output, "    record->{} = {};", field_name, field_name)?;
+                }
                 
-                let mut lambda_env = env.clone();
-                lambda_env.insert(param.clone(), param.clone());
-                
-                let result_var = self.generate_expr(body, &mut lambda_env)?;
-                writeln!(self.output, "    return {};", result_var)?;
+                writeln!(self.output, "    return record;")?;
                 writeln!(self.output, "}}")?;
-                
-                Ok(lambda_name)
+                writeln!(self.output)?;
             }
             
-            Expr::Let { var, value, body } => {
-                let value_var = self.generate_expr(value, env)?;
-                let var_name = self.fresh_var();
-                
-                writeln!(self.output, "    int64_t {} = {};", var_name, value_var)?;
-                
-                env.insert(var.clone(), var_name);
-                self.generate_expr(body, env)
+            TypeDef::Alias { name, type_expr } => {
+                writeln!(self.output, "// Type alias: {} = {:?}", name, type_expr)?;
+                writeln!(self.output, "typedef {} {}_t;", 
+                       self.flint_type_to_c_type(type_expr), name)?;
+                writeln!(self.output)?;
             }
             
-            Expr::If { cond, then_branch, else_branch } => {
-                let cond_var = self.generate_expr(cond, env)?;
-                let result_var = self.fresh_var();
-                let then_label = self.fresh_label();
-                let else_label = self.fresh_label();
-                let end_label = self.fresh_label();
-                
-                writeln!(self.output, "    int64_t {};", result_var)?;
-                writeln!(self.output, "    if ({}) goto {};", cond_var, then_label)?;
-                writeln!(self.output, "    goto {};", else_label)?;
-                
-                writeln!(self.output, "{}:", then_label)?;
-                let then_var = self.generate_expr(then_branch, env)?;
-                writeln!(self.output, "    {} = {};", result_var, then_var)?;
-                writeln!(self.output, "    goto {};", end_label)?;
-                
-                writeln!(self.output, "{}:", else_label)?;
-                let else_var = self.generate_expr(else_branch, env)?;
-                writeln!(self.output, "    {} = {};", result_var, else_var)?;
-                
-                writeln!(self.output, "{}:", end_label)?;
-                Ok(result_var)
-            }
-            
-            Expr::Pair(left, right) => {
-                let left_var = self.generate_expr(left, env)?;
-                let right_var = self.generate_expr(right, env)?;
-                let result_var = self.fresh_var();
-                
-                writeln!(self.output, "    pair_t {} = {{ {}, {} }};", result_var, left_var, right_var)?;
-                Ok(result_var)
-            }
-            
-            Expr::MatchPair { expr, left_var, right_var, body } => {
-                let expr_var = self.generate_expr(expr, env)?;
-                let left_c_var = self.fresh_var();
-                let right_c_var = self.fresh_var();
-                
-                writeln!(self.output, "    int64_t {} = {}.first;", left_c_var, expr_var)?;
-                writeln!(self.output, "    int64_t {} = {}.second;", right_c_var, expr_var)?;
-                
-                env.insert(left_var.clone(), left_c_var);
-                env.insert(right_var.clone(), right_c_var);
-                
-                self.generate_expr(body, env)
-            }
-            
-            Expr::Alloc { size } => {
-                let size_var = self.generate_expr(size, env)?;
-                let result_var = self.fresh_var();
-                
-                writeln!(self.output, "    linear_ptr_t {} = linear_alloc({});", result_var, size_var)?;
-                Ok(result_var)
-            }
-            
-            Expr::Free { ptr } => {
-                let ptr_var = self.generate_expr(ptr, env)?;
-                writeln!(self.output, "    linear_free({});", ptr_var)?;
-                Ok("0".to_string()) // Unit type represented as 0
-            }
-            
-            Expr::Load { ptr } => {
-                let ptr_var = self.generate_expr(ptr, env)?;
-                let result_var = self.fresh_var();
-                
-                writeln!(self.output, "    int64_t {} = linear_load({});", result_var, ptr_var)?;
-                Ok(result_var)
-            }
-            
-            Expr::Store { ptr, value } => {
-                let ptr_var = self.generate_expr(ptr, env)?;
-                let value_var = self.generate_expr(value, env)?;
-                
-                writeln!(self.output, "    linear_store({}, {});", ptr_var, value_var)?;
-                Ok("0".to_string()) // Unit type represented as 0
-            }
-            
-            Expr::BinOp { op, left, right } => {
-                let left_var = self.generate_expr(left, env)?;
-                let right_var = self.generate_expr(right, env)?;
-                let result_var = self.fresh_var();
-                
-                let op_str = match op {
-                    BinOpKind::Add => "+",
-                    BinOpKind::Sub => "-",
-                    BinOpKind::Mul => "*",
-                    BinOpKind::Div => "/",
-                    BinOpKind::Eq => "==",
-                    BinOpKind::Lt => "<",
-                    BinOpKind::Gt => ">",
-                    BinOpKind::And => "&&",
-                    BinOpKind::Or => "||",
-                };
-                
-                writeln!(self.output, "    int64_t {} = {} {} {};", result_var, left_var, op_str, right_var)?;
-                Ok(result_var)
+            TypeDef::Enum { name, variants } => {
+                writeln!(self.output, "// Enum type: {}", name)?;
+                writeln!(self.output, "typedef enum {{")?;
+                for (i, variant) in variants.iter().enumerate() {
+                    writeln!(self.output, "    {}_{} = {},", name.to_uppercase(), variant.name.to_uppercase(), i)?;
+                }
+                writeln!(self.output, "}} {}_t;", name)?;
+                writeln!(self.output)?;
             }
         }
-    }
-    
-    fn generate_logical_runtime(&mut self) -> Result<(), std::fmt::Error> {
-        // No need to redefine types - they're in the header
-        writeln!(self.output, "// Logical Programming Runtime - types defined in header")?;
-        writeln!(self.output)?;
-        
         Ok(())
     }
-    
-    fn generate_empty_kb(&mut self) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "// Linear Knowledge Base (empty)")?;
-        writeln!(self.output, "linear_kb_t* kb;")?;
-        writeln!(self.output)?;
-        
-        writeln!(self.output, "void initialize_kb() {{")?;
-        writeln!(self.output, "    symbol_table_t* symbols = create_symbol_table();")?;
-        writeln!(self.output, "    kb = create_linear_kb(symbols);")?;
-        writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
-        writeln!(self.output, "}}")?;
-        writeln!(self.output)?;
-        
-        Ok(())
-    }
-    
-    fn generate_clauses(&mut self, clauses: &[Clause]) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "// Linear Knowledge Base")?;
-        writeln!(self.output, "linear_kb_t* kb;")?;
-        writeln!(self.output)?;
-        
-        writeln!(self.output, "void initialize_kb() {{")?;
-        writeln!(self.output, "    symbol_table_t* symbols = create_symbol_table();")?;
-        writeln!(self.output, "    kb = create_linear_kb(symbols);")?;
-        writeln!(self.output, "    set_auto_deallocation(kb, 1);  // Enable automatic deallocation")?;
-        writeln!(self.output)?;
-        
-        for (i, clause) in clauses.iter().enumerate() {
-            match clause {
-                Clause::Fact { predicate, args, persistent, .. } => {
-                    if *persistent {
-                        writeln!(self.output, "    // Persistent Fact: {}({})", 
-                            predicate, 
-                            args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
-                        
-                        // Generate code to create the persistent fact
-                        if args.is_empty() {
-                            writeln!(self.output, "    add_persistent_fact(kb, create_atom(kb->symbols, \"{}\"));", predicate)?;
-                        } else {
-                            let args_code = self.generate_term_array(args)?;
-                            writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(kb->symbols, \"{}\", fact_args_{}, {});", 
-                                i, predicate, i, args.len())?;
-                            writeln!(self.output, "    add_persistent_fact(kb, fact_{});", i)?;
-                        }
-                    } else {
-                        writeln!(self.output, "    // Linear Fact: {}({})", 
-                            predicate, 
-                            args.iter().map(|_| "_").collect::<Vec<_>>().join(", "))?;
-                        
-                        // Generate code to create the linear fact
-                        if args.is_empty() {
-                            writeln!(self.output, "    add_linear_fact(kb, create_atom(kb->symbols, \"{}\"));", predicate)?;
-                        } else {
-                            let args_code = self.generate_term_array(args)?;
-                            writeln!(self.output, "    term_t** fact_args_{} = {};", i, args_code)?;
-                            writeln!(self.output, "    term_t* fact_{} = create_compound(kb->symbols, \"{}\", fact_args_{}, {});", 
-                                i, predicate, i, args.len())?;
-                            writeln!(self.output, "    add_linear_fact(kb, fact_{});", i)?;
-                        }
-                    }
-                    writeln!(self.output)?;
-                }
-                
-                Clause::Rule { head, body, produces, .. } => {
-                    writeln!(self.output, "    // Rule: {} :- {}", 
-                        self.term_to_string(head), 
-                        body.iter().map(|t| self.term_to_string(t)).collect::<Vec<_>>().join(", "))?;
-                    
-                    // Generate head
-                    let head_code = self.generate_term_creation(head)?;
-                    writeln!(self.output, "    term_t* rule_head_{} = {};", i, head_code)?;
-                    
-                    // Generate body
-                    let body_code = self.generate_term_array(body)?;
-                    writeln!(self.output, "    term_t** rule_body_{} = {};", i, body_code)?;
-                    
-                    // Add consumption metadata for body terms (resources this rule consumes)
-                    for (j, body_term) in body.iter().enumerate() {
-                        if let Some(resource_name) = body_term.get_resource_name() {
-                            let consumption_point = format!("rule_{}_body_{}", i, j);
-                            let is_persistent = body_term.has_persistent_use();
-                            self.add_consumption_metadata(resource_name, consumption_point.clone(), false, is_persistent);
-                            
-                            // Generate compiler-directed deallocation if enabled
-                            if let MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { optimize: true } = self.memory_strategy {
-                                writeln!(self.output, "    // Consumption point: {}", consumption_point)?;
-                            }
-                        }
-                    }
-                    
-                    // Handle production (if any)
-                    let production_code = if let Some(prod_term) = produces {
-                        self.generate_term_creation(prod_term)?
-                    } else {
-                        "NULL".to_string()
-                    };
-                    
-                    writeln!(self.output, "    add_rule(kb, rule_head_{}, rule_body_{}, {}, {});", 
-                        i, i, body.len(), production_code)?;
-                    writeln!(self.output)?;
-                }
+
+    fn flint_type_to_c_type(&self, flint_type: &FlintType) -> String {
+        match flint_type {
+            FlintType::Int32 => "int32_t".to_string(),
+            FlintType::String => "char*".to_string(),
+            FlintType::Bool => "bool".to_string(),
+            FlintType::Unit => "void".to_string(),
+            FlintType::List(element_type) => {
+                format!("flint_list_t* /* {} */", 
+                       self.flint_type_to_c_type(element_type))
             }
+            FlintType::Function { .. } => "function_ptr_t".to_string(),
+            FlintType::Record { .. } => "void*".to_string(), // Will be cast to specific type
+            FlintType::Named(name) => format!("{}_t", name),
+            FlintType::TypeVar(name) => format!("/* {} */ void*", name),
+        }
+    }
+
+    fn generate_effect_decl(&mut self, effect: &EffectDecl, _ctx: &CompilationContext) -> Result<(), CodegenError> {
+        writeln!(self.output, "// Effect declaration: {}", effect.name)?;
+        writeln!(self.output, "typedef struct {}_effect {{", effect.name)?;
+        writeln!(self.output, "    char* name;")?;
+        
+        // Generate operation function pointers based on signature
+        for operation in &effect.operations {
+            // For now, generate simple function pointers - would need to parse signature properly
+            writeln!(self.output, "    void* (*{})(); // TODO: parse signature {:?}", 
+                   operation.name, operation.signature)?;
+        }
+        
+        writeln!(self.output, "}} {}_effect_t;", effect.name)?;
+        writeln!(self.output)?;
+        
+        // Generate effect instance
+        writeln!(self.output, "extern {}_effect_t {}_instance;", effect.name, effect.name)?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn generate_effect_handler(&mut self, handler: &EffectHandler, ctx: &mut CompilationContext) -> Result<(), CodegenError> {
+        writeln!(self.output, "// Effect handler: {} handles {}", handler.handler_name, handler.effect_name)?;
+        
+        let mut operation_functions = HashMap::new();
+        
+        // Generate operation implementations
+        for impl_def in &handler.implementations {
+            let func_name = format!("{}_{}_impl", handler.handler_name, impl_def.operation_name);
+            operation_functions.insert(impl_def.operation_name.clone(), func_name.clone());
+            
+            // Generate a simple function for now - return type would need proper parsing
+            write!(self.output, "void* {}(", func_name)?;
+            for (i, param) in impl_def.parameters.iter().enumerate() {
+                if i > 0 { write!(self.output, ", ")?; }
+                write!(self.output, "void* {}", self.var_to_c_name(param))?;
+            }
+            writeln!(self.output, ") {{")?;
+            
+            let mut local_ctx = ctx.clone();
+            local_ctx.effect_handlers.push(handler.handler_name.clone());
+            
+            let body_code = self.generate_expr(&impl_def.body, &mut local_ctx)?;
+            writeln!(self.output, "    return {};", body_code)?;
+            writeln!(self.output, "}}")?;
             writeln!(self.output)?;
         }
         
-        writeln!(self.output, "}}")?;
-        writeln!(self.output)?;
+        // Store handler info for later use
+        self.effect_handlers.insert(handler.effect_name.clone(), EffectHandlerInfo {
+            effect_name: handler.effect_name.clone(),
+            handler_name: handler.handler_name.clone(),
+            operation_functions,
+        });
         
         Ok(())
     }
 
-    fn generate_term_creation(&mut self, term: &Term) -> Result<String, std::fmt::Error> {
-        match term {
-            Term::Atom { name, .. } => Ok(format!("create_atom(kb->symbols, \"{}\")", name)),
-            Term::Var { name, .. } => Ok(format!("create_var_named(kb->symbols, \"${}\")", name)),
-            Term::Integer(value) => Ok(format!("create_integer({})", value)),
-            Term::Compound { functor, args, .. } => {
-                if args.is_empty() {
-                    Ok(format!("create_compound(kb->symbols, \"{}\", NULL, 0)", functor))
-                } else {
-                    let args_var = format!("args_{}", self.var_counter);
-                    self.var_counter += 1;
-                    
-                    writeln!(self.output, "    term_t* {}[{}];", args_var, args.len())?;
-                    for (i, arg) in args.iter().enumerate() {
-                        let arg_code = self.generate_term_creation(arg)?;
-                        writeln!(self.output, "    {}[{}] = {};", args_var, i, arg_code)?;
-                    }
-                    
-                    Ok(format!("create_compound(kb->symbols, \"{}\", {}, {})", functor, args_var, args.len()))
+    fn generate_function_declaration(&mut self, func: &FunctionDef, _ctx: &CompilationContext) -> Result<(), CodegenError> {
+        // Determine if this is a Unit -> Unit function (like main)
+        let is_unit_to_unit = func.type_signature.as_ref()
+            .map(|t| matches!(t, FlintType::Function { params, result, .. } 
+                if params.is_empty() && matches!(**result, FlintType::Unit)))
+            .unwrap_or(false);
+        
+        if is_unit_to_unit {
+            // Generate void function with no parameters
+            writeln!(self.output, "void {}();", func.name)?;
+        } else {
+            // Generate function with parameters
+            write!(self.output, "void* {}(", func.name)?;
+            
+            // Generate parameters based on the first clause patterns
+            if let Some(first_clause) = func.clauses.first() {
+                for (i, _pattern) in first_clause.patterns.iter().enumerate() {
+                    if i > 0 { write!(self.output, ", ")?; }
+                    write!(self.output, "void* param_{}", i)?;
                 }
             }
-            Term::Clone(inner) => {
-                // For C generation, we'll create a cloned term using the runtime function
-                let inner_code = self.generate_term_creation(inner)?;
-                Ok(format!("create_clone({})", inner_code))
-            }
-        }
-    }
-    
-    fn generate_term_array(&mut self, terms: &[Term]) -> Result<String, std::fmt::Error> {
-        if terms.is_empty() {
-            return Ok("NULL".to_string());
-        }
-        
-        let array_var = format!("term_array_{}", self.var_counter);
-        self.var_counter += 1;
-        
-        writeln!(self.output, "    term_t** {} = malloc(sizeof(term_t*) * {});", array_var, terms.len())?;
-        for (i, term) in terms.iter().enumerate() {
-            let term_code = self.generate_term_creation(term)?;
-            writeln!(self.output, "    {}[{}] = {};", array_var, i, term_code)?;
-        }
-        
-        Ok(array_var)
-    }
-    
-    fn term_to_string(&self, term: &Term) -> String {
-        match term {
-            Term::Atom { name, .. } => name.clone(),
-            Term::Var { name, .. } => name.clone(),
-            Term::Integer(value) => value.to_string(),
-            Term::Compound { functor, args, .. } => {
-                format!("{}({})", functor, 
-                    args.iter().map(|t| self.term_to_string(t)).collect::<Vec<_>>().join(", "))
-            }
-            Term::Clone(inner) => {
-                format!("!{}", self.term_to_string(inner))
-            }
-        }
-    }
-    
-    fn generate_query_main(&mut self, clauses: &[Clause], query: &Query) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int main() {{")?;
-        writeln!(self.output, "    initialize_kb();")?;
-        
-        // Generate consumption metadata registration
-        self.generate_consumption_metadata()?;
-        
-        writeln!(self.output, "    printf(\"\\n=== LINEAR LOGIC QUERY RESOLUTION ===\\n\");")?;
-        
-        // Generate query resolution using linear logic
-        writeln!(self.output, "    term_t* goals[{}];", query.goals.len())?;
-        for (i, goal) in query.goals.iter().enumerate() {
-            let goal_code = self.generate_term_creation(goal)?;
-            writeln!(self.output, "    goals[{}] = {};", i, goal_code)?;
-            writeln!(self.output, "    printf(\"Goal {}: \");", i)?;
-            writeln!(self.output, "    print_term(goals[{}], kb->symbols);", i)?;
-            writeln!(self.output, "    printf(\"\\n\");")?;
             
-            // Add consumption metadata for this goal if it's a resource consumption
-            if let Some(resource_name) = goal.get_resource_name() {
-                let consumption_point = format!("goal_{}", i);
-                let is_persistent = goal.has_persistent_use();
-                self.add_consumption_metadata(resource_name, consumption_point, false, is_persistent);
-            }
+            writeln!(self.output, ");")?;
         }
         
-        writeln!(self.output, "    printf(\"\\nStarting linear resolution...\\n\");")?;
-        
-        // Use enhanced resolution with consumption point tracking
-        match self.memory_strategy {
-            MemoryStrategy::CompilerDirected | MemoryStrategy::Hybrid { .. } => {
-                writeln!(self.output, "    int success = linear_resolve_query_enhanced(kb, goals, {});", query.goals.len())?;
-            }
-            MemoryStrategy::RuntimeManaged => {
-                writeln!(self.output, "    int success = linear_resolve_query(kb, goals, {});", query.goals.len())?;
-            }
-        }
-        
-        writeln!(self.output)?;
-        writeln!(self.output, "    if (success) {{")?;
-        writeln!(self.output, "        printf(\"\\n=== QUERY SUCCEEDED ===\\n\");")?;
-        writeln!(self.output, "    }} else {{")?;
-        writeln!(self.output, "        printf(\"\\n=== QUERY FAILED ===\\n\");")?;
-        writeln!(self.output, "    }}")?;
-        writeln!(self.output)?;
-        writeln!(self.output, "    // Clean up")?;
-        writeln!(self.output, "    free_linear_kb(kb);")?;
-        writeln!(self.output, "    return success ? 0 : 1;")?;
-        writeln!(self.output, "}}")?;
-        
-        Ok(())
-    }
-    
-    fn generate_logic_main(&mut self, clauses: &[Clause]) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int main() {{")?;
-        writeln!(self.output, "    initialize_kb();")?;
-        writeln!(self.output, "    printf(\"\\n=== LINEAR LOGIC KNOWLEDGE BASE ===\\n\");")?;
-        writeln!(self.output, "    printf(\"Linear knowledge base initialized with {} clauses\\n\");", clauses.len())?;
-        writeln!(self.output, "    printf(\"Ready for linear logic queries.\\n\");")?;
-        writeln!(self.output)?;
-        writeln!(self.output, "    // Clean up")?;
-        writeln!(self.output, "    free_linear_kb(kb);")?;
-        writeln!(self.output, "    return 0;")?;
-        writeln!(self.output, "}}")?;
+        // Store function info for analysis
+        self.functions.insert(func.name.clone(), FunctionInfo {
+            name: func.name.clone(),
+            is_deterministic: self.is_function_deterministic(func),
+            has_logic_vars: self.function_has_logic_vars(func),
+            effects: self.extract_function_effects(func),
+        });
         
         Ok(())
     }
 
-    fn generate_multiple_queries_main(&mut self, clauses: &[Clause], queries: &[Query], term_types: &[TermType], type_definitions: &[TypeDefinition]) -> Result<(), std::fmt::Error> {
-        writeln!(self.output, "int main() {{")?;
-        writeln!(self.output, "    // Initialize linear knowledge base")?;
-        writeln!(self.output, "    initialize_kb();")?;
-        writeln!(self.output)?;
+    fn generate_function_definition(&mut self, func: &FunctionDef, ctx: &mut CompilationContext) -> Result<(), CodegenError> {
+        writeln!(self.output, "// Function: {}", func.name)?;
         
-        // Add union type hierarchy mappings
-        for type_def in type_definitions {
-            self.generate_union_hierarchy_mappings(type_def)?;
+        // Determine if this is a Unit -> Unit function (like main)
+        let is_unit_to_unit = func.type_signature.as_ref()
+            .map(|t| matches!(t, FlintType::Function { params, result, .. } 
+                if params.is_empty() && matches!(**result, FlintType::Unit)))
+            .unwrap_or(false);
+        
+        if is_unit_to_unit {
+            // Generate void function with no parameters
+            writeln!(self.output, "void {}() {{", func.name)?;
+        } else {
+            // Generate function with parameters
+            write!(self.output, "void* {}(", func.name)?;
+            
+            // Generate parameters based on the first clause patterns
+            if let Some(first_clause) = func.clauses.first() {
+                for (i, _pattern) in first_clause.patterns.iter().enumerate() {
+                    if i > 0 { write!(self.output, ", ")?; }
+                    write!(self.output, "void* param_{}", i)?;
+                }
+            }
+            
+            writeln!(self.output, ") {{")?;
         }
         
-        // Add type mappings for all terms
-        for term_type in term_types {
-            if let LogicType::Named(type_name) = &term_type.term_type {
-                writeln!(self.output, "    add_type_mapping(kb, \"{}\", \"{}\");", term_type.name, type_name)?;
-            }
+        // Generate function body - handle multiple clauses with pattern matching
+        let mut local_ctx = ctx.clone();
+        
+        // Handle logic variables if present
+        if self.function_has_logic_vars(func) {
+            writeln!(self.output, "    // Logic variable initialization")?;
+            writeln!(self.output, "    flint_init_logic_vars();")?;
         }
-        writeln!(self.output)?;
-
-        // All clauses are already added by initialize_kb()
         
-        // Print initial memory state before executing queries
-        writeln!(self.output, "    print_memory_state(kb, \"INITIAL STATE - Before executing queries\");")?;
-        writeln!(self.output)?;
+        // Handle effects if present
+        if self.function_has_effects(func) {
+            writeln!(self.output, "    // Effect handling setup")?;
+            local_ctx.effect_handlers = self.extract_function_effects(func);
+        }
         
-        // Execute each query
-        for (query_index, query) in queries.iter().enumerate() {
-            if query_index > 0 {
-                writeln!(self.output)?; // Add blank line between queries
-            }
+        // Generate clause matching
+        for (clause_idx, clause) in func.clauses.iter().enumerate() {
+            writeln!(self.output, "    // Clause {}", clause_idx + 1)?;
             
-            // Generate query term and print it
-            writeln!(self.output, "    // Query {}: ", query_index + 1)?;
-            writeln!(self.output, "    printf(\"?- \");")?;
-            for (i, goal) in query.goals.iter().enumerate() {
-                if i > 0 {
-                    if query.is_disjunctive {
-                        writeln!(self.output, "    printf(\" | \");")?;
-                    } else {
-                        writeln!(self.output, "    printf(\" & \");")?;
-                    }
-                }
-                let goal_code = self.generate_term_creation(goal)?;
-                writeln!(self.output, "    print_term({}, kb->symbols);", goal_code)?;
-            }
-            writeln!(self.output, "    printf(\".\\n\");")?;
+            // Generate pattern matching for this clause
+            let match_condition = self.generate_pattern_matching(&clause.patterns, &mut local_ctx)?;
             
-            // Create goals array
-            let goals_var = format!("goals_{}", query_index);
-            writeln!(self.output, "    term_t** {} = malloc({} * sizeof(term_t*));", goals_var, query.goals.len())?;
-            for (i, goal) in query.goals.iter().enumerate() {
-                let goal_code = self.generate_term_creation(goal)?;
-                writeln!(self.output, "    {}[{}] = {};", goals_var, i, goal_code)?;
-            }
-            
-            // Detect if query contains variables or if program has persistent facts or production rules
-            let has_variables = query.goals.iter().any(|goal| self.term_has_variables(goal));
-            let has_persistent_facts = clauses.iter().any(|clause| {
-                matches!(clause, Clause::Fact { persistent: true, .. })
-            });
-            let has_production_rules = clauses.iter().any(|clause| {
-                matches!(clause, Clause::Rule { produces: Some(_), .. })
-            });
-            
-            // Check if query involves recursive predicates
-            let involves_recursive_predicates = query.goals.iter().any(|goal| {
-                let predicate_name = self.extract_predicate_name(goal);
-                self.recursive_rules.iter().any(|info| info.predicate_name == predicate_name)
-            });
-            
-            // Apply specialized recursive functions before query resolution if needed
-            if involves_recursive_predicates {
-                for recursive_info in &self.recursive_rules {
-                    let predicate_involved = query.goals.iter().any(|goal| {
-                        let predicate_name = self.extract_predicate_name(goal);
-                        predicate_name == recursive_info.predicate_name
-                    });
-                    
-                    if predicate_involved {
-                        writeln!(self.output, "    // Apply specialized recursive functions for optimized transitive closure")?;
-                        if recursive_info.is_transitive {
-                            writeln!(self.output, "    // Use specialized transitive closure resolution")?;
-                            // The transitive closure will be handled by the enhanced query resolution
-                            // which detects recursive patterns automatically
-                        } else {
-                            writeln!(self.output, "    // Use specialized recursive resolution")?;
-                            // The recursive resolution will be handled by the enhanced query resolution
-                            // which detects recursive patterns automatically
-                        }
-                        if self.debug {
-                            writeln!(self.output, "    #ifdef DEBUG")?;
-                            writeln!(self.output, "    printf(\"DEBUG: Enhanced resolution will handle {} recursion\\n\");", 
-                                   recursive_info.predicate_name)?;
-                            writeln!(self.output, "    #endif")?;
-                        }
-                        writeln!(self.output)?;
-                    }
-                }
-            }
-            
-            if has_variables || has_persistent_facts || has_production_rules {
-                // Use enhanced resolution for queries with variables or when persistent facts exist
-                writeln!(self.output, "    enhanced_solution_list_t* enhanced_solutions_{} = create_enhanced_solution_list();", query_index)?;
-                if query.is_disjunctive {
-                    writeln!(self.output, "    (void)linear_resolve_query_enhanced_disjunctive(kb, {}, {}, enhanced_solutions_{});", 
-                             goals_var, query.goals.len(), query_index)?;
-                } else {
-                    writeln!(self.output, "    (void)linear_resolve_query_enhanced(kb, {}, {}, enhanced_solutions_{});", 
-                             goals_var, query.goals.len(), query_index)?;
-                }
-                writeln!(self.output, "    if (enhanced_solutions_{}->count > 0) {{", query_index)?;
-                
-                if has_variables {
-                    // For queries with variables, print variable bindings
-                    writeln!(self.output, "        for (int sol = 0; sol < enhanced_solutions_{}->count; sol++) {{", query_index)?;
-                    writeln!(self.output, "            print_enhanced_solution(&enhanced_solutions_{}->solutions[sol], kb->symbols);", query_index)?;
-                    writeln!(self.output, "            if (sol < enhanced_solutions_{}->count - 1) {{", query_index)?;
-                    writeln!(self.output, "                printf(\";\\n\");")?;
-                    writeln!(self.output, "            }} else {{")?;
-                    writeln!(self.output, "                printf(\".\\n\");")?;
-                    writeln!(self.output, "            }}")?;
-                    writeln!(self.output, "        }}")?;
-                } else {
-                    // For ground queries, just report true/false with solution count
-                    writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", enhanced_solutions_{}->count, enhanced_solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
-                }
-                
-                writeln!(self.output, "    }} else {{")?;
-                writeln!(self.output, "        printf(\"false.\\n\");")?;
-                writeln!(self.output, "    }}")?;
-                writeln!(self.output, "    free_enhanced_solution_list(enhanced_solutions_{});", query_index)?;
+            if !match_condition.is_empty() {
+                writeln!(self.output, "    if ({}) {{", match_condition)?;
             } else {
-                // Use simple linear resolution for queries without variables (linear logic mode)
-                if query.is_disjunctive {
-                    writeln!(self.output, "    int found_{} = linear_resolve_query_with_type(kb, {}, {}, 1);", 
-                             query_index, goals_var, query.goals.len())?;
-                    writeln!(self.output, "    if (found_{}) {{", query_index)?;
-                    writeln!(self.output, "        printf(\"true.\\n\");")?;
-                    writeln!(self.output, "    }} else {{")?;
-                    writeln!(self.output, "        printf(\"false.\\n\");")?;
-                    writeln!(self.output, "    }}")?;
+                writeln!(self.output, "    // Always matches")?;
+                writeln!(self.output, "    {{")?;
+            }
+            
+            // Generate clause body
+            let body_code = self.generate_expr(&clause.body, &mut local_ctx)?;
+            
+            if is_unit_to_unit {
+                // For void functions, execute the expression but don't return its value
+                writeln!(self.output, "        {};", body_code)?;
+                writeln!(self.output, "        return;")?;
+            } else {
+                writeln!(self.output, "        return {};", body_code)?;
+            }
+            writeln!(self.output, "    }}")?;
+        }
+        
+        if is_unit_to_unit {
+            writeln!(self.output, "    // No clause matched")?;
+        } else {
+            writeln!(self.output, "    return NULL; // No clause matched")?;
+        }
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn generate_pattern_matching(&mut self, patterns: &[Pattern], ctx: &mut CompilationContext) -> Result<String, CodegenError> {
+        let mut code = String::new();
+        
+        for (i, pattern) in patterns.iter().enumerate() {
+            if i > 0 {
+                code.push_str(" && ");
+            }
+            let param_name = format!("param_{}", i);
+            code.push_str(&self.generate_single_pattern_match(pattern, &param_name, ctx)?);
+        }
+        
+        Ok(code)
+    }
+
+    fn generate_single_pattern_match(&mut self, pattern: &Pattern, param_name: &str, ctx: &mut CompilationContext) -> Result<String, CodegenError> {
+        match pattern {
+            Pattern::Var(var) => {
+                if var.is_logic_var {
+                    Ok(format!("flint_unify({}, {})", self.var_to_c_name(var), param_name))
                 } else {
-                    writeln!(self.output, "    solution_list_t* solutions_{} = create_solution_list();", query_index)?;
-                    writeln!(self.output, "    int found_solutions_{} = linear_resolve_query_all_solutions(kb, {}, {}, solutions_{});", 
-                             query_index, goals_var, query.goals.len(), query_index)?;
-                    writeln!(self.output, "    if (solutions_{}->count > 0) {{", query_index)?;
-                    writeln!(self.output, "        printf(\"true (%d solution%s found).\\n\", solutions_{}->count, solutions_{}->count == 1 ? \"\" : \"s\");", query_index, query_index)?;
-                    writeln!(self.output, "    }} else {{")?;
-                    writeln!(self.output, "        printf(\"false.\\n\");")?;
-                    writeln!(self.output, "    }}")?;
-                    writeln!(self.output, "    free_solution_list(solutions_{});", query_index)?;
+                    Ok(format!("({} = {})", self.var_to_c_name(var), param_name))
                 }
             }
             
-            // Clean up
-            writeln!(self.output, "    for (int i = 0; i < {}; i++) {{", query.goals.len())?;
-            writeln!(self.output, "        free({}[i]);", goals_var)?;
-            writeln!(self.output, "    }}")?;
-            writeln!(self.output, "    free({});", goals_var)?;
-        }
-        
-        writeln!(self.output)?;
-        writeln!(self.output, "    // Print final memory state before cleanup")?;
-        writeln!(self.output, "    print_memory_state(kb, \"FINAL STATE - Before program exit\");")?;
-        writeln!(self.output)?;
-        writeln!(self.output, "    // Clean up")?;
-        writeln!(self.output, "    free_linear_kb(kb);")?;
-        writeln!(self.output, "    return 0;  // Always return success - false is a valid result")?;
-        writeln!(self.output, "}}")?;
-        
-        Ok(())
-    }
-    
-    fn generate_union_hierarchy_mappings(&mut self, type_def: &TypeDefinition) -> Result<(), std::fmt::Error> {
-        if let Some(ref union_variants) = type_def.union_variants {
-            self.generate_variant_mappings(&type_def.name, union_variants)?;
-        }
-        Ok(())
-    }
-    
-    fn generate_variant_mappings(&mut self, parent_type: &str, variants: &UnionVariants) -> Result<(), std::fmt::Error> {
-        match variants {
-            UnionVariants::Simple(names) => {
-                for name in names {
-                    writeln!(self.output, "    add_union_mapping(kb, \"{}\", \"{}\");", name, parent_type)?;
+            Pattern::Wildcard => {
+                Ok("true".to_string())
+            }
+            
+            Pattern::Int(n) => {
+                Ok(format!("({} == {})", param_name, n))
+            }
+            
+            Pattern::Str(s) => {
+                Ok(format!("(strcmp({}, \"{}\") == 0)", param_name, s))
+            }
+            
+            Pattern::Bool(b) => {
+                Ok(format!("({} == {})", param_name, if *b { "true" } else { "false" }))
+            }
+            
+            Pattern::Unit => {
+                Ok("true".to_string()) // Unit always matches
+            }
+            
+            Pattern::EmptyList => {
+                Ok(format!("flint_list_is_empty({})", param_name))
+            }
+            
+            Pattern::ListCons { head, tail } => {
+                let head_var = self.fresh_var();
+                let tail_var = self.fresh_var();
+                let head_match = self.generate_single_pattern_match(head, &head_var, ctx)?;
+                let tail_match = self.generate_single_pattern_match(tail, &tail_var, ctx)?;
+                
+                Ok(format!(
+                    "(!flint_list_is_empty({}) && \
+                     ({} = flint_list_head({}), {}) && \
+                     ({} = flint_list_tail({}), {}))",
+                    param_name,
+                    head_var, param_name, head_match,
+                    tail_var, param_name, tail_match
+                ))
+            }
+            
+            Pattern::List(patterns) => {
+                let mut conditions = vec![
+                    format!("flint_list_length({}) == {}", param_name, patterns.len())
+                ];
+                
+                for (i, pattern) in patterns.iter().enumerate() {
+                    let element_var = format!("flint_list_get({}, {})", param_name, i);
+                    conditions.push(self.generate_single_pattern_match(pattern, &element_var, ctx)?);
+                }
+                
+                Ok(format!("({})", conditions.join(" && ")))
+            }
+            
+            Pattern::Record { type_name, fields } => {
+                let mut conditions = Vec::new();
+                
+                if let Some(type_name) = type_name {
+                    conditions.push(format!("flint_record_type_check({}, \"{}\")", param_name, type_name));
+                }
+                
+                for (field_name, pattern) in fields {
+                    let field_var = format!("flint_record_get({}, \"{}\")", param_name, field_name);
+                    conditions.push(self.generate_single_pattern_match(pattern, &field_var, ctx)?);
+                }
+                
+                if conditions.is_empty() {
+                    Ok("true".to_string())
+                } else {
+                    Ok(format!("({})", conditions.join(" && ")))
                 }
             }
-            UnionVariants::Nested(variant_list) => {
-                for variant in variant_list {
-                    // Map the variant to the parent type
-                    writeln!(self.output, "    add_union_mapping(kb, \"{}\", \"{}\");", variant.name, parent_type)?;
-                    
-                    // If this variant has sub-variants, recursively map them
-                    if let Some(ref sub_variants) = variant.sub_variants {
-                        self.generate_variant_mappings(&variant.name, sub_variants)?;
-                    }
+        }
+    }
+
+    fn generate_expr(&mut self, expr: &Expr, ctx: &mut CompilationContext) -> Result<String, CodegenError> {
+        match expr {
+            Expr::Var(var) => {
+                if ctx.in_logic_context && var.is_logic_var {
+                    Ok(format!("flint_deref_logic_var({})", self.var_to_c_name(var)))
+                } else {
+                    Ok(self.var_to_c_name(var))
                 }
             }
+            
+            Expr::Int(n) => {
+                Ok(n.to_string())
+            }
+            
+            Expr::Str(s) => {
+                Ok(format!("\"{}\"", s.replace("\"", "\\\"")))
+            }
+            
+            Expr::Bool(b) => {
+                Ok(if *b { "true".to_string() } else { "false".to_string() })
+            }
+            
+            Expr::Unit => {
+                Ok("((void)0)".to_string())
+            }
+            
+            Expr::List(elements) => {
+                let element_codes: Result<Vec<_>, _> = elements.iter()
+                    .map(|e| self.generate_expr(e, ctx))
+                    .collect();
+                let element_codes = element_codes?;
+                
+                Ok(format!("flint_create_list({})", element_codes.join(", ")))
+            }
+            
+            Expr::ListCons { head, tail } => {
+                let head_code = self.generate_expr(head, ctx)?;
+                let tail_code = self.generate_expr(tail, ctx)?;
+                Ok(format!("flint_list_cons({}, {})", head_code, tail_code))
+            }
+            
+            Expr::CCall { module, function, args } => {
+                self.generate_c_call_expression(module, function, args)
+            }
+            
+            _ => {
+                // For unsupported expression types, provide error
+                Err(CodegenError::unsupported_feature(
+                    &format!("expression type {}", self.expr_type_name(expr))
+                ))
+            }
         }
-        Ok(())
     }
-    
-    // Helper function to check if a term contains variables
-    fn term_has_variables(&self, term: &Term) -> bool {
-        match term {
-            Term::Var { .. } => true,
-            Term::Compound { args, .. } => args.iter().any(|arg| self.term_has_variables(arg)),
+
+    fn generate_c_call_expression(&mut self, module: &str, function: &str, args: &[Expr]) -> Result<String, CodegenError> {
+        // Generate arguments
+        let arg_codes: Result<Vec<_>, _> = args.iter()
+            .map(|arg| self.generate_expr(arg, &mut CompilationContext::new()))
+            .collect();
+        let arg_codes = arg_codes?;
+        
+        // Simply use the function name directly - C.stdio.printf becomes printf
+        Ok(format!("{}({})", function, arg_codes.join(", ")))
+    }
+
+    fn expr_type_name(&self, expr: &Expr) -> &'static str {
+        match expr {
+            Expr::Var(_) => "Var",
+            Expr::Int(_) => "Int",
+            Expr::Str(_) => "Str",
+            Expr::Bool(_) => "Bool",
+            Expr::Unit => "Unit",
+            Expr::List(_) => "List",
+            Expr::ListCons { .. } => "ListCons",
+            Expr::Call { .. } => "Call",
+            Expr::CCall { .. } => "CCall",
+            Expr::Let { .. } => "Let",
+            Expr::Lambda { .. } => "Lambda",
+            Expr::Record { .. } => "Record",
+            Expr::FieldAccess { .. } => "FieldAccess",
+            Expr::Match { .. } => "Match",
+            Expr::EffectCall { .. } => "EffectCall",
+            Expr::Handle { .. } => "Handle",
+            Expr::BinOp { .. } => "BinOp",
+            Expr::UnaryOp { .. } => "UnaryOp",
+        }
+    }
+
+    fn function_has_logic_vars(&self, func: &FunctionDef) -> bool {
+        // Check if any clause patterns contain logic variables
+        func.clauses.iter().any(|clause| {
+            clause.patterns.iter().any(|pattern| self.pattern_has_logic_vars(pattern))
+        })
+    }
+
+    fn pattern_has_logic_vars(&self, pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Var(var) => var.is_logic_var,
+            Pattern::ListCons { head, tail } => {
+                self.pattern_has_logic_vars(head) || self.pattern_has_logic_vars(tail)
+            }
+            Pattern::List(patterns) => {
+                patterns.iter().any(|p| self.pattern_has_logic_vars(p))
+            }
+            Pattern::Record { fields, .. } => {
+                fields.iter().any(|(_, p)| self.pattern_has_logic_vars(p))
+            }
             _ => false,
         }
     }
-    
-    /// Detect recursive rules in the program
-    fn detect_recursive_rules(&mut self, program: &Program) {
-        if self.debug {
-            eprintln!("DEBUG: Detecting recursive rules...");
-        }
-        
-        for (rule_idx, clause) in program.clauses.iter().enumerate() {
-            if let Clause::Rule { head: _, body, produces: Some(produces), .. } = clause {
-                let head_predicate = self.extract_predicate_name(produces);
-                
-                // Check if this predicate appears in the body (direct recursion)
-                for body_term in body {
-                    let body_predicate = self.extract_predicate_name(body_term);
-                    if head_predicate == body_predicate {
-                        if self.debug {
-                            eprintln!("DEBUG: Found recursive rule: {} at index {}", head_predicate, rule_idx);
-                        }
-                        
-                        // Check if we already have info for this predicate
-                        if !self.recursive_rules.iter().any(|info| info.predicate_name == head_predicate) {
-                            let info = RecursiveRuleInfo {
-                                predicate_name: head_predicate.clone(),
-                                is_direct_recursion: true,
-                                is_transitive: head_predicate == "ancestor" || head_predicate.contains("trans"),
-                                base_case_rule: None, // We'll detect this later if needed
-                                recursive_rule: rule_idx,
-                            };
-                            self.recursive_rules.push(info);
-                        }
-                        break;
-                    }
-                }
+
+    fn is_function_deterministic(&self, func: &FunctionDef) -> bool {
+        !self.function_has_effects(func) && !self.function_has_logic_vars(func)
+    }
+
+    fn function_has_effects(&self, func: &FunctionDef) -> bool {
+        // Check if any clause body uses effects
+        func.clauses.iter().any(|clause| self.expr_has_effects(&clause.body))
+    }
+
+    fn expr_has_effects(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::EffectCall { .. } => true,
+            Expr::Handle { .. } => true,
+            Expr::CCall { .. } => true, // C calls are effectful
+            Expr::Call { func: _, args } => {
+                // Check if function is known to have effects
+                args.iter().any(|arg| self.expr_has_effects(arg))
             }
-        }
-        
-        if self.debug {
-            eprintln!("DEBUG: Found {} recursive rules", self.recursive_rules.len());
+            Expr::Let { value, body, .. } => {
+                self.expr_has_effects(value) || self.expr_has_effects(body)
+            }
+            Expr::BinOp { left, right, .. } => {
+                self.expr_has_effects(left) || self.expr_has_effects(right)
+            }
+            _ => false,
         }
     }
-    
-    /// Extract predicate name from a term
-    fn extract_predicate_name(&self, term: &Term) -> String {
-        match term {
-            Term::Atom { name, .. } => name.clone(),
-            Term::Compound { functor, .. } => functor.clone(),
-            Term::Var { name, .. } => name.clone(),
-            Term::Integer(value) => value.to_string(),
-            Term::Clone(inner_term) => self.extract_predicate_name(inner_term),
+
+    fn extract_function_effects(&self, _func: &FunctionDef) -> Vec<String> {
+        // TODO: Analyze function body for effect usage
+        Vec::new()
+    }
+
+    fn generate_main_function_with_body(&mut self, program: &Program, main_func_name: &str, ctx: &CompilationContext) -> Result<(), CodegenError> {
+        writeln!(self.output, "int main(void) {{")?;
+        writeln!(self.output, "    // Initialize Flint runtime")?;
+        writeln!(self.output, "    flint_init_runtime();")?;
+        writeln!(self.output)?;
+        
+        // Find the main function and embed its body
+        if let Some(main_func) = program.functions().iter().find(|f| f.name == main_func_name) {
+            writeln!(self.output, "    // Flint main function body")?;
+            
+            // Generate the main function body directly here
+            for clause in &main_func.clauses {
+                self.generate_clause_body_for_main(clause, ctx)?;
+            }
+        } else {
+            writeln!(self.output, "    printf(\"Main function '{}' not found\\n\");", main_func_name)?;
         }
+        
+        writeln!(self.output)?;
+        writeln!(self.output, "    // Cleanup runtime")?;
+        writeln!(self.output, "    flint_cleanup_runtime();")?;
+        writeln!(self.output, "    return 0;")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn generate_clause_body_for_main(&mut self, clause: &FunctionClause, ctx: &CompilationContext) -> Result<(), CodegenError> {
+        // For main function, we don't need pattern matching complexity
+        // Just execute the body directly
+        writeln!(self.output, "    {{")?;
+        self.generate_expression_statement(&clause.body, ctx)?;
+        writeln!(self.output, "    }}")?;
+        Ok(())
+    }
+
+    fn generate_expression_statement(&mut self, expr: &Expr, ctx: &CompilationContext) -> Result<(), CodegenError> {
+        match expr {
+            Expr::CCall { module, function, args } => {
+                // Handle C calls as statements (no return value used)
+                write!(self.output, "        ")?;
+                let call_code = self.generate_c_call_expression(module, function, args)?;
+                write!(self.output, "{}", call_code)?;
+                writeln!(self.output, ";")?;
+            }
+            _ => {
+                // For other expressions, generate as normal but don't use the result
+                write!(self.output, "        ")?;
+                let expr_code = self.generate_expr(expr, &mut ctx.clone())?;
+                write!(self.output, "{}", expr_code)?;
+                writeln!(self.output, ";")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn generate_main_function(&mut self, main_func_name: &str) -> Result<(), CodegenError> {
+        writeln!(self.output, "int main(void) {{")?;
+        writeln!(self.output, "    // Initialize Flint runtime")?;
+        writeln!(self.output, "    flint_init_runtime();")?;
+        writeln!(self.output)?;
+        
+        writeln!(self.output, "    // Call main function")?;
+        writeln!(self.output, "    {}();", main_func_name)?;
+        writeln!(self.output)?;
+        
+        writeln!(self.output, "    // Cleanup runtime")?;
+        writeln!(self.output, "    flint_cleanup_runtime();")?;
+        writeln!(self.output, "    return 0;")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn generate_default_main(&mut self) -> Result<(), CodegenError> {
+        writeln!(self.output, "int main(void) {{")?;
+        writeln!(self.output, "    // Initialize Flint runtime")?;
+        writeln!(self.output, "    flint_init_runtime();")?;
+        writeln!(self.output)?;
+        
+        writeln!(self.output, "    printf(\"No main function defined\\n\");")?;
+        writeln!(self.output)?;
+        
+        writeln!(self.output, "    // Cleanup runtime")?;
+        writeln!(self.output, "    flint_cleanup_runtime();")?;
+        writeln!(self.output, "    return 0;")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
+    }
+
+    fn generate_runtime_functions(&mut self) -> Result<(), CodegenError> {
+        writeln!(self.output, "// Runtime helper functions")?;
+        writeln!(self.output, "void flint_runtime_error(const char* message) {{")?;
+        writeln!(self.output, "    fprintf(stderr, \"Flint runtime error: %s\\n\", message);")?;
+        writeln!(self.output, "    exit(1);")?;
+        writeln!(self.output, "}}")?;
+        writeln!(self.output)?;
+        
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::tokenize;
-    use crate::parser::Parser;
-    
+
     #[test]
-    fn test_simple_codegen() {
-        let tokens = tokenize("let x = 42 in x + 1").unwrap();
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
-        
+    fn test_fresh_var_generation() {
         let mut codegen = CodeGenerator::new();
-        let result = codegen.generate(&program);
-        assert!(result.is_ok());
+        assert_eq!(codegen.fresh_var(), "v0");
+        assert_eq!(codegen.fresh_var(), "v1");
+        assert_eq!(codegen.fresh_var_with_prefix("test"), "test_2");
+    }
+
+    #[test]
+    fn test_var_to_c_name() {
+        let codegen = CodeGenerator::new();
+        let logic_var = Variable { name: "X".to_string(), is_logic_var: true };
+        let regular_var = Variable { name: "x".to_string(), is_logic_var: false };
         
-        let code = result.unwrap();
-        assert!(code.contains("int main()"));
-        assert!(code.contains("printf"));
+        assert_eq!(codegen.var_to_c_name(&logic_var), "logic_X");
+        assert_eq!(codegen.var_to_c_name(&regular_var), "var_x");
+    }
+
+    #[test]
+    fn test_flint_type_to_c_type() {
+        let codegen = CodeGenerator::new();
+        assert_eq!(codegen.flint_type_to_c_type(&FlintType::Int32), "int32_t");
+        assert_eq!(codegen.flint_type_to_c_type(&FlintType::String), "char*");
+        assert_eq!(codegen.flint_type_to_c_type(&FlintType::Bool), "bool");
+        assert_eq!(codegen.flint_type_to_c_type(&FlintType::Unit), "void");
     }
 }

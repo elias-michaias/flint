@@ -1,0 +1,7 @@
+import C "stdio.h" as stdio
+
+main :: () -> () using C
+
+main :: () => {
+    C.stdio.printf("Hello, World!\n")
+}

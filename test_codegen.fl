@@ -1,0 +1,6 @@
+// Test program with supported syntax but unsupported codegen features
+fn main() -> Unit {
+    let x = 42
+    let y = "hello"
+    add(x, y)  // Function call - will be unsupported in codegen
+}
