@@ -2175,10 +2175,10 @@ int main() {
     
     // Integration tests - comprehensive system interactions
     all_passed &= test_constraint_unification_integration();
-    // all_passed &= test_constraint_linear_integration();
-    // all_passed &= test_constraint_async_integration();
-    // all_passed &= test_constraint_optimization_integration();
-    // all_passed &= test_full_system_integration();
+    all_passed &= test_constraint_linear_integration();
+    all_passed &= test_constraint_async_integration();
+    all_passed &= test_constraint_optimization_integration();
+    all_passed &= test_full_system_integration();
     
     all_passed &= test_non_deterministic_choice();
     all_passed &= test_free_variables();
