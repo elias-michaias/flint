@@ -17,6 +17,11 @@ void flint_set_linear_context(Environment* env) {
     current_env = env;
 }
 
+// Clear the linear context (useful for cleanup)
+void flint_clear_linear_context(void) {
+    current_env = NULL;
+}
+
 // =============================================================================
 // LINEAR RESOURCE MANAGEMENT SYSTEM
 // =============================================================================
@@ -35,15 +40,16 @@ void flint_set_linear_context(Environment* env) {
 //
 // =============================================================================
 
-// Global linear trail for backtracking
-static LinearTrail* global_linear_trail = NULL;
+// Global linear trail for backtracking (removed to avoid double-free issues)
+// static LinearTrail* global_linear_trail = NULL;
 
 // =============================================================================
 // TRAIL MANAGEMENT
 // =============================================================================
 
 LinearTrail* flint_create_linear_trail(void) {
-    LinearTrail* trail = (LinearTrail*)malloc(sizeof(LinearTrail));
+    LinearTrail* trail = (LinearTrail*)flint_alloc(sizeof(LinearTrail));
+    
     trail->entries = NULL;
     trail->entry_count = 0;
     trail->capacity = 0;
@@ -58,11 +64,13 @@ void flint_free_linear_trail(LinearTrail* trail) {
     
     if (trail->entries) {
         free(trail->entries);
+        trail->entries = NULL;  // Prevent double-free
     }
     if (trail->checkpoint_stack) {
         free(trail->checkpoint_stack);
+        trail->checkpoint_stack = NULL;  // Prevent double-free
     }
-    free(trail);
+    flint_free(trail);
 }
 
 void flint_trail_record_consumption(LinearTrail* trail, Value* value, LinearOp operation) {
@@ -164,16 +172,13 @@ void flint_trail_commit_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoi
 // =============================================================================
 
 void flint_init_linear_system(void) {
-    global_linear_trail = flint_create_linear_trail();
+    // No global trail needed - each environment manages its own
 }
 
 void flint_cleanup_linear_system(void) {
-    // Note: global trail cleanup temporarily disabled to avoid double-free
-    // Environment trails are cleaned up individually
-    if (global_linear_trail) {
-        // flint_free_linear_trail(global_linear_trail);
-        global_linear_trail = NULL;
-    }
+    // Clear any dangling context references
+    current_env = NULL;
+    // No global trail to clean up - environments handle their own trails
 }
 
 void flint_mark_linear(Value* value) {
@@ -196,9 +201,9 @@ void flint_mark_consumed(Value* value, LinearOp operation) {
     
     value->consumption_count++;
     
-    // Record in appropriate trail - prefer current environment's trail
+    // Record in environment trail if available
     LinearTrail* trail = (current_env && current_env->linear_trail) ? 
-                        current_env->linear_trail : global_linear_trail;
+                        current_env->linear_trail : NULL;
     
     if (trail) {
         flint_trail_record_consumption(trail, value, operation);
@@ -516,13 +521,24 @@ LinearListDestructure flint_linear_destructure_list(Value* list) {
 // =============================================================================
 
 LinearCheckpoint flint_choice_create_linear_checkpoint(void) {
-    return flint_trail_create_checkpoint(global_linear_trail);
+    // Use current environment's trail if available
+    LinearTrail* trail = (current_env && current_env->linear_trail) ? 
+                        current_env->linear_trail : NULL;
+    return trail ? flint_trail_create_checkpoint(trail) : 0;
 }
 
 void flint_choice_rollback_linear(LinearCheckpoint checkpoint) {
-    flint_trail_rollback_to_checkpoint(global_linear_trail, checkpoint);
+    LinearTrail* trail = (current_env && current_env->linear_trail) ? 
+                        current_env->linear_trail : NULL;
+    if (trail) {
+        flint_trail_rollback_to_checkpoint(trail, checkpoint);
+    }
 }
 
 void flint_choice_commit_linear(LinearCheckpoint checkpoint) {
-    flint_trail_commit_checkpoint(global_linear_trail, checkpoint);
+    LinearTrail* trail = (current_env && current_env->linear_trail) ? 
+                        current_env->linear_trail : NULL;
+    if (trail) {
+        flint_trail_commit_checkpoint(trail, checkpoint);
+    }
 }

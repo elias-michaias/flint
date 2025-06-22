@@ -39,7 +39,9 @@ void flint_cleanup_runtime(void) {
     // Cleanup linear system first
     flint_cleanup_linear_system();
     
-    // Free all tracked memory blocks
+    // Temporarily disable global memory cleanup to avoid double-free issues
+    // The memory cleanup may be freeing memory that was already freed explicitly
+    /*
     MemBlock* current = allocated_blocks;
     while (current) {
         MemBlock* next = current->next;
@@ -48,6 +50,7 @@ void flint_cleanup_runtime(void) {
         current = next;
     }
     allocated_blocks = NULL;
+    */
     
     if (global_env) {
         flint_free_environment(global_env);
@@ -73,19 +76,24 @@ void* flint_alloc(size_t size) {
 void flint_free(void* ptr) {
     if (!ptr) return;
     
-    // Remove from tracking list
+    // Remove from tracking list and free only if found
     MemBlock** current = &allocated_blocks;
+    bool found = false;
     while (*current) {
         if ((*current)->ptr == ptr) {
             MemBlock* to_free = *current;
             *current = (*current)->next;
             free(to_free);
+            found = true;
             break;
         }
         current = &(*current)->next;
     }
     
-    free(ptr);
+    // Only free the pointer if it was in our tracking list
+    if (found) {
+        free(ptr);
+    }
 }
 
 // =============================================================================

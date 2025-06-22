@@ -205,6 +205,7 @@ void flint_trail_commit_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoi
 
 // Additional convenience functions for the linear system
 void flint_set_linear_context(Environment* env);
+void flint_clear_linear_context(void);
 Value* flint_share_value(Value* value);
 LinearCheckpoint flint_linear_checkpoint(LinearTrail* trail);
 void flint_linear_restore(LinearTrail* trail, LinearCheckpoint checkpoint);

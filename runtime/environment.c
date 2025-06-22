@@ -26,10 +26,10 @@ void flint_free_environment(Environment* env) {
         flint_free(env->variables);
     }
     
-    // Temporarily disable linear trail cleanup to debug double-free
-    // if (env->linear_trail) {
-    //     flint_free_linear_trail(env->linear_trail);
-    // }
+    // Free the linear trail
+    if (env->linear_trail) {
+        flint_free_linear_trail(env->linear_trail);
+    }
     
     flint_free(env);
 }
