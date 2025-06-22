@@ -3,7 +3,7 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -O2 -g
-INCLUDES = -I. -Ilib/libdill/libdill-install/include
+INCLUDES = -I. -Ilib/libdill/libdill-install/include -Ilib/amoeba
 LDFLAGS = -lm lib/libdill/libdill-install/lib/libdill.a
 
 # Directories
@@ -12,7 +12,7 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c pattern_matching.c linear.c interop.c async.c
+SOURCES = runtime.c unification.c narrowing.c environment.c matching.c constraint.c linear.c interop.c async.c
 HEADERS = types.h runtime.h
 
 # Object files (in object directory)
@@ -72,7 +72,8 @@ $(OBJDIR)/runtime.o: runtime.c runtime.h types.h
 $(OBJDIR)/unification.o: unification.c runtime.h types.h  
 $(OBJDIR)/narrowing.o: narrowing.c runtime.h types.h
 $(OBJDIR)/environment.o: environment.c runtime.h types.h
-$(OBJDIR)/pattern_matching.o: pattern_matching.c runtime.h types.h
+$(OBJDIR)/matching.o: matching.c runtime.h types.h
+$(OBJDIR)/constraint.o: constraint.c runtime.h types.h
 $(OBJDIR)/linear.o: linear.c runtime.h types.h
 $(OBJDIR)/interop.o: interop.c runtime.h types.h
 $(OBJDIR)/async.o: async.c runtime.h types.h

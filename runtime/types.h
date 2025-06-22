@@ -13,6 +13,39 @@ typedef struct ChoicePoint ChoicePoint;
 typedef struct Environment Environment;
 typedef struct ConstraintStore ConstraintStore;
 
+// Amoeba constraint solver integration
+struct am_Solver;     // Forward declare amoeba types
+struct am_Var;
+struct am_Constraint;
+
+// Arithmetic operations for constraints
+typedef enum {
+    ARITH_ADD,       // X + Y = Z
+    ARITH_SUB,       // X - Y = Z
+    ARITH_MUL,       // X * Y = Z
+    ARITH_DIV,       // X / Y = Z
+    ARITH_EQUAL,     // X = Y
+    ARITH_LEQ,       // X <= Y
+    ARITH_GEQ        // X >= Y
+} ArithmeticOp;
+
+// Constraint relation types (maps to amoeba relations)
+typedef enum {
+    CONSTRAINT_EQUAL = 2,        // AM_EQUAL
+    CONSTRAINT_LEQ = 1,          // AM_LESSEQUAL  
+    CONSTRAINT_GEQ = 3,          // AM_GREATEQUAL
+    CONSTRAINT_UNIFY = 100,      // Custom unification constraint
+    CONSTRAINT_TYPE = 101        // Custom type constraint
+} ConstraintType;
+
+// Strength levels for constraints (maps to amoeba strengths)
+typedef enum {
+    STRENGTH_REQUIRED = 1000000000,   // AM_REQUIRED
+    STRENGTH_STRONG = 1000000,        // AM_STRONG
+    STRENGTH_MEDIUM = 1000,           // AM_MEDIUM
+    STRENGTH_WEAK = 1               // AM_WEAK
+} ConstraintStrength;
+
 // Unique identifier type for logical variables
 typedef uint64_t VarId;
 
@@ -122,22 +155,33 @@ struct Environment {
     struct LinearTrail* linear_trail;  // Trail for backtracking linear operations
 };
 
-// Constraint types for the constraint store
-typedef enum {
-    CONSTRAINT_EQUAL,
-    CONSTRAINT_UNIFY,
-    CONSTRAINT_TYPE
-} ConstraintType;
+// Flint constraint variable - links VarId to amoeba variable
+typedef struct {
+    VarId flint_id;              // Flint variable ID
+    struct am_Var* amoeba_var;   // Corresponding amoeba variable
+    char* name;                  // Optional name for debugging
+} FlintConstraintVar;
 
-// Constraint store for accumulated constraints
+// Flint constraint - wraps amoeba constraint with metadata
+typedef struct {
+    struct am_Constraint* amoeba_constraint;  // Amoeba constraint
+    ConstraintType type;                      // Flint constraint type
+    ConstraintStrength strength;              // Constraint strength
+    VarId* variables;                         // Variables involved
+    size_t var_count;                         // Number of variables
+    char* description;                        // Optional description
+} FlintConstraint;
+
+// Constraint store integrating amoeba solver
 struct ConstraintStore {
-    struct {
-        VarId var1, var2;
-        ConstraintType type;
-        Value* constraint_data;
-    }* constraints;
+    struct am_Solver* solver;              // Amoeba constraint solver
+    FlintConstraintVar* variables;         // Constraint variables
+    size_t var_count;
+    size_t var_capacity;
+    FlintConstraint* constraints;          // Flint constraints  
     size_t constraint_count;
-    size_t capacity;
+    size_t constraint_capacity;
+    bool auto_update;                      // Auto-update variable values
 };
 
 // Function signature for narrowing operations

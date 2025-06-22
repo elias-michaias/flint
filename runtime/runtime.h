@@ -109,14 +109,40 @@ void flint_commit_choice(ChoicePoint* choice);
 // CONSTRAINT STORE
 // =============================================================================
 
-// Create a new constraint store
+// Create a new constraint store with amoeba solver
 ConstraintStore* flint_create_constraint_store(void);
 
-// Add a constraint to the store
-void flint_add_constraint(ConstraintStore* store, VarId var1, VarId var2, int constraint_type, Value* data);
+// Free a constraint store and all associated resources
+void flint_free_constraint_store(ConstraintStore* store);
 
-// Solve constraints when variables become instantiated
+// Variable management
+FlintConstraintVar* flint_get_or_create_constraint_var(ConstraintStore* store, VarId var_id, const char* name);
+void flint_suggest_constraint_value(ConstraintStore* store, VarId var_id, double value);
+double flint_get_constraint_value(ConstraintStore* store, VarId var_id);
+
+// Constraint creation
+FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store, 
+                                                ArithmeticOp op,
+                                                VarId* variables,
+                                                size_t var_count,
+                                                double constant,
+                                                ConstraintStrength strength);
+
+// Convenience functions for common constraints
+FlintConstraint* flint_add_equals_constraint(ConstraintStore* store, VarId var1, VarId var2, ConstraintStrength strength);
+FlintConstraint* flint_add_addition_constraint(ConstraintStore* store, VarId x, VarId y, VarId sum, ConstraintStrength strength);
+FlintConstraint* flint_add_subtraction_constraint(ConstraintStore* store, VarId x, VarId y, VarId diff, ConstraintStrength strength);
+FlintConstraint* flint_add_inequality_constraint(ConstraintStore* store, VarId var1, VarId var2, bool less_than, ConstraintStrength strength);
+
+// Constraint removal
+void flint_remove_constraint(ConstraintStore* store, FlintConstraint* constraint);
+
+// Legacy constraint functions (for compatibility)
+void flint_add_constraint(ConstraintStore* store, VarId var1, VarId var2, int constraint_type, Value* data);
 bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* env);
+
+// Debugging
+void flint_print_constraint_values(ConstraintStore* store);
 
 // =============================================================================
 // UTILITY FUNCTIONS

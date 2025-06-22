@@ -479,3 +479,50 @@ Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environ
             return NULL;
     }
 }
+
+void flint_free_value(Value* val) {
+    if (!val) return;
+    
+    // Free dynamically allocated data
+    switch (val->type) {
+        case VAL_STRING:
+            if (val->data.string) {
+                flint_free(val->data.string);
+            }
+            break;
+        case VAL_ATOM:
+            if (val->data.atom) {
+                flint_free(val->data.atom);
+            }
+            break;
+        case VAL_LIST:
+            if (val->data.list.elements) {
+                flint_free(val->data.list.elements);
+            }
+            break;
+        case VAL_RECORD:
+            if (val->data.record.field_names) {
+                for (size_t i = 0; i < val->data.record.field_count; i++) {
+                    if (val->data.record.field_names[i]) {
+                        flint_free(val->data.record.field_names[i]);
+                    }
+                }
+                flint_free(val->data.record.field_names);
+            }
+            if (val->data.record.field_values) {
+                flint_free(val->data.record.field_values);
+            }
+            break;
+        case VAL_LOGICAL_VAR:
+            if (val->data.logical_var) {
+                flint_free(val->data.logical_var);
+            }
+            break;
+        default:
+            // No special cleanup needed for other types
+            break;
+    }
+    
+    // Free the value itself
+    flint_free(val);
+}

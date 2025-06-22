@@ -1,8 +1,10 @@
 #include "runtime.h"
+#include "amoeba.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 // Test utilities
 #define TEST(name) printf("Testing %s...\n", name)
@@ -429,7 +431,97 @@ bool test_complex_unification() {
     return true;
 }
 
-// Test constraint propagation
+// Test multi-variable unification
+bool test_multi_variable_unification() {
+    TEST("Multi-Variable Unification");
+    
+    Environment* env = flint_create_environment(NULL);
+    
+    // Test 1: Chain of variable unifications X = Y = Z = 42
+    Value* varX = flint_create_logical_var(false);
+    Value* varY = flint_create_logical_var(false);
+    Value* varZ = flint_create_logical_var(false);
+    Value* val42 = flint_create_integer(42);
+    
+    // Unify X = Y = Z = 42
+    ASSERT(flint_unify(varX, varY, env));
+    ASSERT(flint_unify(varY, varZ, env));
+    ASSERT(flint_unify(varZ, val42, env));
+    
+    // Check if all variables are bound to 42
+    Value* derefX = flint_deref(varX);
+    Value* derefY = flint_deref(varY);
+    Value* derefZ = flint_deref(varZ);
+    
+    ASSERT(derefX->type == VAL_INTEGER && derefX->data.integer == 42);
+    ASSERT(derefY->type == VAL_INTEGER && derefY->data.integer == 42);
+    ASSERT(derefZ->type == VAL_INTEGER && derefZ->data.integer == 42);
+    
+    // Test 2: Complex structure with many variables [A, B, [C, D]] = [1, 2, [3, 4]]
+    Value* varA = flint_create_logical_var(false);
+    Value* varB = flint_create_logical_var(false);
+    Value* varC = flint_create_logical_var(false);
+    Value* varD = flint_create_logical_var(false);
+    
+    Value* inner_vars[] = {varC, varD};
+    Value* inner_list_vars = flint_create_list(inner_vars, 2);
+    Value* outer_vars[] = {varA, varB, inner_list_vars};
+    Value* var_structure = flint_create_list(outer_vars, 3);
+    
+    Value* val1 = flint_create_integer(1);
+    Value* val2 = flint_create_integer(2);
+    Value* val3 = flint_create_integer(3);
+    Value* val4 = flint_create_integer(4);
+    
+    Value* inner_vals[] = {val3, val4};
+    Value* inner_list_vals = flint_create_list(inner_vals, 2);
+    Value* outer_vals[] = {val1, val2, inner_list_vals};
+    Value* ground_structure = flint_create_list(outer_vals, 3);
+    
+    ASSERT(flint_unify(var_structure, ground_structure, env));
+    
+    // Check that all nested variables got bound correctly
+    Value* derefA = flint_deref(varA);
+    Value* derefB = flint_deref(varB);
+    Value* derefC = flint_deref(varC);
+    Value* derefD = flint_deref(varD);
+    
+    ASSERT(derefA->type == VAL_INTEGER && derefA->data.integer == 1);
+    ASSERT(derefB->type == VAL_INTEGER && derefB->data.integer == 2);
+    ASSERT(derefC->type == VAL_INTEGER && derefC->data.integer == 3);
+    ASSERT(derefD->type == VAL_INTEGER && derefD->data.integer == 4);
+    
+    // Test 3: Chain of many variables (stress test)
+    const int num_vars = 10;
+    Value* vars[num_vars];
+    
+    // Create 10 variables
+    for (int i = 0; i < num_vars; i++) {
+        vars[i] = flint_create_logical_var(false);
+    }
+    
+    // Chain them together: var0 = var1 = var2 = ... = var9
+    for (int i = 0; i < num_vars - 1; i++) {
+        ASSERT(flint_unify(vars[i], vars[i+1], env));
+    }
+    
+    // Bind the last one to a value
+    Value* val999 = flint_create_integer(999);
+    ASSERT(flint_unify(vars[num_vars-1], val999, env));
+    
+    // Check if all variables resolve to 999
+    for (int i = 0; i < num_vars; i++) {
+        Value* deref = flint_deref(vars[i]);
+        ASSERT(deref->type == VAL_INTEGER && deref->data.integer == 999);
+    }
+    
+    flint_free_environment(env);
+    
+    printf("✓ Multi-variable unification tests passed\n");
+    return true;
+}
+
+// Test constraint propagation with new system
 bool test_constraint_propagation() {
     TEST("Constraint Propagation");
     
@@ -438,35 +530,22 @@ bool test_constraint_propagation() {
     env->constraint_store = store;
     
     // Create two variables
-    Value* var1 = flint_create_logical_var(false);
-    Value* var2 = flint_create_logical_var(false);
+    VarId var1_id = flint_fresh_var_id();
+    VarId var2_id = flint_fresh_var_id();
     
-    VarId var1_id = flint_get_logical_var(var1)->id;
-    VarId var2_id = flint_get_logical_var(var2)->id;
+    // Add constraint that var1 == var2 using new constraint system
+    FlintConstraint* eq_constraint = flint_add_equals_constraint(store, var1_id, var2_id, STRENGTH_REQUIRED);
+    ASSERT(eq_constraint != NULL);
     
-    // Add variables to environment first
-    flint_bind_variable(env, var1_id, var1);
-    flint_bind_variable(env, var2_id, var2);
+    // Suggest a value for var1
+    flint_suggest_constraint_value(store, var1_id, 42.0);
     
-    // Add constraint that var1 == var2
-    flint_add_constraint(store, var1_id, var2_id, CONSTRAINT_EQUAL, NULL);
+    // The constraint solver should automatically make var2 equal to var1
+    double var1_value = flint_get_constraint_value(store, var1_id);
+    double var2_value = flint_get_constraint_value(store, var2_id);
     
-    // Bind var1 to a value 
-    Value* val = flint_create_integer(42);
-    LogicalVar* var1_logical = flint_lookup_variable(env, var1_id);
-    var1_logical->binding = val;  // Bind directly
-    
-    // Solve constraints - var2 should get bound to the same value
-    ASSERT(flint_solve_constraints(store, var1_id, env));
-    
-    // Check that var2 got bound (need to dereference to get final value)
-    LogicalVar* var2_binding = flint_lookup_variable(env, var2_id);
-    ASSERT(var2_binding != NULL);
-    ASSERT(var2_binding->binding != NULL);
-    
-    Value* final_val = flint_deref(var2_binding->binding);
-    ASSERT(final_val->type == VAL_INTEGER);
-    ASSERT(final_val->data.integer == 42);
+    ASSERT(var1_value >= 41.9 && var1_value <= 42.1); // Should be approximately 42
+    ASSERT(var2_value >= 41.9 && var2_value <= 42.1); // Should be approximately 42
     
     flint_free_environment(env);
     
@@ -903,7 +982,6 @@ bool test_async_channels() {
     ASSERT(!chan->is_closed);
     
     // Test non-blocking operations (should fail with timeout)
-    Value* test_val = flint_create_integer(42);
     
     // Try to receive from empty channel (should timeout quickly)
     Value* received = flint_channel_recv(chan, 1); // 1ms timeout
@@ -995,6 +1073,204 @@ bool test_async_linear_integration() {
     return true;
 }
 
+// Test flexible constraint system with amoeba
+bool test_flexible_constraints() {
+    TEST("Flexible Constraint System");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    ASSERT(store != NULL);
+    ASSERT(store->solver != NULL);
+    
+    // Create some constraint variables
+    VarId x = flint_fresh_var_id();
+    VarId y = flint_fresh_var_id();
+    VarId z = flint_fresh_var_id();
+    
+    // Add constraint: X + Y = Z
+    VarId add_vars[] = {x, y, z};
+    FlintConstraint* add_constraint = flint_add_arithmetic_constraint(
+        store, ARITH_ADD, add_vars, 3, 0.0, STRENGTH_REQUIRED);
+    ASSERT(add_constraint != NULL);
+    
+    // Suggest some values
+    flint_suggest_constraint_value(store, x, 10.0);
+    flint_suggest_constraint_value(store, y, 15.0);
+    
+    // Check that Z got computed correctly
+    double z_value = flint_get_constraint_value(store, z);
+    ASSERT(z_value >= 24.9 && z_value <= 25.1); // Should be approximately 25
+    
+    // Test inequality constraint: X <= Y
+    FlintConstraint* ineq_constraint = flint_add_inequality_constraint(
+        store, x, y, true, STRENGTH_STRONG);
+    ASSERT(ineq_constraint != NULL);
+    
+    // The constraint should already be satisfied (10 <= 15)
+    double x_value = flint_get_constraint_value(store, x);
+    double y_value = flint_get_constraint_value(store, y);
+    ASSERT(x_value <= y_value + 0.001); // Allow small floating point error
+    
+    flint_print_constraint_values(store);
+    
+    flint_free_environment(env);
+    
+    printf("✓ Flexible constraint tests passed\n");
+    return true;
+}
+
+// Test comprehensive flexible constraint system capabilities
+bool test_flexible_constraint_system() {
+    TEST("Flexible Constraint System - Comprehensive Demo");
+    
+    Environment* env = flint_create_environment(NULL);
+    ConstraintStore* store = flint_create_constraint_store();
+    env->constraint_store = store;
+    
+    printf("\n=== Flexible Constraint System Demo ===\n");
+    
+    // Simple demonstration: Three variables with relationships
+    VarId x = 1;
+    VarId y = 2; 
+    VarId z = 3;
+    
+    printf("Setting up simple constraint problem:\n");
+    printf("- Variables: X, Y, Z\n");
+    printf("- Constraint 1: X + Y = Z\n");
+    printf("- Constraint 2: X >= 5\n");
+    printf("- Constraint 3: Y = 2 * X\n\n");
+    
+    // Get constraint variables
+    FlintConstraintVar* x_var = flint_get_or_create_constraint_var(store, x, "X");
+    FlintConstraintVar* y_var = flint_get_or_create_constraint_var(store, y, "Y");
+    FlintConstraintVar* z_var = flint_get_or_create_constraint_var(store, z, "Z");
+    
+    // Constraint 1: X + Y = Z  (X + Y - Z = 0)
+    am_Constraint* c1 = am_newconstraint(store->solver, AM_REQUIRED);
+    am_addterm(c1, x_var->amoeba_var, 1.0);   // X
+    am_addterm(c1, y_var->amoeba_var, 1.0);   // + Y
+    am_setrelation(c1, AM_EQUAL);
+    am_addterm(c1, z_var->amoeba_var, 1.0);   // = Z
+    am_add(c1);
+    printf("✓ Added constraint: X + Y = Z\n");
+    
+    // Constraint 2: X >= 5  (X - 5 >= 0)
+    am_Constraint* c2 = am_newconstraint(store->solver, AM_REQUIRED);
+    am_addterm(c2, x_var->amoeba_var, 1.0);   // X
+    am_setrelation(c2, AM_GREATEQUAL);
+    am_addconstant(c2, 5.0);                  // >= 5
+    am_add(c2);
+    printf("✓ Added constraint: X >= 5\n");
+    
+    // Constraint 3: Y = 2 * X  (Y - 2*X = 0)
+    am_Constraint* c3 = am_newconstraint(store->solver, AM_REQUIRED);
+    am_addterm(c3, y_var->amoeba_var, 1.0);   // Y
+    am_setrelation(c3, AM_EQUAL);
+    am_addterm(c3, x_var->amoeba_var, 2.0);   // = 2*X
+    am_add(c3);
+    printf("✓ Added constraint: Y = 2*X\n");
+    
+    printf("\nSolving constraints...\n");
+    
+    // Suggest a value for X and let the system solve for Y and Z
+    am_addedit(x_var->amoeba_var, AM_MEDIUM);
+    am_suggest(x_var->amoeba_var, 10.0);
+    printf("Suggested X = 10\n");
+    
+    // Get the solved values
+    double x_val = am_value(x_var->amoeba_var);
+    double y_val = am_value(y_var->amoeba_var);
+    double z_val = am_value(z_var->amoeba_var);
+    
+    printf("\nSolved values:\n");
+    printf("X = %.1f\n", x_val);
+    printf("Y = %.1f\n", y_val);
+    printf("Z = %.1f\n", z_val);
+    
+    // Verify the constraints are satisfied
+    ASSERT(fabs(x_val - 10.0) < 1e-6);       // X should be 10
+    ASSERT(x_val >= 4.99);                   // X should be >= 5
+    
+    // Check Y = 2*X
+    double y_check = y_val - 2.0 * x_val;
+    printf("Y = 2*X check: %.6f (should be ~0)\n", y_check);
+    ASSERT(fabs(y_check) < 1e-6);
+    printf("✓ Y = 2*X constraint satisfied\n");
+    
+    // Check X + Y = Z
+    double z_check = (x_val + y_val) - z_val;
+    printf("X + Y = Z check: %.6f (should be ~0)\n", z_check);
+    ASSERT(fabs(z_check) < 1e-6);
+    printf("✓ X + Y = Z constraint satisfied\n");
+    
+    printf("\n=== Testing Dynamic Changes ===\n");
+    
+    // Change X to a different value
+    am_suggest(x_var->amoeba_var, 6.0);
+    printf("Changed X to 6\n");
+    
+    double new_x = am_value(x_var->amoeba_var);
+    double new_y = am_value(y_var->amoeba_var);
+    double new_z = am_value(z_var->amoeba_var);
+    
+    printf("New values: X=%.1f, Y=%.1f, Z=%.1f\n", new_x, new_y, new_z);
+    
+    // Verify constraints still hold
+    ASSERT(fabs(new_x - 6.0) < 1e-6);
+    ASSERT(fabs(new_y - 2.0 * new_x) < 1e-6);  // Y = 2*X
+    ASSERT(fabs(new_z - (new_x + new_y)) < 1e-6);  // Z = X + Y
+    
+    printf("✓ All constraints satisfied after dynamic change\n");
+    
+    printf("\n=== Testing Inequality Constraints ===\n");
+    
+    // Add a weak preference: prefer Z to be as small as possible
+    VarId w = 4;
+    FlintConstraintVar* w_var = flint_get_or_create_constraint_var(store, w, "W");
+    
+    // W = Z (to create an objective)
+    am_Constraint* c4 = am_newconstraint(store->solver, AM_WEAK);
+    am_addterm(c4, w_var->amoeba_var, 1.0);   // W
+    am_setrelation(c4, AM_EQUAL);
+    am_addterm(c4, z_var->amoeba_var, 1.0);   // = Z
+    am_add(c4);
+    
+    // Minimize W (weak preference to make it small)
+    am_addedit(w_var->amoeba_var, AM_WEAK);
+    am_suggest(w_var->amoeba_var, 0.0);  // Prefer small values
+    
+    double final_x = am_value(x_var->amoeba_var);
+    double final_y = am_value(y_var->amoeba_var);
+    double final_z = am_value(z_var->amoeba_var);
+    
+    printf("Final values with minimization: X=%.1f, Y=%.1f, Z=%.1f\n", 
+           final_x, final_y, final_z);
+    
+    // Should still satisfy the hard constraints
+    ASSERT(final_x >= 4.99);  // X >= 5
+    ASSERT(fabs(final_y - 2.0 * final_x) < 1e-6);  // Y = 2*X
+    ASSERT(fabs(final_z - (final_x + final_y)) < 1e-6);  // Z = X + Y
+    
+    printf("✓ All hard constraints maintained with weak preferences\n");
+    
+    printf("\n=== Summary ===\n");
+    printf("Successfully demonstrated:\n");
+    printf("✓ Linear equality constraints (X + Y = Z, Y = 2*X)\n");
+    printf("✓ Linear inequality constraints (X >= 5)\n");
+    printf("✓ Multiple constraint strengths (required vs weak)\n");
+    printf("✓ Dynamic constraint solving (runtime value changes)\n");
+    printf("✓ Optimization with weak preferences\n");
+    printf("✓ Real-time constraint satisfaction\n");
+    printf("=====================================\n\n");
+    
+    flint_free_environment(env);
+    
+    printf("✓ Flexible constraint system comprehensive tests passed\n");
+    return true;
+}
+
 int main() {
     printf("=== Flint Runtime Test Suite ===\n\n");
     
@@ -1009,10 +1285,13 @@ int main() {
     all_passed &= test_record_operations();
     all_passed &= test_unification();
     all_passed &= test_complex_unification();
+    all_passed &= test_multi_variable_unification();
     all_passed &= test_narrowing();
     all_passed &= test_higher_order_functions();
     all_passed &= test_pattern_matching();
     all_passed &= test_constraint_propagation();
+    all_passed &= test_flexible_constraint_system();
+    all_passed &= test_flexible_constraints();
     all_passed &= test_non_deterministic_choice();
     all_passed &= test_free_variables();
     all_passed &= test_environment();
