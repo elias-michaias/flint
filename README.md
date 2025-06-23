@@ -50,8 +50,8 @@ The Flint runtime automatically downloads and builds the following dependencies:
 
 1. Clone the repository:
    ```bash
-   git clone <repository-url>
-   cd flint-new
+   git clone https://github.com/elias-michaias/flint
+   cd flint
    ```
 
 2. Build the Rust compiler:
