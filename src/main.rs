@@ -3,6 +3,7 @@ mod lexer;
 mod parser;
 mod codegen;
 mod diagnostic;
+mod typechecking;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -134,6 +135,7 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
             if debug {
                 eprintln!("DEBUG: Parsed program:");
                 eprintln!("  Type definitions: {:?}", program.types());
+                eprintln!("  Function signatures: {:?}", program.function_signatures());
                 eprintln!("  Function definitions: {:?}", program.functions());
                 eprintln!("  Effect declarations: {:?}", program.effects());
                 eprintln!("  Effect handlers: {:?}", program.handlers());
@@ -153,18 +155,31 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
         }
     };
     
-    // TODO: Add type checking for the new functional logic language
-    // let mut type_checker = typechecker::TypeChecker::new();
-    // if let Err(e) = type_checker.check_program(&program) {
-    //     let diagnostic = diagnostic::Diagnostic::error(format!("Type error: {}", e))
-    //         .with_location(diagnostic::SourceLocation::new(
-    //             input.to_string_lossy().to_string(),
-    //             1, 1, 1
-    //         ))
-    //         .with_help("Ensure all predicates and terms have proper type declarations".to_string());
-    //     diagnostic.emit();
-    //     std::process::exit(1);
-    // }
+    // Type checking for the functional logic language
+    if debug {
+        eprintln!("DEBUG: Starting type checking...");
+    }
+    
+    let mut type_checker = typechecking::TypeChecker::new()
+        .with_source(input.to_string_lossy().to_string(), source.clone());
+    match type_checker.check_program(&program) {
+        Ok(type_env) => {
+            if debug {
+                eprintln!("DEBUG: Type checking completed successfully");
+                eprintln!("DEBUG: Type environment has {} variables and {} functions", 
+                         type_env.variables.len(), type_env.functions.len());
+            }
+        },
+        Err(e) => {
+            match e {
+                typechecking::TypeCheckError::Diagnostic(diagnostic) => {
+                    let diagnostic_with_source = diagnostic.with_source_text(source.clone());
+                    diagnostic_with_source.emit();
+                }
+            }
+            std::process::exit(1);
+        }
+    };
     
     if debug {
         eprintln!("DEBUG: Parsing completed successfully");

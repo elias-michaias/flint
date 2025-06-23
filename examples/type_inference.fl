@@ -1,0 +1,10 @@
+import C "stdio.h" as stdio
+
+main :: () -> () using C
+
+main :: () => {
+    let $a = 10           // Should infer i32
+    let $b = "Hello"      // Should infer Str  
+    let $c = ~$a + 5       // Should infer i32
+    C.stdio.printf("%d %s %d\n", $a, $b, $c)
+}

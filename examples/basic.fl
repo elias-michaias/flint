@@ -1,7 +1,13 @@
 import C "stdio.h" as stdio
 
-main :: () -> () using C
+f :: (i32) -> i32
+f :: ($x) => $x + 12
 
+main :: () -> () using C
 main :: () => {
-    C.stdio.printf("Hello, World!\n")
+    let $z: Str = "Hello, World!"
+    let $n: i32 = 1
+    let $y: i32 = $n + 10
+    let $a = f($y)
+    C.stdio.printf("%s\n%d\n%d\n", $z, $y, $a)
 }

@@ -162,7 +162,8 @@ impl CodeGenerator {
     /// Convert a Flint variable to a C variable name
     fn var_to_c_name(&self, var: &Variable) -> String {
         if var.is_logic_var {
-            format!("logic_{}", var.name)
+            // For logic variables, just use the name without the $ prefix
+            var.name.clone()
         } else {
             format!("var_{}", var.name)
         }
@@ -477,8 +478,9 @@ impl CodeGenerator {
         
         // Handle logic variables if present
         if self.function_has_logic_vars(func) {
-            writeln!(self.output, "    // Logic variable initialization")?;
-            writeln!(self.output, "    flint_init_logic_vars();")?;
+            writeln!(self.output, "    // Logic variable declarations")?;
+            // For now, declare a general logic variable that pattern matching can use
+            writeln!(self.output, "    Value* x = flint_create_logical_var(true);")?;
         }
         
         // Handle effects if present
@@ -543,7 +545,7 @@ impl CodeGenerator {
         match pattern {
             Pattern::Var(var) => {
                 if var.is_logic_var {
-                    Ok(format!("flint_unify({}, {})", self.var_to_c_name(var), param_name))
+                    Ok(format!("flint_unify({}, {}, NULL)", self.var_to_c_name(var), param_name))
                 } else {
                     Ok(format!("({} = {})", self.var_to_c_name(var), param_name))
                 }
@@ -627,14 +629,29 @@ impl CodeGenerator {
         match expr {
             Expr::Var(var) => {
                 if ctx.in_logic_context && var.is_logic_var {
-                    Ok(format!("flint_deref_logic_var({})", self.var_to_c_name(var)))
+                    Ok(format!("(*(int32_t*)flint_deref({}))", self.var_to_c_name(var)))
+                } else {
+                    Ok(self.var_to_c_name(var))
+                }
+            }
+            
+            Expr::NonConsumptiveVar(var) => {
+                // Non-consumptive variables generate the same code as regular vars
+                // The difference is only in the type checking (no consumption tracking)
+                if ctx.in_logic_context && var.is_logic_var {
+                    Ok(format!("(*(int32_t*)flint_deref({}))", self.var_to_c_name(var)))
                 } else {
                     Ok(self.var_to_c_name(var))
                 }
             }
             
             Expr::Int(n) => {
-                Ok(n.to_string())
+                // In arithmetic/logic context, use plain integer; otherwise cast to void*
+                if ctx.in_logic_context {
+                    Ok(n.to_string())
+                } else {
+                    Ok(format!("((void*)(intptr_t){})", n))
+                }
             }
             
             Expr::Str(s) => {
@@ -668,6 +685,48 @@ impl CodeGenerator {
                 self.generate_c_call_expression(module, function, args)
             }
             
+            Expr::Block { statements, result } => {
+                self.generate_block_expression(statements, result.as_deref(), ctx)
+            }
+            
+            Expr::BinOp { op, left, right } => {
+                // For logic variables in arithmetic context, we need to dereference them
+                let mut left_ctx = ctx.clone();
+                let mut right_ctx = ctx.clone();
+                left_ctx.in_logic_context = true;
+                right_ctx.in_logic_context = true;
+                
+                let left_code = self.generate_expr(left, &mut left_ctx)?;
+                let right_code = self.generate_expr(right, &mut right_ctx)?;
+                let op_str = self.binop_to_c_op(op);
+                
+                // For now, cast the result back to void* to match function return type
+                Ok(format!("((void*)(intptr_t)({} {} {}))", left_code, op_str, right_code))
+            }
+            
+            Expr::Call { func, args } => {
+                // Generate arguments
+                let arg_codes: Result<Vec<_>, _> = args.iter()
+                    .map(|arg| self.generate_expr(arg, ctx))
+                    .collect();
+                let arg_codes = arg_codes?;
+                
+                // Handle function name specially - don't add var_ prefix
+                let func_name = match func.as_ref() {
+                    Expr::Var(var) => {
+                        // For function calls, use the raw function name without var_ prefix
+                        var.name.clone()
+                    }
+                    _ => {
+                        // For more complex function expressions, generate normally
+                        self.generate_expr(func, ctx)?
+                    }
+                };
+                
+                // Generate function call
+                Ok(format!("{}({})", func_name, arg_codes.join(", ")))
+            }
+            
             _ => {
                 // For unsupported expression types, provide error
                 Err(CodegenError::unsupported_feature(
@@ -676,13 +735,24 @@ impl CodeGenerator {
             }
         }
     }
-
+    
     fn generate_c_call_expression(&mut self, module: &str, function: &str, args: &[Expr]) -> Result<String, CodegenError> {
         // Generate arguments
         let arg_codes: Result<Vec<_>, _> = args.iter()
             .map(|arg| self.generate_expr(arg, &mut CompilationContext::new()))
             .collect();
-        let arg_codes = arg_codes?;
+        let mut arg_codes = arg_codes?;
+        
+        // Special handling for printf - cast void* arguments back to appropriate types based on format
+        if function == "printf" && !arg_codes.is_empty() {
+            // For now, assume non-string arguments to printf should be cast to int
+            // This is a simplification - a real implementation would parse the format string
+            for i in 1..arg_codes.len() {
+                if !arg_codes[i].starts_with("\"") { // Not a string literal
+                    arg_codes[i] = format!("(int)(intptr_t){}", arg_codes[i]);
+                }
+            }
+        }
         
         // Simply use the function name directly - C.stdio.printf becomes printf
         Ok(format!("{}({})", function, arg_codes.join(", ")))
@@ -691,6 +761,7 @@ impl CodeGenerator {
     fn expr_type_name(&self, expr: &Expr) -> &'static str {
         match expr {
             Expr::Var(_) => "Var",
+            Expr::NonConsumptiveVar(_) => "NonConsumptiveVar",
             Expr::Int(_) => "Int",
             Expr::Str(_) => "Str",
             Expr::Bool(_) => "Bool",
@@ -700,6 +771,8 @@ impl CodeGenerator {
             Expr::Call { .. } => "Call",
             Expr::CCall { .. } => "CCall",
             Expr::Let { .. } => "Let",
+            Expr::LetTyped { .. } => "LetTyped",
+            Expr::Block { .. } => "Block",
             Expr::Lambda { .. } => "Lambda",
             Expr::Record { .. } => "Record",
             Expr::FieldAccess { .. } => "FieldAccess",
@@ -755,10 +828,22 @@ impl CodeGenerator {
             Expr::Let { value, body, .. } => {
                 self.expr_has_effects(value) || self.expr_has_effects(body)
             }
+            Expr::Block { statements, result } => {
+                statements.iter().any(|stmt| self.statement_has_effects(stmt)) ||
+                result.as_ref().map_or(false, |expr| self.expr_has_effects(expr))
+            }
             Expr::BinOp { left, right, .. } => {
                 self.expr_has_effects(left) || self.expr_has_effects(right)
             }
             _ => false,
+        }
+    }
+    
+    fn statement_has_effects(&self, statement: &Statement) -> bool {
+        match statement {
+            Statement::LetTyped { value, .. } => self.expr_has_effects(value),
+            Statement::Let { value, .. } => self.expr_has_effects(value),
+            Statement::Expr(expr) => self.expr_has_effects(expr),
         }
     }
 
@@ -812,6 +897,17 @@ impl CodeGenerator {
                 let call_code = self.generate_c_call_expression(module, function, args)?;
                 write!(self.output, "{}", call_code)?;
                 writeln!(self.output, ";")?;
+            }
+            Expr::Block { statements, result } => {
+                // Handle block expressions as statements (don't return the result)
+                for statement in statements {
+                    let stmt_code = self.generate_statement(statement, &mut ctx.clone())?;
+                    writeln!(self.output, "        {};", stmt_code)?;
+                }
+                if let Some(result_expr) = result {
+                    // Execute the result expression but don't use its value
+                    self.generate_expression_statement(result_expr, ctx)?;
+                }
             }
             _ => {
                 // For other expressions, generate as normal but don't use the result
@@ -870,6 +966,122 @@ impl CodeGenerator {
         writeln!(self.output)?;
         
         Ok(())
+    }
+
+    fn generate_block_expression(&mut self, statements: &[Statement], result: Option<&Expr>, ctx: &mut CompilationContext) -> Result<String, CodegenError> {
+        let mut code = String::new();
+        
+        // Generate statements
+        for statement in statements {
+            let stmt_code = self.generate_statement(statement, ctx)?;
+            writeln!(code, "    {}", stmt_code)?;
+        }
+        
+        // Generate result expression if present
+        if let Some(result_expr) = result {
+            let result_code = self.generate_expr(result_expr, ctx)?;
+            writeln!(code, "    return {};", result_code)?;
+        }
+        
+        Ok(format!("({{\n{}\n}})", code.trim_end()))
+    }
+    
+    fn generate_statement(&mut self, statement: &Statement, ctx: &mut CompilationContext) -> Result<String, CodegenError> {
+        match statement {
+            Statement::LetTyped { var, var_type, value } => {
+                let c_type = self.flint_type_to_c_type(var_type);
+                let value_code = self.generate_expr(value, ctx)?;
+                let var_name = self.var_to_c_name(var);
+                
+                Ok(format!("{} {} = {};", c_type, var_name, value_code))
+            }
+            Statement::Let { var, value } => {
+                // For type inference, we need to determine the C type from the value
+                let c_type = self.infer_c_type_from_expr(value)?;
+                let value_code = self.generate_expr(value, ctx)?;
+                let var_name = self.var_to_c_name(var);
+                
+                Ok(format!("{} {} = {};", c_type, var_name, value_code))
+            }
+            Statement::Expr(expr) => {
+                let expr_code = self.generate_expr(expr, ctx)?;
+                Ok(format!("{};", expr_code))
+            }
+        }
+    }
+
+    /// Convert Flint binary operator to C operator
+    fn binop_to_c_op(&self, op: &BinOp) -> &'static str {
+        match op {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::Append => "+", // String/list concatenation - simplified to +
+        }
+    }
+
+    /// Infer the C type from an expression for type inference
+    fn infer_c_type_from_expr(&self, expr: &Expr) -> Result<String, CodegenError> {
+        match expr {
+            Expr::Int(_) => Ok("int32_t".to_string()),
+            Expr::Str(_) => Ok("char*".to_string()),
+            Expr::Bool(_) => Ok("bool".to_string()),
+            Expr::Unit => Ok("void".to_string()),
+            Expr::List(_) => Ok("flint_list_t*".to_string()),
+            Expr::Var(var) => {
+                // For variables, we'd need to look up their type in the environment
+                // For now, return a generic type - this should be improved with proper type environment
+                Ok("void*".to_string())
+            }
+            Expr::NonConsumptiveVar(var) => {
+                // Same as regular variables for code generation purposes
+                Ok("void*".to_string())
+            }
+            Expr::BinOp { op, left, right: _ } => {
+                // For binary operations, assume they result in the same type as operands
+                // Most binary ops in our language will be arithmetic on integers
+                match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                        // Arithmetic operations typically result in integers
+                        Ok("int32_t".to_string())
+                    }
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        // Comparison operations result in boolean
+                        Ok("bool".to_string())
+                    }
+                    BinOp::And | BinOp::Or => {
+                        // Logical operations result in boolean
+                        Ok("bool".to_string())
+                    }
+                    _ => {
+                        // For other operations, try to infer from left operand
+                        self.infer_c_type_from_expr(left)
+                    }
+                }
+            }
+            Expr::Call { .. } => {
+                // Function calls would need proper type checking
+                Ok("void*".to_string())
+            }
+            Expr::CCall { .. } => {
+                // C calls typically return int, but this should be improved
+                Ok("int32_t".to_string())
+            }
+            _ => {
+                // For other expressions, use a generic type
+                Ok("void*".to_string())
+            }
+        }
     }
 }
 

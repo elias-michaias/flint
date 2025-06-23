@@ -1,17 +1,33 @@
+use crate::diagnostic::SourceLocation;
+
 /// Variable names in the new language (can be logic variables with $)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Variable {
     pub name: String,
     pub is_logic_var: bool, // true for $var, false for regular var
+    pub location: Option<SourceLocation>, // Source location for error reporting
 }
 
 impl Variable {
     pub fn new(name: String) -> Self {
-        Self { name, is_logic_var: false }
+        Self { 
+            name, 
+            is_logic_var: false,
+            location: None,
+        }
     }
     
-    pub fn logic(name: String) -> Self {
-        Self { name, is_logic_var: true }
+    pub fn new_logic(name: String) -> Self {
+        Self { 
+            name, 
+            is_logic_var: true,
+            location: None,
+        }
+    }
+    
+    pub fn with_location(mut self, location: SourceLocation) -> Self {
+        self.location = Some(location);
+        self
     }
 }
 
@@ -87,6 +103,9 @@ pub enum Expr {
     /// Variable reference
     Var(Variable),
     
+    /// Non-consumptive variable reference (copy) - ~$var
+    NonConsumptiveVar(Variable),
+    
     /// Integer literal
     Int(i64),
     
@@ -126,6 +145,19 @@ pub enum Expr {
         var: Variable,
         value: Box<Expr>,
         body: Box<Expr>,
+    },
+    
+    /// Let statement with explicit type: let $x: Type = expr
+    LetTyped {
+        var: Variable,
+        var_type: FlintType,
+        value: Box<Expr>,
+    },
+    
+    /// Block expression: { stmt1; stmt2; ... expr }
+    Block {
+        statements: Vec<Statement>,
+        result: Option<Box<Expr>>,
     },
     
     /// Lambda: |$x| => body
@@ -177,6 +209,26 @@ pub enum Expr {
         op: UnaryOp,
         expr: Box<Expr>,
     },
+}
+
+/// Statements in blocks
+#[derive(Debug, Clone)]
+pub enum Statement {
+    /// Let statement with explicit type: let $x: Type = expr
+    LetTyped {
+        var: Variable,
+        var_type: FlintType,
+        value: Expr,
+    },
+    
+    /// Let statement with type inference: let $x = expr
+    Let {
+        var: Variable,
+        value: Expr,
+    },
+    
+    /// Expression statement
+    Expr(Expr),
 }
 
 /// Pattern matching arms
@@ -343,6 +395,17 @@ impl Program {
         self.declarations.iter().filter_map(|decl| {
             if let Declaration::FunctionDef(func) = decl {
                 Some(func)
+            } else {
+                None
+            }
+        }).collect()
+    }
+    
+    /// Get all function signatures  
+    pub fn function_signatures(&self) -> Vec<(&String, &FlintType)> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::FunctionSig { name, type_sig } = decl {
+                Some((name, type_sig))
             } else {
                 None
             }

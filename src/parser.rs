@@ -384,8 +384,9 @@ impl FlintParser {
         match self.current_token() {
             Token::LogicVar(name) => {
                 let name = name.clone();
+                let location = self.current_location();
                 self.advance();
-                Ok(Pattern::Var(Variable::logic(name)))
+                Ok(Pattern::Var(Variable::new_logic(name).with_location(location)))
             }
             Token::Underscore => {
                 self.advance();
@@ -553,10 +554,26 @@ impl FlintParser {
     /// Parse primary expressions
     fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
         match self.current_token() {
+            Token::Tilde => {
+                self.advance(); // consume '~'
+                match self.current_token() {
+                    Token::LogicVar(name) => {
+                        let name = name.clone();
+                        let location = self.current_location();
+                        self.advance();
+                        Ok(Expr::NonConsumptiveVar(Variable::new_logic(name).with_location(location)))
+                    }
+                    _ => {
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax("Expected logic variable after '~'".to_string(), location))
+                    }
+                }
+            }
             Token::LogicVar(name) => {
                 let name = name.clone();
+                let location = self.current_location();
                 self.advance();
-                Ok(Expr::Var(Variable::logic(name)))
+                Ok(Expr::Var(Variable::new_logic(name).with_location(location)))
             }
             Token::Identifier(name) => {
                 let name = name.clone();
@@ -591,7 +608,7 @@ impl FlintParser {
                     }
                 }
                 
-                Ok(Expr::Var(Variable::new(name)))
+                Ok(Expr::Var(Variable::new(name).with_location(self.current_location())))
             }
             Token::Integer(n) => {
                 let n = *n;
@@ -661,11 +678,8 @@ impl FlintParser {
                 }
             }
             Token::LeftBrace => {
-                // Parse block expression: { expr }
-                self.advance();
-                let expr = self.parse_expr()?;
-                self.expect(Token::RightBrace)?;
-                Ok(expr)
+                // Parse block expression: { statements; result_expr }
+                self.parse_block()
             }
             Token::CModule(module) => {
                 let module = module.clone();
@@ -803,13 +817,15 @@ impl FlintParser {
         match self.current_token() {
             Token::LogicVar(name) => {
                 let name = name.clone();
+                let location = self.current_location();
                 self.advance();
-                Ok(Variable::logic(name))
+                Ok(Variable::new_logic(name).with_location(location))
             }
             Token::Identifier(name) => {
                 let name = name.clone();
+                let location = self.current_location();
                 self.advance();
-                Ok(Variable::new(name))
+                Ok(Variable::new(name).with_location(location))
             }
             _ => Err(ParseError::invalid_syntax("Expected variable".to_string(), self.current_location()))
         }
@@ -881,6 +897,88 @@ impl FlintParser {
             Token::PipeGt => Some(BinOp::Append),
             _ => None,
         }
+    }
+    
+    /// Parse block expression: { statements; optional_expr }
+    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume '{'
+        
+        let mut statements = Vec::new();
+        let mut result = None;
+        
+        while !matches!(self.current_token(), Token::RightBrace) {
+            // Save current position for backtracking
+            let checkpoint = self.current;
+            
+            // Try to parse a statement first
+            match self.try_parse_statement() {
+                Ok(stmt) => {
+                    statements.push(stmt);
+                    
+                    // Consume optional semicolon
+                    if matches!(self.current_token(), Token::Semicolon) {
+                        self.advance();
+                    }
+                }
+                Err(_) => {
+                    // Restore position and try to parse as final expression
+                    self.current = checkpoint;
+                    let expr = self.parse_block_expr()?;
+                    result = Some(Box::new(expr));
+                    break;
+                }
+            }
+        }
+        
+        self.expect(Token::RightBrace)?;
+        
+        Ok(Expr::Block { statements, result })
+    }
+    
+    /// Try to parse a statement (returns error if it's not a statement)
+    fn try_parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match self.current_token() {
+            Token::Let => {
+                self.advance(); // consume 'let'
+                
+                // Parse variable - must be a logic variable with $
+                let var = self.parse_variable()?;
+                
+                // Check if this is a typed let statement: let $var: Type = value
+                if matches!(self.current_token(), Token::Colon) {
+                    self.advance(); // consume ':'
+                    let var_type = self.parse_type()?;
+                    
+                    // Expect assignment: = value
+                    self.expect(Token::Equal)?;
+                    let value = self.parse_expr()?;
+                    
+                    Ok(Statement::LetTyped { var, var_type, value })
+                } else if matches!(self.current_token(), Token::Equal) {
+                    // This is an untyped let statement: let $var = value
+                    self.advance(); // consume '='
+                    let value = self.parse_expr()?;
+                    
+                    Ok(Statement::Let { var, value })
+                } else {
+                    // Invalid let statement syntax
+                    let location = self.current_location();
+                    Err(ParseError::invalid_syntax("Expected ':' or '=' after variable in let statement".to_string(), location))
+                }
+            }
+            _ => {
+                // This is not a statement we recognize
+                let location = self.current_location();
+                Err(ParseError::invalid_syntax("Expected statement".to_string(), location))
+            }
+        }
+    }
+    
+    /// Parse a block expression (used when statement parsing fails)
+    fn parse_block_expr(&mut self) -> Result<Expr, ParseError> {
+        // This parses the remaining expression in a block
+        // It should not try to parse statements, just expressions
+        self.parse_binary_expr()
     }
 }
 

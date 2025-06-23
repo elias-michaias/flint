@@ -17,7 +17,7 @@ impl Colors {
 }
 
 /// Represents a location in source code
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     pub file: String,
     pub line: usize,

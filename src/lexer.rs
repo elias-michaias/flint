@@ -82,6 +82,7 @@ pub enum Token {
     Or,             // ||
     Not,            // !
     Dot,            // .
+    Tilde,          // ~ (non-consumptive copy)
     
     // Punctuation
     LeftParen,      // (
@@ -206,6 +207,7 @@ fn parse_keywords(input: &str) -> IResult<&str, Token> {
 fn parse_type_keywords(input: &str) -> IResult<&str, Token> {
     alt((
         map(keyword_with_boundary("i32"), |_| Token::I32),
+        map(keyword_with_boundary("Str"), |_| Token::Str),
         map(keyword_with_boundary("str"), |_| Token::Str),
         map(keyword_with_boundary("bool"), |_| Token::Bool),
         map(keyword_with_boundary("List"), |_| Token::List),
@@ -252,6 +254,7 @@ fn parse_operators_part2(input: &str) -> IResult<&str, Token> {
         map(tag(">"), |_| Token::Greater),
         map(tag("!"), |_| Token::Not),
         map(tag("."), |_| Token::Dot),
+        map(tag("~"), |_| Token::Tilde),
     ))(input)
 }
 
