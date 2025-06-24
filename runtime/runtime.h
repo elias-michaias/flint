@@ -13,6 +13,40 @@ void flint_init_runtime(void);
 // Cleanup the runtime system  
 void flint_cleanup_runtime(void);
 
+// Get the global environment
+Environment* flint_get_global_env(void);
+
+// Get the global constraint store
+ConstraintStore* flint_get_global_constraint_store(void);
+
+// Function registry management
+void flint_register_function(const char* name, Value* (*func_ptr)(Value*));
+void flint_register_function_2(const char* name, Value* (*func_ptr)(Value*, Value*));
+Value* flint_call_registered_function(const char* name, Value* arg);
+Value* flint_call_registered_function_2(const char* name, Value* arg1, Value* arg2);
+bool flint_is_function_registered(const char* name);
+
+// Value conversion helpers
+int flint_value_to_int(Value* val);
+double flint_value_to_double(Value* val);
+const char* flint_value_to_string(Value* val);
+
+// Arithmetic constraint solving
+bool flint_solve_arithmetic_constraint(Value* left, Value* right, Value* result, const char* operation);
+
+// Pending arithmetic constraint management
+ArithmeticConstraint* flint_create_arithmetic_constraint(const char* operation, Value* left, Value* right, Value* result);
+void flint_free_arithmetic_constraint(ArithmeticConstraint* constraint);
+bool flint_add_pending_arithmetic_constraint(ArithmeticConstraint* constraint, Environment* env);
+bool flint_solve_pending_arithmetic_constraint(ArithmeticConstraint* constraint, Environment* env);
+void flint_check_pending_constraints_for_var(VarId var_id, Environment* env);
+void flint_check_all_pending_constraints(Environment* env);
+
+// Logic programming solution generators
+bool flint_generate_add_solutions(Value* left, Value* right, Value* result, Environment* env);
+bool flint_generate_subtract_solutions(Value* left, Value* right, Value* result, Environment* env);
+bool flint_generate_multiply_solutions(Value* left, Value* right, Value* result, Environment* env);
+
 // Allocate memory with automatic cleanup tracking
 void* flint_alloc(size_t size);
 
@@ -41,6 +75,9 @@ bool flint_is_fully_applied(Value* func);
 Value* flint_create_logical_var(bool is_linear);
 LogicalVar* flint_get_logical_var(Value* val);
 
+// Bind unbound logic variables (for constraint solving)
+bool flint_bind_first_unbound_var(int value);
+
 // Deep copy values (respecting linearity)
 Value* flint_copy_value(Value* val);
 
@@ -65,6 +102,12 @@ Value* flint_deref(Value* val);
 
 // Safe dereference with null checking (used internally)
 Value* flint_deref_value(Value* val);
+
+// Assert that two values are equal (used for constraint checking)
+bool flint_assert_equal(Value* val1, Value* val2);
+
+// Solve constraints by unifying two values
+bool flint_solve_constraint(Value* val1, Value* val2);
 
 // =============================================================================
 // UNIFIED CONSTRAINT-UNIFICATION INTERFACE
@@ -105,6 +148,16 @@ Suspension* flint_create_suspension(SuspensionType type, VarId* deps, size_t dep
 // Resume all suspensions waiting on a variable
 void flint_resume_suspensions(VarId var_id, Environment* env);
 
+// Add suspension to variable's waiting list
+void flint_add_suspension_to_var(LogicalVar* var, Suspension* susp);
+
+// Lazy evaluation support
+Value* flint_create_arithmetic_suspension(const char* op, Value* left, Value* right);
+Value* flint_create_function_call_suspension(const char* func_name, Value* args[], size_t arg_count);
+Value* flint_create_generic_suspension(void);
+Value* flint_force_value(Value* val);
+Value* flint_create_suspended_value(Suspension* susp);
+
 // =============================================================================
 // ENVIRONMENT MANAGEMENT
 // =============================================================================
@@ -117,6 +170,7 @@ void flint_free_environment(Environment* env);
 
 // Bind a variable in the environment
 void flint_bind_variable(Environment* env, VarId var_id, Value* val);
+void flint_register_unbound_variable(Environment* env, VarId var_id, LogicalVar* var);
 
 // Look up a variable in the environment
 LogicalVar* flint_lookup_variable(Environment* env, VarId var_id);
@@ -163,6 +217,25 @@ FlintConstraint* flint_add_addition_constraint(ConstraintStore* store, VarId x, 
 FlintConstraint* flint_add_subtraction_constraint(ConstraintStore* store, VarId x, VarId y, VarId diff, ConstraintStrength strength);
 FlintConstraint* flint_add_inequality_constraint(ConstraintStore* store, VarId var1, VarId var2, bool less_than, ConstraintStrength strength);
 
+// Arithmetic constraint helpers
+bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target);
+bool flint_add_multi_var_linear_constraint(ConstraintStore* store, VarId* var_ids, double* coefficients, 
+                                         size_t var_count, double constant, double target, 
+                                         ConstraintStrength strength);
+bool flint_solve_function_constraint(ConstraintStore* store, VarId var_id, int target_value);
+bool flint_add_function_constraint(ConstraintStore* store, const char* function_name, VarId var_id, int target_value);
+bool flint_solve_general_arithmetic_constraint(ConstraintStore* store, const char* function_name, 
+                                             VarId var_id, double target_value);
+bool flint_add_arithmetic_relationship(ConstraintStore* store, VarId var1, VarId var2, VarId result, 
+                                     ArithmeticOp operation, ConstraintStrength strength);
+
+// Solve function constraints using backtracking
+void flint_solve_function_constraint_runtime(const char* function_name, Value* arg_var, Value* target_value, Environment* env);
+
+// Enhanced value suggestion functions
+bool flint_suggest_multiple_values(ConstraintStore* store, VarId* var_ids, double* values, size_t count);
+void flint_stop_suggesting_values(ConstraintStore* store, VarId* var_ids, size_t count);
+
 // Constraint removal
 void flint_remove_constraint(ConstraintStore* store, FlintConstraint* constraint);
 
@@ -170,8 +243,10 @@ void flint_remove_constraint(ConstraintStore* store, FlintConstraint* constraint
 void flint_add_constraint(ConstraintStore* store, VarId var1, VarId var2, int constraint_type, Value* data);
 bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* env);
 
-// Debugging
+// Debugging and introspection
 void flint_print_constraint_values(ConstraintStore* store);
+bool flint_is_constraint_system_satisfiable(ConstraintStore* store);
+void flint_print_constraint_system_status(ConstraintStore* store);
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -188,6 +263,12 @@ VarId* flint_get_free_vars(Value* val, size_t* count);
 
 // Generate a fresh variable ID
 VarId flint_fresh_var_id(void);
+
+// Get next variable ID
+VarId flint_next_var_id(void);
+
+// Create unbound variable with given ID
+Value* flint_create_unbound_variable(VarId id);
 
 // =============================================================================
 // PATTERN MATCHING ENGINE

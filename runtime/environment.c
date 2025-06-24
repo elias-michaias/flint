@@ -85,6 +85,26 @@ LogicalVar* flint_lookup_variable(Environment* env, VarId var_id) {
     return NULL;
 }
 
+void flint_register_unbound_variable(Environment* env, VarId var_id, LogicalVar* var) {
+    // Check if variable is already registered
+    for (size_t i = 0; i < env->var_count; i++) {
+        if (env->variables[i]->id == var_id) {
+            return; // Already registered
+        }
+    }
+    
+    // Expand the variables array if needed
+    if (env->var_count >= env->capacity) {
+        env->capacity = (env->capacity == 0) ? 8 : (env->capacity * 2);
+        env->variables = realloc(env->variables, sizeof(LogicalVar*) * env->capacity);
+    }
+    
+    env->variables[env->var_count] = var;
+    env->var_count++;
+    
+    printf("[DEBUG] Registered unbound variable %llu in environment (total: %zu)\n", var_id, env->var_count);
+}
+
 // =============================================================================
 // CHOICE POINTS AND BACKTRACKING
 // =============================================================================

@@ -9,23 +9,23 @@ The goal is to utilize a resource-consumption model of data processing that allo
 ## Examples
 
 ```
-// becomes namespaced under built-in C effect
+// automatically resolves C imports
+// becomes submodule scoped under C effect
 import C "stdio.h" as stdio
 
-f :: (i32) -> i32
-f :: ($x) => $x + 12
+// Test file for unification constraints
+add :: (i32, i32) -> i32
+add :: ($x, $y) => $x + $y
 
-// algebraic effect typing
-// C functions can not be guaranteed to be pure
+// C = algebraic effect
 main :: () -> () using C
-main :: () => {
-    let $z: Str = "Hello, World!"
-    let $n: i32 = 1
-    let $y: i32 = $n + 10
-    // ~ prefix = reuse operator, copy instead of consume
-    let $a = f(~$y)
-    C.stdio.printf("%s\n%d\n%d\n", $z, $y, $a)
+main :: () => { 
+    let add($z, 2) = 11
+    let add($a, $z) = 15
+    let $test = add(~$a, ~$a)
+    C.stdio.printf("Result: a = %d, z = %d, test = %d\n", $a, $z, $test)
 }
+
 ```
 
 ## Build Instructions

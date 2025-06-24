@@ -4,6 +4,7 @@ mod parser;
 mod codegen;
 mod diagnostic;
 mod typechecking;
+mod ir;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -43,6 +44,9 @@ enum Commands {
         /// Enable debug output
         #[arg(long)]
         debug: bool,
+        /// Dump IR to file
+        #[arg(long)]
+        ir: bool,
     },
     /// Check a program
     Check {
@@ -60,6 +64,7 @@ enum Commands {
 /// Result of the parsing pipeline
 struct ParsedProgram {
     program: Program,
+    ir_program: ir::IRProgram,
     source: String,
     input_path: PathBuf,
 }
@@ -71,8 +76,8 @@ fn main() {
         Commands::Run { input, debug } => {
             run_command(input, debug)
         }
-        Commands::Compile { input, output, executable, debug } => {
-            compile_command(input, output, executable, debug)
+        Commands::Compile { input, output, executable, debug, ir } => {
+            compile_command(input, output, executable, debug, ir)
         }
         Commands::Check { input, report, debug } => {
             check_command(input, report, debug)
@@ -180,6 +185,37 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
             std::process::exit(1);
         }
     };
+
+    // IR Analysis - build intermediate representation
+    if debug {
+        eprintln!("DEBUG: Starting IR analysis...");
+    }
+    
+    let mut ir_builder = ir::IRBuilder::new(&program);
+    let ir_program = ir_builder.build();
+    
+    if debug {
+        eprintln!("DEBUG: IR analysis completed successfully");
+        eprintln!("DEBUG: Found {} functions in IR", ir_program.functions.len());
+        eprintln!("DEBUG: Global constraints: {}", ir_program.global_constraints.len());
+        eprintln!("DEBUG: Symbol table size: {}", ir_program.symbol_table.len());
+        
+        // Print detailed IR for each function
+        for func in &ir_program.functions {
+            eprintln!("=== IR for function '{}' ===", func.name);
+            eprintln!("  Parameters: {:?}", func.parameters);
+            eprintln!("  Determinism: {:?}", func.determinism);
+            eprintln!("  Body: {}", func.body);
+            eprintln!("  Constraints:");
+            for constraint in &func.constraints {
+                eprintln!("    {}", constraint);
+            }
+            eprintln!("  Binding analysis:");
+            for (symbol, status) in &func.binding_analysis {
+                eprintln!("    {} -> {:?}", symbol.name, status);
+            }
+        }
+    }
     
     if debug {
         eprintln!("DEBUG: Parsing completed successfully");
@@ -279,9 +315,44 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
     
     Ok(ParsedProgram {
         program,
+        ir_program,
         source,
         input_path: input,
     })
+}
+
+/// Helper function for cross-platform C compilation with dead code elimination
+fn setup_c_compiler(debug: bool) -> Command {
+    // Cross-platform compiler detection and configuration
+    let (compiler, dead_code_flags) = if cfg!(target_os = "macos") {
+        ("clang", vec!["-Wl,-dead_strip"])
+    } else if cfg!(target_os = "windows") {
+        ("gcc", vec!["-Wl,--gc-sections"])
+    } else {
+        // Linux and others
+        ("gcc", vec!["-Wl,--gc-sections"])
+    };
+    
+    let mut command = Command::new(compiler);
+    command
+        .arg("-std=c99")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-O2")
+        .arg("-march=native")
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections");
+    
+    // Add dead code elimination flags
+    for flag in dead_code_flags {
+        command.arg(flag);
+    }
+    
+    if debug {
+        command.arg("-DDEBUG");
+    }
+    
+    command
 }
 
 /// Run command: compile and execute functional logic programs
@@ -331,21 +402,10 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     
     // Compile to executable
     let exe_file = temp_dir.join("program");
-    let mut command = Command::new(if cfg!(target_os = "macos") { "clang" } else { "gcc" });
-    command
-        .arg("-std=c99")
-        .arg("-Wall")
-        .arg("-Wextra")
-        .arg("-O2");
     
-    if debug {
-        command.arg("-DDEBUG");
-    }
-    
-    let status = command
+    let status = setup_c_compiler(debug)
         .arg(&c_file)
         .arg("runtime/out/libflint_runtime.a")
-        .arg("runtime/lib/libdill/libdill-install/lib/libdill.a")
         .arg("-I")
         .arg("runtime")
         .arg("-I")
@@ -384,8 +444,24 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
 }
 
 /// Compile command: generate C code and optionally compile to executable
-fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, debug: bool, dump_ir: bool) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_program(input, debug)?;
+    
+    // Dump IR if requested
+    if dump_ir {
+        let ir_path = {
+            let mut path = parsed.input_path.clone();
+            let filename = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            path.set_file_name(format!("{}.ir", filename));
+            path
+        };
+        
+        let ir_content = format!("{}", parsed.ir_program);
+        fs::write(&ir_path, ir_content)?;
+        println!("IR dumped to: {}", ir_path.display());
+    }
     
     // Generate C code
     let mut codegen = codegen::CodeGenerator::new().with_debug(debug);
@@ -426,31 +502,13 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
             path
         };
         
-        let mut command = Command::new(if cfg!(target_os = "macos") { "clang" } else { "gcc" });
-        command
-            .arg("-std=c99")
-            .arg("-Wall")
-            .arg("-Wextra")
-            .arg("-O2");
-        
-        if debug {
-            command.arg("-DDEBUG");
-        }
-        
-        let status = command
+        let status = setup_c_compiler(debug)
             .arg(&output_path)
-            .arg("runtime/object/runtime.o")
-            .arg("runtime/object/async.o")
-            .arg("runtime/object/constraint.o")
-            .arg("runtime/object/environment.o")
-            .arg("runtime/object/interop.o")
-            .arg("runtime/object/linear.o")
-            .arg("runtime/object/list.o")
-            .arg("runtime/object/matching.o")
-            .arg("runtime/object/narrowing.o")
-            .arg("runtime/object/unification.o")
+            .arg("runtime/out/libflint_runtime.a")
             .arg("-I")
             .arg("runtime")
+            .arg("-I")
+            .arg("runtime/lib/libdill/libdill-install/include")
             .arg("-o")
             .arg(&exe_path)
             .status()?;

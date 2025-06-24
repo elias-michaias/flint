@@ -35,7 +35,8 @@ typedef enum {
     CONSTRAINT_LEQ = 1,          // AM_LESSEQUAL  
     CONSTRAINT_GEQ = 3,          // AM_GREATEQUAL
     CONSTRAINT_UNIFY = 100,      // Custom unification constraint
-    CONSTRAINT_TYPE = 101        // Custom type constraint
+    CONSTRAINT_TYPE = 101,       // Custom type constraint
+    CONSTRAINT_FUNCTION = 102    // Custom function constraint f(x) = target
 } ConstraintType;
 
 // Strength levels for constraints (maps to amoeba strengths)
@@ -48,6 +49,19 @@ typedef enum {
 
 // Unique identifier type for logical variables
 typedef uint64_t VarId;
+
+// Function registry for dynamic function calls during constraint solving
+typedef struct FunctionRegistryEntry {
+    char* name;                    // Function name
+    int arity;                     // Number of arguments
+    void* func_ptr;               // Function pointer (generic)
+    struct FunctionRegistryEntry* next; // Linked list
+} FunctionRegistryEntry;
+
+typedef struct FunctionRegistry {
+    FunctionRegistryEntry* entries;
+    size_t count;
+} FunctionRegistry;
 
 // Value types in the functional logic system
 typedef enum {
@@ -122,6 +136,7 @@ typedef enum {
     SUSP_UNIFICATION,       // Delayed unification
     SUSP_FUNCTION_CALL,     // Delayed function evaluation
     SUSP_CONSTRAINT,        // Delayed constraint checking
+    SUSP_ARITHMETIC,        // Delayed arithmetic constraint
     SUSP_NARROWING          // Delayed narrowing operation
 } SuspensionType;
 
@@ -134,6 +149,26 @@ struct Suspension {
     Suspension* next;       // Linked list of suspensions
     bool is_active;         // Whether this suspension is still relevant
 };
+
+// Suspension computation data structure
+typedef struct SuspensionComputation {
+    SuspensionType type;
+    char* function_name;     // Function name for function calls
+    char* expr_code;         // For simple expressions
+    Value** operands;        // Operands for arithmetic operations
+    size_t operand_count;    // Number of operands
+    void* data;              // Generic data pointer
+} SuspensionComputation;
+
+// Arithmetic constraint for pending constraint mechanism
+typedef struct ArithmeticConstraint {
+    char* operation;        // "add", "subtract", "multiply", etc.
+    Value* left;           // Left operand (can be logical var or concrete)
+    Value* right;          // Right operand (can be logical var or concrete)
+    Value* result;         // Result (can be logical var or concrete)
+    VarId* dependency_vars; // Variables this constraint depends on
+    size_t dependency_count; // Number of dependencies
+} ArithmeticConstraint;
 
 // Choice points for backtracking in narrowing
 struct ChoicePoint {
@@ -167,9 +202,13 @@ typedef struct {
     struct am_Constraint* amoeba_constraint;  // Amoeba constraint
     ConstraintType type;                      // Flint constraint type
     ConstraintStrength strength;              // Constraint strength
-    VarId* variables;                         // Variables involved
+    VarId* var_ids;                           // Variable IDs involved
     size_t var_count;                         // Number of variables
     char* description;                        // Optional description
+    
+    // For function constraints
+    char* function_name;                      // Function name (for CONSTRAINT_FUNCTION)
+    int target_value;                         // Target value (for CONSTRAINT_FUNCTION)
 } FlintConstraint;
 
 // Constraint store integrating amoeba solver

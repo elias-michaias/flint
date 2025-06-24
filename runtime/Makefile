@@ -1,11 +1,74 @@
 # Makefile for Flint Runtime System
 # Supports Curry-style functional logic programming with narrowing
 
+# ==============================================================================
+# CROSS-PLATFORM DETECTION AND TOOLCHAIN CONFIGURATION
+# ==============================================================================
+
+# Detect platform
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+# Platform-specific settings
+ifeq ($(UNAME_S),Darwin)
+    PLATFORM = macos
+    CC ?= clang
+    AR = ar
+    RANLIB = ranlib
+    SHARED_EXT = .dylib
+    STATIC_EXT = .a
+    # macOS-specific flags for dead code elimination
+    LDFLAGS_DEAD_CODE = -Wl,-dead_strip
+    # Use native optimization
+    ARCH_FLAGS = -march=native
+else ifeq ($(UNAME_S),Linux)
+    PLATFORM = linux
+    CC ?= gcc
+    AR = ar
+    RANLIB = ranlib
+    SHARED_EXT = .so
+    STATIC_EXT = .a
+    # Linux-specific flags for dead code elimination
+    LDFLAGS_DEAD_CODE = -Wl,--gc-sections
+    # Use native optimization
+    ARCH_FLAGS = -march=native
+else ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
+    PLATFORM = windows
+    CC ?= gcc
+    AR = ar
+    RANLIB = ranlib
+    SHARED_EXT = .dll
+    STATIC_EXT = .a
+    # Windows/MinGW flags for dead code elimination
+    LDFLAGS_DEAD_CODE = -Wl,--gc-sections
+    ARCH_FLAGS = -march=native
+else ifeq ($(findstring CYGWIN,$(UNAME_S)),CYGWIN)
+    PLATFORM = windows
+    CC ?= gcc
+    AR = ar
+    RANLIB = ranlib
+    SHARED_EXT = .dll
+    STATIC_EXT = .a
+    # Windows/Cygwin flags for dead code elimination
+    LDFLAGS_DEAD_CODE = -Wl,--gc-sections
+    ARCH_FLAGS = -march=native
+else
+    PLATFORM = unknown
+    CC ?= gcc
+    AR = ar
+    RANLIB = ranlib
+    SHARED_EXT = .so
+    STATIC_EXT = .a
+    LDFLAGS_DEAD_CODE = -Wl,--gc-sections
+    ARCH_FLAGS = -march=native
+endif
+
 # Compiler and build configuration
-CC = gcc
-CFLAGS = -Wall -Wextra -std=c99 -O2 -g
+CFLAGS = -Wall -Wextra -std=c99 -O2 -g $(ARCH_FLAGS)
+# Add function/data sections for dead code elimination
+CFLAGS += -ffunction-sections -fdata-sections
 INCLUDES = -I. -I$(LIBDILL_INSTALL_DIR)/include -I$(AMOEBA_DIR)
-LDFLAGS = -lm $(LIBDILL_LIBRARY)
+LDFLAGS = -lm $(LIBDILL_LIBRARY) $(LDFLAGS_DEAD_CODE)
 
 # ==============================================================================
 # DEPENDENCY CONFIGURATION - All dependency settings in one place
@@ -52,13 +115,31 @@ OBJECTS = $(addprefix $(OBJDIR)/,$(SOURCES:.c=.o))
 # Library name (in out directory)
 LIBRARY = $(OUTDIR)/libflint_runtime.a
 
+# Temporary directory for extracting libdill objects
+LIBDILL_EXTRACT_DIR = $(OUTDIR)/libdill_objects
+
 # Test programs (all .c files in test directory)
 TEST_SOURCES = $(wildcard $(TESTDIR)/*.c)
 TEST_PROGRAMS = $(TEST_SOURCES:$(TESTDIR)/%.c=$(TESTDIR)/%)
 
-.PHONY: all clean test install dirs deps check-deps list-deps clean-deps clean-all
+.PHONY: all clean test install dirs deps check-deps list-deps clean-deps clean-all platform-info
 
 all: deps dirs $(LIBRARY)
+
+# ==============================================================================
+# PLATFORM AND BUILD INFORMATION
+# ==============================================================================
+
+platform-info:
+	@echo "🔧 Platform and Build Information:"
+	@echo "  Platform: $(PLATFORM) ($(UNAME_S) $(UNAME_M))"
+	@echo "  Compiler: $(CC)"
+	@echo "  Archiver: $(AR)"
+	@echo "  CFLAGS: $(CFLAGS)"
+	@echo "  LDFLAGS: $(LDFLAGS)"
+	@echo "  Dead code elimination: $(LDFLAGS_DEAD_CODE)"
+	@echo "  Architecture: $(ARCH_FLAGS)"
+	@echo ""
 
 # ==============================================================================
 # DEPENDENCY MANAGEMENT
@@ -127,10 +208,16 @@ dirs:
 	@mkdir -p $(OBJDIR)
 	@mkdir -p $(TESTDIR)
 	@mkdir -p $(OUTDIR)
+	@mkdir -p $(LIBDILL_EXTRACT_DIR)
 
-$(LIBRARY): $(OBJECTS)
-	ar rcs $@ $^
+$(LIBRARY): $(OBJECTS) $(LIBDILL_LIBRARY)
+	@echo "📦 Creating self-contained libflint_runtime.a with embedded libdill..."
+	@# Extract libdill objects to temporary directory
+	@cd $(LIBDILL_EXTRACT_DIR) && ar x ../../$(LIBDILL_LIBRARY)
+	@# Create the library with both Flint and libdill objects
+	ar rcs $@ $(OBJECTS) $(LIBDILL_EXTRACT_DIR)/*.o
 	ranlib $@
+	@echo "✅ Self-contained library created: $(LIBRARY)"
 
 # All object files depend on dependencies being ready first
 $(OBJECTS): | $(LIBDILL_STATUS) $(AMOEBA_STATUS)
@@ -155,7 +242,8 @@ clean:
 	rm -f $(OBJECTS) $(LIBRARY) $(TEST_PROGRAMS)
 	rm -f $(OBJDIR)/*.o
 	rm -f $(TESTDIR)/*.o
-	rm -f $(OUTDIR)/*
+	rm -rf $(OUTDIR)/*
+	rm -rf $(LIBDILL_EXTRACT_DIR)
 
 clean-deps:
 	@echo "🧹 Cleaning dependencies..."

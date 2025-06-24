@@ -399,12 +399,23 @@ impl TypeChecker {
                     self.consumed_variables.insert(var.name.clone());
                     Ok(var_type.clone())
                 } else {
-                    let location = if let Some(ref loc) = var.location {
-                        loc.clone()
+                    // Check if this is a logic variable (starts with $)
+                    if var.is_logic_var {
+                        // For undefined logic variables, create them with i32 type by default
+                        // This allows constraint solving to work with unbound variables
+                        let var_type = FlintType::Int32;
+                        self.env.add_variable(var.name.clone(), var_type.clone());
+                        // Mark as consumed for linearity tracking
+                        self.consumed_variables.insert(var.name.clone());
+                        Ok(var_type)
                     } else {
-                        self.default_location()
-                    };
-                    Err(TypeCheckError::undefined_variable(&var.name, location))
+                        let location = if let Some(ref loc) = var.location {
+                            loc.clone()
+                        } else {
+                            self.default_location()
+                        };
+                        Err(TypeCheckError::undefined_variable(&var.name, location))
+                    }
                 }
             }
             
@@ -414,12 +425,22 @@ impl TypeChecker {
                     // Do NOT mark variable as consumed - this is a copy operation
                     Ok(var_type.clone())
                 } else {
-                    let location = if let Some(ref loc) = var.location {
-                        loc.clone()
+                    // Check if this is a logic variable (starts with $)
+                    if var.is_logic_var {
+                        // For undefined logic variables, create them with i32 type by default
+                        // This allows constraint solving to work with unbound variables
+                        let var_type = FlintType::Int32;
+                        self.env.add_variable(var.name.clone(), var_type.clone());
+                        // Do NOT mark as consumed for non-consumptive access
+                        Ok(var_type)
                     } else {
-                        self.default_location()
-                    };
-                    Err(TypeCheckError::undefined_variable(&var.name, location))
+                        let location = if let Some(ref loc) = var.location {
+                            loc.clone()
+                        } else {
+                            self.default_location()
+                        };
+                        Err(TypeCheckError::undefined_variable(&var.name, location))
+                    }
                 }
             }
             
@@ -517,6 +538,30 @@ impl TypeChecker {
                 
                 // LetTyped is a statement, not an expression, so it doesn't have a meaningful return type
                 // But we'll return Unit for consistency
+                Ok(FlintType::Unit)
+            }
+            
+            Expr::LetConstraint { expr, target } => {
+                // Save the current consumed variables state
+                let saved_consumed = self.consumed_variables.clone();
+                
+                // Type check both the expression and target
+                let expr_type = self.infer_expression_type(expr)?;
+                let target_type = self.infer_expression_type(target)?;
+                
+                // Restore the consumed variables state (constraints don't consume variables)
+                self.consumed_variables = saved_consumed;
+                
+                // Ensure the expression and target have compatible types
+                if !self.types_compatible(&expr_type, &target_type) {
+                    let location = SourceLocation::new("unknown".to_string(), 0, 0, 0);
+                    return Err(TypeCheckError::type_mismatch(expr_type, target_type, location));
+                }
+                
+                // Note: We don't extract unbound variables for consumption tracking
+                // because constraints should not consume the variables they reference
+                
+                // LetConstraint solves for variables, so it returns Unit
                 Ok(FlintType::Unit)
             }
             
@@ -706,12 +751,34 @@ impl TypeChecker {
     
     /// Check if a type is numeric
     fn is_numeric_type(&self, typ: &FlintType) -> bool {
-        matches!(typ, FlintType::Int32)
+        matches!(typ, FlintType::Int32 | FlintType::TypeVar(_))
     }
     
     /// Check if a type is orderable
     fn is_orderable_type(&self, typ: &FlintType) -> bool {
-        matches!(typ, FlintType::Int32 | FlintType::String)
+        matches!(typ, FlintType::Int32 | FlintType::String | FlintType::TypeVar(_))
+    }
+    
+    /// Extract unbound variables from an expression for constraint solving
+    fn extract_unbound_variables(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Var(var) => {
+                // Mark variable as consumed (it will be bound by the constraint)
+                self.consumed_variables.insert(var.name.clone());
+            }
+            Expr::Call { args, .. } => {
+                // Recursively extract from arguments
+                for arg in args {
+                    self.extract_unbound_variables(arg);
+                }
+            }
+            Expr::BinOp { left, right, .. } => {
+                self.extract_unbound_variables(left);
+                self.extract_unbound_variables(right);
+            }
+            // Add more cases as needed for other expression types
+            _ => {}
+        }
     }
 }
 

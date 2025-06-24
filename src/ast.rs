@@ -154,6 +154,12 @@ pub enum Expr {
         value: Box<Expr>,
     },
     
+    /// Constraint solving: let f($x) = value
+    LetConstraint {
+        expr: Box<Expr>,
+        target: Box<Expr>,
+    },
+    
     /// Block expression: { stmt1; stmt2; ... expr }
     Block {
         statements: Vec<Statement>,

@@ -475,6 +475,8 @@ impl FlintParser {
     fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {
         if matches!(self.current_token(), Token::Let) {
             self.advance();
+            
+            // Traditional let binding: let $var = expr in body
             let var = self.parse_variable()?;
             self.expect(Token::Equal)?;
             let value = self.parse_expr()?;
@@ -720,8 +722,16 @@ impl FlintParser {
             let result_type = self.parse_type()?;
             
             // Convert to function type
-            let params = if let FlintType::Function { params, .. } = base_type {
-                params
+            let params = if let FlintType::Function { params, result, .. } = base_type {
+                // If base_type is already a function (from tuple parameters), use its params
+                // but ignore the placeholder result
+                if matches!(result.as_ref(), FlintType::Unit) {
+                    // This was a tuple parameter, use the params
+                    params
+                } else {
+                    // This was a real function type, treat as curried
+                    vec![FlintType::Function { params, result, effects: Vec::new() }]
+                }
             } else {
                 vec![base_type]
             };
@@ -781,9 +791,33 @@ impl FlintParser {
                     self.advance();
                     Ok(FlintType::Unit)
                 } else {
-                    let ty = self.parse_type()?;
-                    self.expect(Token::RightParen)?;
-                    Ok(ty)
+                    // Parse first type
+                    let first_type = self.parse_type()?;
+                    
+                    // Check if there are more types (tuple parameter syntax)
+                    if matches!(self.current_token(), Token::Comma) {
+                        let mut params = vec![first_type];
+                        
+                        while matches!(self.current_token(), Token::Comma) {
+                            self.advance(); // consume comma
+                            let param_type = self.parse_type()?;
+                            params.push(param_type);
+                        }
+                        
+                        self.expect(Token::RightParen)?;
+                        
+                        // Return a special representation that will be handled in parse_type
+                        // We'll create a temporary function type with no result (to be filled in later)
+                        Ok(FlintType::Function {
+                            params,
+                            result: Box::new(FlintType::Unit), // placeholder
+                            effects: Vec::new(),
+                        })
+                    } else {
+                        // Single parenthesized type
+                        self.expect(Token::RightParen)?;
+                        Ok(first_type)
+                    }
                 }
             }
             _ => Err(ParseError::invalid_syntax("Expected type".to_string(), self.current_location()))
@@ -941,29 +975,45 @@ impl FlintParser {
             Token::Let => {
                 self.advance(); // consume 'let'
                 
-                // Parse variable - must be a logic variable with $
-                let var = self.parse_variable()?;
-                
-                // Check if this is a typed let statement: let $var: Type = value
-                if matches!(self.current_token(), Token::Colon) {
-                    self.advance(); // consume ':'
-                    let var_type = self.parse_type()?;
+                // Check if this is a constraint (let expr = value) or regular let (let $var = expr)
+                if matches!(self.current_token(), Token::LogicVar(_)) {
+                    // Regular let statement: let $var = expr or let $var: Type = expr
+                    let var = self.parse_variable()?;
                     
-                    // Expect assignment: = value
-                    self.expect(Token::Equal)?;
-                    let value = self.parse_expr()?;
-                    
-                    Ok(Statement::LetTyped { var, var_type, value })
-                } else if matches!(self.current_token(), Token::Equal) {
-                    // This is an untyped let statement: let $var = value
-                    self.advance(); // consume '='
-                    let value = self.parse_expr()?;
-                    
-                    Ok(Statement::Let { var, value })
+                    // Check if this is a typed let statement: let $var: Type = value
+                    if matches!(self.current_token(), Token::Colon) {
+                        self.advance(); // consume ':'
+                        let var_type = self.parse_type()?;
+                        
+                        // Expect assignment: = value
+                        self.expect(Token::Equal)?;
+                        let value = self.parse_expr()?;
+                        
+                        Ok(Statement::LetTyped { var, var_type, value })
+                    } else if matches!(self.current_token(), Token::Equal) {
+                        // This is an untyped let statement: let $var = value
+                        self.advance(); // consume '='
+                        let value = self.parse_expr()?;
+                        
+                        Ok(Statement::Let { var, value })
+                    } else {
+                        // Invalid let statement syntax
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax("Expected ':' or '=' after variable in let statement".to_string(), location))
+                    }
                 } else {
-                    // Invalid let statement syntax
-                    let location = self.current_location();
-                    Err(ParseError::invalid_syntax("Expected ':' or '=' after variable in let statement".to_string(), location))
+                    // Constraint statement: let expr = target
+                    let expr = self.parse_expr()?;
+                    self.expect(Token::Equal)?;
+                    let target = self.parse_expr()?;
+                    
+                    // Convert constraint to expression statement
+                    let constraint_expr = Expr::LetConstraint {
+                        expr: Box::new(expr),
+                        target: Box::new(target),
+                    };
+                    
+                    Ok(Statement::Expr(constraint_expr))
                 }
             }
             _ => {
