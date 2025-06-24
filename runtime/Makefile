@@ -106,11 +106,11 @@ TESTDIR = test
 OUTDIR = out
 
 # Source files
-SOURCES = runtime.c unification.c narrowing.c environment.c matching.c constraint.c linear.c interop.c async.c list.c
+SOURCES = runtime.c unification.c narrowing.c environment.c matching.c constraint.c linear.c interop/c.c async.c list.c
 HEADERS = types.h runtime.h
 
-# Object files (in object directory)
-OBJECTS = $(addprefix $(OBJDIR)/,$(SOURCES:.c=.o))
+# Object files (in object directory) - flatten the names
+OBJECTS = $(OBJDIR)/runtime.o $(OBJDIR)/unification.o $(OBJDIR)/narrowing.o $(OBJDIR)/environment.o $(OBJDIR)/matching.o $(OBJDIR)/constraint.o $(OBJDIR)/linear.o $(OBJDIR)/c.o $(OBJDIR)/async.o $(OBJDIR)/list.o
 
 # Library name (in out directory)
 LIBRARY = $(OUTDIR)/libflint_runtime.a
@@ -270,5 +270,9 @@ $(OBJDIR)/environment.o: environment.c runtime.h types.h
 $(OBJDIR)/matching.o: matching.c runtime.h types.h
 $(OBJDIR)/constraint.o: constraint.c runtime.h types.h
 $(OBJDIR)/linear.o: linear.c runtime.h types.h
-$(OBJDIR)/interop.o: interop.c runtime.h types.h
+$(OBJDIR)/c.o: interop/c.c runtime.h types.h
+	$(CC) $(CFLAGS) -c interop/c.c -o $@
+
+$(OBJDIR)/python.o: interop/python.c runtime.h types.h
+	$(CC) $(CFLAGS) -c interop/python.c -o $@
 $(OBJDIR)/async.o: async.c runtime.h types.h
