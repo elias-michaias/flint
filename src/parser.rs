@@ -1,57 +1,65 @@
 use crate::ast::*;
 use crate::lexer::{Token, TokenSpan};
-use crate::diagnostic::{Diagnostic, DiagnosticBuilder, SourceLocation};
+use crate::diagnostic::{Diagnostic, SourceLocation};
 
 #[derive(Debug)]
-pub struct Parser {
+pub struct FlintParser {
     tokens: Vec<TokenSpan>,
     current: usize,
-    file_path: String,
-    source_text: String,
-    debug: bool,
+    filename: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
-    #[error("Unexpected token: expected {expected}, found {found:?}")]
-    UnexpectedToken { expected: String, found: Token },
-    
-    #[error("Unexpected end of input")]
-    UnexpectedEof,
-    
-    #[error("Invalid expression")]
-    InvalidExpression,
-    
-    #[error("Invalid syntax: {0}")]
-    InvalidSyntax(String),
-    
-    #[error("Diagnostic error")]
+    #[error("Parse error")]
     Diagnostic(Diagnostic),
 }
 
-enum TypeDeclaration {
-    Predicate(PredicateType),
-    Term(TermType),
-    BatchTerms(Vec<String>, LogicType),
-    TypeDefinition(TypeDefinition),  // New type definition
-}
-
-impl Parser {
-    pub fn new(tokens: Vec<TokenSpan>, file_path: String, source_text: String) -> Self {
-        Self { tokens, current: 0, file_path, source_text, debug: false }
+impl ParseError {
+    pub fn unexpected_token(expected: String, found: Token, location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error(format!("Unexpected token: expected {}, found {:?}", expected, found))
+            .with_location(location);
+        Self::Diagnostic(diagnostic)
     }
     
-    pub fn with_debug(mut self, debug: bool) -> Self {
-        self.debug = debug;
-        self
+    pub fn unexpected_eof(location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error("Unexpected end of input".to_string())
+            .with_location(location);
+        Self::Diagnostic(diagnostic)
+    }
+    
+    pub fn invalid_syntax(message: String, location: SourceLocation) -> Self {
+        let diagnostic = Diagnostic::error(format!("Invalid syntax: {}", message))
+            .with_location(location);
+        Self::Diagnostic(diagnostic)
+    }
+}
+
+impl FlintParser {
+    pub fn new(tokens: Vec<TokenSpan>) -> Self {
+        Self::new_with_filename(tokens, "input".to_string())
+    }
+    
+    pub fn new_with_filename(tokens: Vec<TokenSpan>, filename: String) -> Self {
+        Self { tokens, current: 0, filename }
     }
     
     fn current_token(&self) -> &Token {
         self.tokens.get(self.current).map(|ts| &ts.token).unwrap_or(&Token::Eof)
     }
     
-    fn current_token_span(&self) -> Option<&TokenSpan> {
-        self.tokens.get(self.current)
+    fn current_location(&self) -> SourceLocation {
+        if let Some(token_span) = self.tokens.get(self.current) {
+            SourceLocation::new(self.filename.clone(), token_span.line, token_span.column, token_span.length)
+        } else {
+            // End of file location
+            let last_token = self.tokens.last();
+            if let Some(last) = last_token {
+                SourceLocation::new(self.filename.clone(), last.line, last.column + last.length, 1)
+            } else {
+                SourceLocation::new(self.filename.clone(), 1, 1, 1)
+            }
+        }
     }
     
     fn advance(&mut self) -> &Token {
@@ -64,10 +72,6 @@ impl Parser {
     fn peek_token(&self) -> Option<&Token> {
         self.tokens.get(self.current + 1).map(|ts| &ts.token)
     }
-
-    fn peek_token_at(&self, offset: usize) -> Option<&Token> {
-        self.tokens.get(self.current + offset).map(|ts| &ts.token)
-    }
     
     fn expect(&mut self, expected: Token) -> Result<(), ParseError> {
         let current = self.current_token().clone();
@@ -75,507 +79,539 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            let current_span = self.current_token_span();
-            if let Some(span) = current_span {
-                let diagnostic = Diagnostic::error(format!("Expected {:?}, found {:?}", expected, span.token))
-                    .with_location(SourceLocation::new(
-                        self.file_path.clone(),
-                        span.line,
-                        span.column,
-                        span.length,
-                    ))
-                    .with_source_text(self.source_text.clone());
-                Err(ParseError::Diagnostic(diagnostic))
-            } else {
-                Err(ParseError::UnexpectedToken {
-                    expected: format!("{:?}", expected),
-                    found: current,
-                })
-            }
+            let location = self.current_location();
+            Err(ParseError::unexpected_token(format!("{:?}", expected), current, location))
         }
     }
     
-    fn create_error_diagnostic(&self, message: String) -> ParseError {
-        let current_span = self.current_token_span();
-        if let Some(span) = current_span {
-            let diagnostic = Diagnostic::error(message)
-                .with_location(SourceLocation::new(
-                    self.file_path.clone(),
-                    span.line,
-                    span.column,
-                    span.length,
-                ))
-                .with_source_text(self.source_text.clone());
-            ParseError::Diagnostic(diagnostic)
-        } else {
-            ParseError::InvalidExpression
-        }
-    }
-    
+    /// Parse a complete program
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
-        let mut type_definitions = Vec::new();
-        let mut type_declarations = Vec::new();
-        let mut term_types = Vec::new();
-        let mut functions = Vec::new();
-        let mut clauses = Vec::new();
-        let mut queries = Vec::new();
-        let mut main = None;
+        let mut declarations = Vec::new();
         
-        // Parse type declarations, clauses, functions, and queries
         while !matches!(self.current_token(), Token::Eof) {
-            match self.current_token() {
-                Token::Query => {
-                    // Parse query: ?- goal1, goal2.
-                    queries.push(self.parse_query()?);
-                }
-                Token::Bang => {
-                    // Persistent fact: !fact(args). or !name :: predicate(args).
-                    clauses.push(self.parse_persistent_clause()?);
-                }
-                Token::Persistent => {
-                    // New persistent syntax: persistent name :: fact
-                    clauses.push(self.parse_persistent_clause()?);
-                }
-                Token::Type => {
-                    // New type definition: type name [(variants)] [is supertype].
-                    let type_decl = self.parse_type_declaration()?;
-                    self.expect(Token::Dot)?; // Expect period after type definition
-                    if let TypeDeclaration::TypeDefinition(type_def) = type_decl {
-                        type_definitions.push(type_def);
-                    }
-                }
-                Token::Identifier(_) => {
-                    // Check if this is a new-style type definition (name :: [distinct] type [of supertype].)
-                    if self.peek_new_type_definition() {
-                        let type_def = self.parse_new_type_definition()?;
-                        if let TypeDeclaration::TypeDefinition(td) = type_def {
-                            type_definitions.push(td);
-                        }
-                        self.expect(Token::Dot)?;
-                    }
-                    // Check if this is an old-style type declaration (name :: type_signature.)
-                    else if self.peek_type_declaration() {
-                        // Parse the type declaration and decide if it's a predicate or term
-                        let type_decl = self.parse_type_declaration()?;
-                        match type_decl {
-                            TypeDeclaration::Predicate(pred_type) => {
-                                type_declarations.push(pred_type);
-                            }
-                            TypeDeclaration::Term(term_type) => {
-                                term_types.push(term_type.clone());
-                                
-                                // REMOVED: No longer create nullary facts for singleton resources
-                                // The new syntax requires all resources to be relational predicates
-                            }
-                            TypeDeclaration::BatchTerms(names, logic_type) => {
-                                // Create individual TermType entries for each name
-                                for name in &names {
-                                    term_types.push(TermType { name: name.clone(), term_type: logic_type.clone() });
-                                }
-                                
-                                // REMOVED: No longer create nullary facts for singleton resources
-                            }
-                            TypeDeclaration::TypeDefinition(_) => {
-                                // This shouldn't happen since we handle Token::Type separately now
-                                unreachable!("TypeDefinition should be handled by Token::Type case")
-                            }
-                        }
-                    } else if self.peek_function_def() {
-                        functions.push(self.parse_function()?);
-                    } else if self.peek_clause() {
-                        clauses.push(self.parse_clause()?);
-                    } else {
-                        // Main expression
-                        main = Some(self.parse_expression()?);
-                        break;
-                    }
-                }
-                Token::Eof => {
-                    // End of file reached, exit the loop
-                    break;
-                }
-                _ => {
-                    // Main expression or unexpected token
-                    main = Some(self.parse_expression()?);
-                    break;
-                }
-            }
+            declarations.push(self.parse_declaration()?);
         }
         
-        self.expect(Token::Eof)?;
-        
-        Ok(Program { 
-            type_definitions,
-            type_declarations, 
-            term_types, 
-            functions, 
-            clauses, 
-            queries, 
-            main 
-        })
+        Ok(Program { declarations })
     }
     
-    fn peek_function_def(&self) -> bool {
-        // Look ahead to see if this is a function definition
-        // Pattern: identifier ( identifier : type ) : type = expr
-        if self.current + 4 < self.tokens.len() {
-            matches!(
-                (&self.tokens[self.current + 1].token, &self.tokens[self.current + 3].token),
-                (Token::LeftParen, Token::Identifier(_))
-            )
-        } else {
-            false
-        }
-    }
-    
-    fn peek_clause(&self) -> bool {
-        // Look for patterns like: 
-        // - pred(args) :- body.
-        // - pred(args).
-        // - !pred(args).
-        // - name :: pred(args).  (named facts)
-        
-        // Check for named fact pattern: identifier :: identifier(args).
-        if matches!(self.current_token(), Token::Identifier(_)) {
-            if let Some(Token::ColonColon) = self.peek_token_at(1) {
-                // Look ahead to see if this is a named fact
-                let mut i = 2;
-                while let Some(token) = self.peek_token_at(i) {
-                    match token {
-                        Token::Identifier(_) => {
-                            // Check if followed by left paren (predicate call)
-                            if let Some(Token::LeftParen) = self.peek_token_at(i + 1) {
-                                return true; // This is a named fact: name :: pred(args)
-                            }
-                            i += 1;
-                        }
-                        Token::Dot => return false, // name :: type.
-                        Token::Arrow => return false, // name :: type -> type.
-                        Token::Type => return false, // name :: type
-                        _ => i += 1,
-                    }
-                }
-            }
-        }
-        
-        // Check for other clause patterns
-        for i in self.current..self.tokens.len() {
-            match &self.tokens[i].token {
-                Token::Dot => return true,
-                Token::Rule => return true,
-                Token::Equal => return false, // Function definition
-                _ => continue,
-            }
-        }
-        false
-    }
-    
-    fn peek_type_declaration(&self) -> bool {
-        // Look for pattern: identifier [, identifier]* :: type_signature.
-        // But exclude fact declarations which have: identifier :: predicate_call.
-        // Type signatures typically contain 'type', '->', or basic type keywords
-        // Predicate calls contain parentheses and concrete arguments
-        if !matches!(self.current_token(), Token::Identifier(_)) {
-            return false;
-        }
-        
-        // Check if we can find :: after potential comma-separated identifiers
-        let mut i = 1;
-        loop {
-            match self.peek_token_at(i) {
-                Some(Token::ColonColon) => {
-                    // Found ::, now check what comes after to distinguish type decl from fact decl
-                    let mut j = i + 1;
-                    while j < 20 { // reasonable lookahead limit
-                        match self.peek_token_at(j) {
-                            Some(Token::FatArrow) => {
-                                // Found =>, this is a Celf-style rule, not a type declaration
-                                return false;
-                            }
-                            Some(Token::Type) | Some(Token::Arrow) => {
-                                // Found type keyword or arrow, this is a type declaration
-                                return true;
-                            }
-                            Some(Token::LeftParen) => {
-                                // Found left paren, this is likely a predicate call (fact), not type decl
-                                return false;
-                            }
-                            Some(Token::Identifier(name)) => {
-                                // Check if this identifier is followed by parentheses (predicate call)
-                                // or if it's a type name
-                                if let Some(Token::LeftParen) = self.peek_token_at(j + 1) {
-                                    // predicate_name(args) - this is a fact declaration
-                                    return false;
-                                }
-                                // Could be a type name, continue looking
-                                j += 1;
-                            }
-                            Some(Token::Dot) => {
-                                // Found ., assume this is a type declaration if we haven't found
-                                // clear evidence of a predicate call
-                                return true;
-                            }
-                            Some(Token::Eof) => {
-                                return false;
-                            }
-                            _ => {
-                                j += 1;
-                            }
-                        }
-                    }
-                    // If we didn't find clear evidence either way within reasonable distance,
-                    // be conservative and assume it's not a type declaration
-                    return false;
-                }
-                Some(Token::Comma) => {
-                    // Check if next token after comma is identifier
-                    if let Some(Token::Identifier(_)) = self.peek_token_at(i + 1) {
-                        i += 2; // Skip comma and identifier
-                        continue;
-                    } else {
-                        return false;
-                    }
-                }
-                _ => return false,
-            }
-        }
-    }
-
-    fn peek_predicate_type(&self) -> bool {
-        // Look ahead to see if this is a predicate type (contains arrow)
-        // We need to look past the identifier :: part
-        let mut i = 2; // Skip identifier and ::
-        while let Some(token) = self.peek_token_at(i) {
-            match token {
-                Token::Arrow => return true,
-                Token::Dot => return false,
-                _ => i += 1,
-            }
-        }
-        false
-    }
-
-    fn peek_term_type(&self) -> bool {
-        // Look for pattern: name : type.
-        // Must be: Identifier followed by Colon, then some type, then Dot
-        if self.current + 3 < self.tokens.len() {
-            matches!((&self.tokens[self.current].token, &self.tokens[self.current + 1].token), 
-                     (Token::Identifier(_), Token::Colon)) &&
-            // Look ahead to make sure it ends with dot and not other clause patterns
-            self.tokens[self.current + 2..].iter().take_while(|t| !matches!(t.token, Token::Dot | Token::Eof)).any(|_| true) &&
-            self.tokens[self.current + 2..].iter().find(|t| matches!(t.token, Token::Dot | Token::Rule | Token::LeftParen)).map_or(false, |t| matches!(t.token, Token::Dot))
-        } else {
-            false
-        }
-    }
-    
-    fn peek_new_type_definition(&self) -> bool {
-        // Look for pattern: identifier :: [distinct] type [of supertype] .
-        if !matches!(self.current_token(), Token::Identifier(_)) {
-            return false;
-        }
-        
-        // Check for :: after identifier
-        if !matches!(self.peek_token_at(1), Some(Token::ColonColon)) {
-            return false;
-        }
-        
-        // Look for type keyword (possibly after distinct)
-        let mut i = 2; // Start after ::
-        
-        // Skip optional 'distinct' keyword
-        if matches!(self.peek_token_at(i), Some(Token::Distinct)) {
-            i += 1;
-        }
-        
-        // Look for 'type' keyword
-        if matches!(self.peek_token_at(i), Some(Token::Type)) {
-            return true;
-        }
-        
-        false
-    }
-
-    fn parse_function(&mut self) -> Result<Function, ParseError> {
-        // Parse: name(param: param_type): return_type = body
-        let name = match self.current_token() {
+    /// Parse a top-level declaration
+    fn parse_declaration(&mut self) -> Result<Declaration, ParseError> {
+        match self.current_token() {
+            Token::Import => self.parse_c_import(),
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                name
+                
+                match self.current_token() {
+                    Token::DoubleColon => {
+                        self.advance();
+                        
+                        // Check if this is a type definition, effect, handler, or function
+                        match self.current_token() {
+                            Token::Record => self.parse_record_type_def(name),
+                            Token::Effect => self.parse_effect_decl(name),
+                            Token::Handler => self.parse_effect_handler(name),
+                            _ => {
+                                // Could be function signature or definition
+                                if self.is_type_expression() {
+                                    // Function type signature
+                                    let type_sig = self.parse_type()?;
+                                    Ok(Declaration::FunctionSig { name, type_sig })
+                                } else {
+                                    // Function definition with pattern
+                                    let func_def = self.parse_function_def(name)?;
+                                    Ok(Declaration::FunctionDef(func_def))
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax(
+                            "Expected '::' after identifier in declaration".to_string(),
+                            location
+                        ))
+                    }
+                }
             }
-            _ => return Err(ParseError::InvalidExpression),
-        };
+            Token::Main => {
+                // "main" can be used as a regular identifier for function declarations
+                // or as a special main declaration like "main :: functionName"
+                let name = "main".to_string();
+                self.advance();
+                
+                match self.current_token() {
+                    Token::DoubleColon => {
+                        self.advance();
+                        
+                        // Check if this is a type signature or a main declaration
+                        if self.is_type_expression() {
+                            // Function type signature: main :: () -> ()
+                            let type_sig = self.parse_type()?;
+                            Ok(Declaration::FunctionSig { name, type_sig })
+                        } else if let Token::LeftParen = self.current_token() {
+                            // Function definition: main :: () => { ... }
+                            let func_def = self.parse_function_def(name)?;
+                            Ok(Declaration::FunctionDef(func_def))
+                        } else if let Token::Identifier(main_func) = self.current_token() {
+                            // Main declaration: main :: functionName
+                            let main_func = main_func.clone();
+                            self.advance();
+                            Ok(Declaration::Main(main_func))
+                        } else {
+                            let location = self.current_location();
+                            Err(ParseError::invalid_syntax("Expected type signature, function definition, or function name after 'main ::'".to_string(), location))
+                        }
+                    }
+                    _ => {
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax(
+                            "Expected '::' after 'main'".to_string(),
+                            location
+                        ))
+                    }
+                }
+            }
+            _ => {
+                let location = self.current_location();
+                Err(ParseError::unexpected_token(
+                    "declaration".to_string(),
+                    self.current_token().clone(),
+                    location
+                ))
+            }
+        }
+    }
+    
+    /// Parse C import: import C "header.h" as Module
+    fn parse_c_import(&mut self) -> Result<Declaration, ParseError> {
+        self.expect(Token::Import)?;
+        self.expect(Token::Identifier("C".to_string()))?;
         
+        if let Token::String(header_file) = self.current_token() {
+            let header_file = header_file.clone();
+            self.advance();
+            self.expect(Token::As)?;
+            
+            if let Token::Identifier(alias) = self.current_token() {
+                let alias = alias.clone();
+                self.advance();
+                
+                Ok(Declaration::CImport(CImport { header_file, alias }))
+            } else {
+                Err(ParseError::invalid_syntax("Expected module alias after 'as'".to_string(), self.current_location()))
+            }
+        } else {
+            Err(ParseError::invalid_syntax("Expected string literal for header file".to_string(), self.current_location()))
+        }
+    }
+    
+    /// Parse record type definition: User :: record { name: str, age: i32 }
+    fn parse_record_type_def(&mut self, name: String) -> Result<Declaration, ParseError> {
+        self.expect(Token::Record)?;
+        self.expect(Token::LeftBrace)?;
+        
+        let mut fields = Vec::new();
+        
+        while !matches!(self.current_token(), Token::RightBrace) {
+            if let Token::Identifier(field_name) = self.current_token() {
+                let field_name = field_name.clone();
+                self.advance();
+                self.expect(Token::Colon)?;
+                let field_type = self.parse_type()?;
+                fields.push((field_name, field_type));
+                
+                // Optional comma
+                if matches!(self.current_token(), Token::Comma) {
+                    self.advance();
+                }
+            } else {
+                return Err(ParseError::invalid_syntax("Expected field name".to_string(), self.current_location()));
+            }
+        }
+        
+        self.expect(Token::RightBrace)?;
+        
+        Ok(Declaration::TypeDef(TypeDef::Record { name, fields }))
+    }
+    
+    /// Parse effect declaration: API :: effect { operations... }
+    fn parse_effect_decl(&mut self, name: String) -> Result<Declaration, ParseError> {
+        self.expect(Token::Effect)?;
+        self.expect(Token::LeftBrace)?;
+        
+        let mut operations = Vec::new();
+        
+        while !matches!(self.current_token(), Token::RightBrace) {
+            if let Token::Identifier(op_name) = self.current_token() {
+                let op_name = op_name.clone();
+                self.advance();
+                self.expect(Token::DoubleColon)?;
+                let signature = self.parse_type()?;
+                operations.push(EffectOperation { name: op_name, signature });
+                
+                // Optional comma
+                if matches!(self.current_token(), Token::Comma) {
+                    self.advance();
+                }
+            } else {
+                return Err(ParseError::invalid_syntax("Expected operation name".to_string(), self.current_location()));
+            }
+        }
+        
+        self.expect(Token::RightBrace)?;
+        
+        Ok(Declaration::EffectDecl(EffectDecl { name, operations }))
+    }
+    
+    /// Parse effect handler: APIImpl :: handler for API { implementations... }
+    fn parse_effect_handler(&mut self, handler_name: String) -> Result<Declaration, ParseError> {
+        self.expect(Token::Handler)?;
+        self.expect(Token::For)?;
+        
+        if let Token::Identifier(effect_name) = self.current_token() {
+            let effect_name = effect_name.clone();
+            self.advance();
+            self.expect(Token::LeftBrace)?;
+            
+            let mut implementations = Vec::new();
+            
+            while !matches!(self.current_token(), Token::RightBrace) {
+                if let Token::Identifier(op_name) = self.current_token() {
+                    let op_name = op_name.clone();
+                    self.advance();
+                    self.expect(Token::DoubleColon)?;
+                    
+                    // Parse parameters
+                    let mut parameters = Vec::new();
+                    self.expect(Token::LeftParen)?;
+                    
+                    while !matches!(self.current_token(), Token::RightParen) {
+                        let param = self.parse_variable()?;
+                        parameters.push(param);
+                        
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    
+                    self.expect(Token::RightParen)?;
+                    self.expect(Token::FatArrow)?;
+                    
+                    let body = self.parse_expr()?;
+                    
+                    implementations.push(HandlerImpl {
+                        operation_name: op_name,
+                        parameters,
+                        body,
+                    });
+                    
+                    // Optional comma
+                    if matches!(self.current_token(), Token::Comma) {
+                        self.advance();
+                    }
+                } else {
+                    return Err(ParseError::invalid_syntax("Expected operation name in handler".to_string(), self.current_location()));
+                }
+            }
+            
+            self.expect(Token::RightBrace)?;
+            
+            Ok(Declaration::EffectHandler(EffectHandler {
+                effect_name,
+                handler_name,
+                implementations,
+            }))
+        } else {
+            Err(ParseError::invalid_syntax("Expected effect name after 'for'".to_string(), self.current_location()))
+        }
+    }
+    
+    /// Parse function definition with clauses
+    fn parse_function_def(&mut self, name: String) -> Result<FunctionDef, ParseError> {
+        let mut clauses = Vec::new();
+        
+        // Parse first clause
+        let first_clause = self.parse_function_clause()?;
+        clauses.push(first_clause);
+        
+        // Parse additional clauses (if any)
+        while matches!(self.current_token(), Token::Identifier(n) if n == &name) {
+            self.advance(); // consume function name
+            self.expect(Token::DoubleColon)?;
+            let clause = self.parse_function_clause()?;
+            clauses.push(clause);
+        }
+        
+        Ok(FunctionDef {
+            name,
+            type_signature: None, // Will be inferred or set separately
+            clauses,
+        })
+    }
+    
+    /// Parse a single function clause: (patterns...) => body
+    fn parse_function_clause(&mut self) -> Result<FunctionClause, ParseError> {
+        let mut patterns = Vec::new();
+        
+        // Parse patterns
         self.expect(Token::LeftParen)?;
         
-        let param = match self.current_token() {
-            Token::Identifier(param) => {
-                let param = param.clone();
+        while !matches!(self.current_token(), Token::RightParen) {
+            let pattern = self.parse_pattern()?;
+            patterns.push(pattern);
+            
+            if matches!(self.current_token(), Token::Comma) {
                 self.advance();
-                param
             }
-            _ => return Err(ParseError::InvalidExpression),
-        };
+        }
         
-        // Skip type annotations for now (simplified)
         self.expect(Token::RightParen)?;
-        self.expect(Token::Equal)?;
+        self.expect(Token::FatArrow)?;
         
-        let body = self.parse_expression()?;
+        let body = self.parse_expr()?;
         
-        Ok(Function {
-            name,
-            param,
-            param_type: Type::Int, // Simplified
-            return_type: Type::Int, // Simplified
+        Ok(FunctionClause {
+            patterns,
+            guard: None, // TODO: Add guard support
             body,
         })
     }
     
-    pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_let()
-    }
-    
-    fn parse_let(&mut self) -> Result<Expr, ParseError> {
-        if matches!(self.current_token(), Token::Let) {
-            self.advance(); // consume 'let'
-            
-            let var = match self.current_token() {
-                Token::Identifier(name) => {
-                    let name = name.clone();
+    /// Parse a pattern
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        match self.current_token() {
+            Token::LogicVar(name) => {
+                let name = name.clone();
+                let location = self.current_location();
+                self.advance();
+                Ok(Pattern::Var(Variable::new_logic(name).with_location(location)))
+            }
+            Token::Underscore => {
+                self.advance();
+                Ok(Pattern::Wildcard)
+            }
+            Token::Integer(n) => {
+                let n = *n;
+                self.advance();
+                Ok(Pattern::Int(n))
+            }
+            Token::String(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Pattern::Str(s))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Pattern::Bool(true))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Pattern::Bool(false))
+            }
+            Token::LeftBracket => {
+                self.advance();
+                
+                if matches!(self.current_token(), Token::RightBracket) {
                     self.advance();
-                    name
+                    Ok(Pattern::EmptyList)
+                } else {
+                    // Parse list pattern or list cons
+                    let mut elements = Vec::new();
+                    let mut has_tail = false;
+                    
+                    while !matches!(self.current_token(), Token::RightBracket) {
+                        let pattern = self.parse_pattern()?;
+                        elements.push(pattern);
+                        
+                        if matches!(self.current_token(), Token::Pipe) {
+                            self.advance();
+                            let tail_pattern = self.parse_pattern()?;
+                            self.expect(Token::RightBracket)?;
+                            
+                            // Convert to nested ListCons patterns
+                            let mut result = tail_pattern;
+                            for element in elements.into_iter().rev() {
+                                result = Pattern::ListCons {
+                                    head: Box::new(element),
+                                    tail: Box::new(result),
+                                };
+                            }
+                            return Ok(result);
+                        }
+                        
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    
+                    self.expect(Token::RightBracket)?;
+                    Ok(Pattern::List(elements))
                 }
-                _ => return Err(ParseError::InvalidExpression),
-            };
-            
-            self.expect(Token::Equal)?;
-            let value = Box::new(self.parse_expression()?);
-            self.expect(Token::In)?;
-            let body = Box::new(self.parse_expression()?);
-            
-            Ok(Expr::Let { var, value, body })
-        } else {
-            self.parse_if()
+            }
+            Token::LeftParen => {
+                self.advance();
+                if matches!(self.current_token(), Token::RightParen) {
+                    self.advance();
+                    Ok(Pattern::Unit)
+                } else {
+                    // Parenthesized pattern
+                    let pattern = self.parse_pattern()?;
+                    self.expect(Token::RightParen)?;
+                    Ok(pattern)
+                }
+            }
+            _ => Err(ParseError::invalid_syntax("Expected pattern".to_string(), self.current_location()))
         }
     }
     
-    fn parse_if(&mut self) -> Result<Expr, ParseError> {
-        if matches!(self.current_token(), Token::If) {
-            self.advance(); // consume 'if'
+    /// Parse an expression
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_let_expr()
+    }
+    
+    /// Parse let expression: let $x = value in body
+    fn parse_let_expr(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.current_token(), Token::Let) {
+            self.advance();
             
-            let cond = Box::new(self.parse_expression()?);
-            self.expect(Token::Then)?;
-            let then_branch = Box::new(self.parse_expression()?);
-            self.expect(Token::Else)?;
-            let else_branch = Box::new(self.parse_expression()?);
+            // Traditional let binding: let $var = expr in body
+            let var = self.parse_variable()?;
+            self.expect(Token::Equal)?;
+            let value = self.parse_expr()?;
+            self.expect(Token::In)?;
+            let body = self.parse_expr()?;
             
-            Ok(Expr::If {
-                cond,
-                then_branch,
-                else_branch,
+            Ok(Expr::Let {
+                var,
+                value: Box::new(value),
+                body: Box::new(body),
             })
         } else {
-            self.parse_lambda()
+            self.parse_binary_expr()
         }
     }
     
-    fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
-        if matches!(self.current_token(), Token::Lam) {
-            self.advance(); // consume 'lam'
-            
-            let param = match self.current_token() {
-                Token::Identifier(name) => {
-                    let name = name.clone();
+    /// Parse binary expressions (simplified - just handle basic operators)
+    fn parse_binary_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_call_expr()?;
+        
+        while let Some(op) = self.current_binary_op() {
+            self.advance();
+            let right = self.parse_call_expr()?;
+            left = Expr::BinOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        
+        Ok(left)
+    }
+    
+    /// Parse function call
+    fn parse_call_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary_expr()?;
+        
+        while matches!(self.current_token(), Token::LeftParen | Token::Dot) {
+            match self.current_token() {
+                Token::LeftParen => {
                     self.advance();
-                    name
+                    let mut args = Vec::new();
+                    
+                    while !matches!(self.current_token(), Token::RightParen) {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    
+                    self.expect(Token::RightParen)?;
+                    expr = Expr::Call {
+                        func: Box::new(expr),
+                        args,
+                    };
                 }
-                _ => return Err(ParseError::InvalidExpression),
-            };
-            
-            self.expect(Token::Dot)?;
-            let body = Box::new(self.parse_expression()?);
-            
-            Ok(Expr::Lambda { param, body })
-        } else {
-            self.parse_binary()
-        }
-    }
-    
-    fn parse_binary(&mut self) -> Result<Expr, ParseError> {
-        self.parse_comparison()
-    }
-    
-    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_addition()?;
-        
-        while matches!(
-            self.current_token(),
-            Token::EqualEqual | Token::Less | Token::Greater
-        ) {
-            let op = match self.current_token() {
-                Token::EqualEqual => BinOpKind::Eq,
-                Token::Less => BinOpKind::Lt,
-                Token::Greater => BinOpKind::Gt,
-                _ => unreachable!(),
-            };
-            self.advance();
-            let right = self.parse_addition()?;
-            expr = Expr::BinOp {
-                op,
-                left: Box::new(expr),
-                right: Box::new(right),
-            };
+                Token::Dot => {
+                    self.advance();
+                    if let Token::Identifier(field) = self.current_token() {
+                        let field = field.clone();
+                        self.advance();
+                        expr = Expr::FieldAccess {
+                            expr: Box::new(expr),
+                            field,
+                        };
+                    } else {
+                        return Err(ParseError::invalid_syntax("Expected field name after '.'".to_string(), self.current_location()));
+                    }
+                }
+                _ => break,
+            }
         }
         
         Ok(expr)
     }
     
-    fn parse_addition(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_multiplication()?;
-        
-        while matches!(self.current_token(), Token::Plus | Token::Minus) {
-            let op = match self.current_token() {
-                Token::Plus => BinOpKind::Add,
-                Token::Minus => BinOpKind::Sub,
-                _ => unreachable!(),
-            };
-            self.advance();
-            let right = self.parse_multiplication()?;
-            expr = Expr::BinOp {
-                op,
-                left: Box::new(expr),
-                right: Box::new(right),
-            };
-        }
-        
-        Ok(expr)
-    }
-    
-    fn parse_multiplication(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_primary()?;
-        
-        while matches!(self.current_token(), Token::Multiply | Token::Divide) {
-            let op = match self.current_token() {
-                Token::Multiply => BinOpKind::Mul,
-                Token::Divide => BinOpKind::Div,
-                _ => unreachable!(),
-            };
-            self.advance();
-            let right = self.parse_primary()?;
-            expr = Expr::BinOp {
-                op,
-                left: Box::new(expr),
-                right: Box::new(right),
-            };
-        }
-        
-        Ok(expr)
-    }
-    
-    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+    /// Parse primary expressions
+    fn parse_primary_expr(&mut self) -> Result<Expr, ParseError> {
         match self.current_token() {
+            Token::Tilde => {
+                self.advance(); // consume '~'
+                match self.current_token() {
+                    Token::LogicVar(name) => {
+                        let name = name.clone();
+                        let location = self.current_location();
+                        self.advance();
+                        Ok(Expr::NonConsumptiveVar(Variable::new_logic(name).with_location(location)))
+                    }
+                    _ => {
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax("Expected logic variable after '~'".to_string(), location))
+                    }
+                }
+            }
+            Token::LogicVar(name) => {
+                let name = name.clone();
+                let location = self.current_location();
+                self.advance();
+                Ok(Expr::Var(Variable::new_logic(name).with_location(location)))
+            }
+            Token::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                
+                // Check for C function call
+                if matches!(self.current_token(), Token::Dot) {
+                    // This might be C.Module.function
+                    if name == "C" {
+                        self.advance(); // consume '.'
+                        if let Token::Identifier(module) = self.current_token() {
+                            let module = module.clone();
+                            self.advance();
+                            self.expect(Token::Dot)?;
+                            if let Token::Identifier(function) = self.current_token() {
+                                let function = function.clone();
+                                self.advance();
+                                self.expect(Token::LeftParen)?;
+                                
+                                let mut args = Vec::new();
+                                while !matches!(self.current_token(), Token::RightParen) {
+                                    args.push(self.parse_expr()?);
+                                    if matches!(self.current_token(), Token::Comma) {
+                                        self.advance();
+                                    }
+                                }
+                                self.expect(Token::RightParen)?;
+                                
+                                return Ok(Expr::CCall { module, function, args });
+                            }
+                        }
+                    }
+                }
+                
+                Ok(Expr::Var(Variable::new(name).with_location(self.current_location())))
+            }
             Token::Integer(n) => {
                 let n = *n;
                 self.advance();
@@ -586,706 +622,468 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Str(s))
             }
-            Token::Identifier(name) => {
-                let name = name.clone();
+            Token::True => {
+                self.advance();
+                Ok(Expr::Bool(true))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expr::Bool(false))
+            }
+            Token::LeftBracket => {
                 self.advance();
                 
-                // Check for function application
-                if matches!(self.current_token(), Token::LeftParen) {
-                    self.advance(); // consume '('
-                    let mut args = Vec::new();
+                if matches!(self.current_token(), Token::RightBracket) {
+                    self.advance();
+                    Ok(Expr::List(Vec::new()))
+                } else {
+                    let mut elements = Vec::new();
                     
-                    if !matches!(self.current_token(), Token::RightParen) {
-                        args.push(self.parse_expression()?);
+                    while !matches!(self.current_token(), Token::RightBracket) {
+                        let element = self.parse_expr()?;
+                        elements.push(element);
                         
-                        while matches!(self.current_token(), Token::Comma) {
-                            self.advance(); // consume ','
-                            args.push(self.parse_expression()?);
+                        if matches!(self.current_token(), Token::Pipe) {
+                            self.advance();
+                            let tail = self.parse_expr()?;
+                            self.expect(Token::RightBracket)?;
+                            
+                            // Convert to nested ListCons
+                            let mut result = tail;
+                            for element in elements.into_iter().rev() {
+                                result = Expr::ListCons {
+                                    head: Box::new(element),
+                                    tail: Box::new(result),
+                                };
+                            }
+                            return Ok(result);
+                        }
+                        
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
                         }
                     }
                     
-                    self.expect(Token::RightParen)?;
-                    Ok(Expr::App { func: name, args })
-                } else {
-                    Ok(Expr::Var(name))
+                    self.expect(Token::RightBracket)?;
+                    Ok(Expr::List(elements))
                 }
             }
             Token::LeftParen => {
-                self.advance(); // consume '('
-                let expr = self.parse_expression()?;
-                self.expect(Token::RightParen)?;
-                Ok(expr)
-            }
-            Token::Alloc => {
-                self.advance(); // consume 'alloc'
-                self.expect(Token::LeftParen)?;
-                let size = Box::new(self.parse_expression()?);
-                self.expect(Token::RightParen)?;
-                Ok(Expr::Alloc { size })
-            }
-            Token::Free => {
-                self.advance(); // consume 'free'
-                self.expect(Token::LeftParen)?;
-                let ptr = Box::new(self.parse_expression()?);
-                self.expect(Token::RightParen)?;
-                Ok(Expr::Free { ptr })
-            }
-            Token::Load => {
-                self.advance(); // consume 'load'
-                self.expect(Token::LeftParen)?;
-                let ptr = Box::new(self.parse_expression()?);
-                self.expect(Token::RightParen)?;
-                Ok(Expr::Load { ptr })
-            }
-            Token::Store => {
-                self.advance(); // consume 'store'
-                self.expect(Token::LeftParen)?;
-                let ptr = Box::new(self.parse_expression()?);
-                self.expect(Token::Comma)?;
-                let value = Box::new(self.parse_expression()?);
-                self.expect(Token::RightParen)?;
-                Ok(Expr::Store { ptr, value })
-            }
-            _ => Err(ParseError::InvalidExpression),
-        }
-    }
-    
-    fn parse_query(&mut self) -> Result<Query, ParseError> {
-        self.expect(Token::Query)?; // For ?-
-        
-        let mut goals = Vec::new();
-        let mut is_disjunctive = None; // None means not yet determined
-        goals.push(self.parse_term()?);
-        
-        // Check for connectives and ensure consistency
-        while matches!(self.current_token(), Token::Comma | Token::Ampersand | Token::Pipe) {
-            let new_connective = match self.current_token() {
-                Token::Pipe => true,  // disjunctive
-                Token::Ampersand | Token::Comma => false,  // conjunctive
-                _ => unreachable!(),
-            };
-            
-            // Set the query type on first connective, or check consistency
-            match is_disjunctive {
-                None => is_disjunctive = Some(new_connective),
-                Some(current) => {
-                    if current != new_connective {
-                        return Err(ParseError::InvalidSyntax("Cannot mix conjunctive (&, ,) and disjunctive (|) operators in the same query".to_string()));
-                    }
-                }
-            }
-            
-            self.advance();
-            goals.push(self.parse_term()?);
-        }
-        
-        self.expect(Token::Dot)?;
-        Ok(Query { 
-            goals, 
-            is_disjunctive: is_disjunctive.unwrap_or(false) // Default to conjunctive for single goals
-        })
-    }
-    
-    fn parse_persistent_clause(&mut self) -> Result<Clause, ParseError> {
-        // Handle both old and new persistent syntax
-        let is_new_syntax = matches!(self.current_token(), Token::Persistent);
-        
-        if is_new_syntax {
-            // New syntax: persistent name :: predicate(args).
-            self.expect(Token::Persistent)?;
-            
-            // Parse the name
-            let name = if let Token::Identifier(name) = self.current_token() {
-                let name = name.clone();
                 self.advance();
-                Some(name)
-            } else {
-                return Err(self.create_error_diagnostic("Expected name after 'persistent'".to_string()));
-            };
-            
-            self.expect(Token::ColonColon)?;
-            
-            // Parse the predicate term
-            let predicate_term = self.parse_term()?;
-            self.expect(Token::Dot)?;
-            
-            match predicate_term {
-                Term::Compound { functor, args } => {
-                    Ok(Clause::Fact { predicate: functor, args, persistent: true, name })
-                }
-                Term::Atom { name: pred_name, .. } => {
-                    Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: true, name })
-                }
-                _ => Err(ParseError::InvalidExpression),
-            }
-        } else {
-            // Old syntax: !fact or !name :: fact
-            self.expect(Token::Bang)?;
-            
-            // Parse the identifier (either predicate name or fact name)
-            let first_identifier = if let Token::Identifier(name) = self.current_token() {
-                let name = name.clone();
-                self.advance();
-                name
-            } else {
-                return Err(self.create_error_diagnostic("Expected identifier after '!'".to_string()));
-            };
-            
-            // Check if this is a typed persistent fact (name :: predicate(args)) or simple persistent fact
-            if matches!(self.current_token(), Token::ColonColon) {
-                // This is !name :: predicate(args).
-                self.advance(); // consume ::
-                
-                // Parse the predicate term
-                let predicate_term = self.parse_term()?;
-                self.expect(Token::Dot)?;
-                
-                match predicate_term {
-                    Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args, persistent: true, name: None })
-                    }
-                    _ => Err(ParseError::InvalidExpression),
-                }
-            } else if matches!(self.current_token(), Token::LeftParen) {
-                // This is !predicate(args).
-                self.advance(); // consume (
-                let mut args = Vec::new();
-                
-                if !matches!(self.current_token(), Token::RightParen) {
-                    args.push(self.parse_term()?);
-                    
-                    while matches!(self.current_token(), Token::Comma) {
-                        self.advance();
-                        args.push(self.parse_term()?);
-                    }
-                }
-                
-                self.expect(Token::RightParen)?;
-                self.expect(Token::Dot)?;
-                Ok(Clause::Fact { predicate: first_identifier, args, persistent: true, name: None })
-            } else {
-                // This is a simple !fact.
-                self.expect(Token::Dot)?;
-                Ok(Clause::Fact { predicate: first_identifier, args: vec![], persistent: true, name: None })
-            }
-        }
-    }
-
-    fn parse_clause(&mut self) -> Result<Clause, ParseError> {
-        // Check for persistent fact prefix
-        let persistent = if matches!(self.current_token(), Token::Bang) {
-            self.advance();
-            true
-        } else {
-            false
-        };
-        
-        // Parse the first identifier/term
-        let first_term = self.parse_term()?;
-        
-        match self.current_token() {
-            Token::Dot => {
-                // Simple fact: predicate(args).
-                self.advance();
-                match first_term {
-                    Term::Compound { functor, args } => {
-                        Ok(Clause::Fact { predicate: functor, args, persistent, name: None })
-                    }
-                    Term::Atom { name, .. } => {
-                        Ok(Clause::Fact { predicate: name, args: vec![], persistent, name: None })
-                    }
-                    _ => Err(ParseError::InvalidExpression),
-                }
-            }
-            Token::ColonColon => {
-                // Could be either:
-                // 1. Celf-style rule: goal_name :: condition => result
-                // 2. Named fact: name :: predicate(args).
-                
-                if persistent {
-                    return Err(ParseError::InvalidExpression); // Can't have !rule
-                }
-                
-                // The first_term should be the name
-                let name = match first_term {
-                    Term::Atom { name, .. } => name,
-                    _ => return Err(ParseError::InvalidExpression),
-                };
-                
-                self.advance(); // consume ::
-                
-                // Parse what comes after ::
-                let second_term = self.parse_term()?;
-                
-                // Check if this is followed by => (Celf-style rule) or . (named fact)
-                match self.current_token() {
-                    Token::FatArrow => {
-                        // Celf-style rule: goal_name :: condition => result
-                        let mut body = vec![second_term];
-                        
-                        // Handle conjunction with & (instead of comma)
-                        while matches!(self.current_token(), Token::Ampersand) {
-                            self.advance();
-                            body.push(self.parse_term()?);
-                        }
-                        
-                        // Expect => for the result
-                        self.expect(Token::FatArrow)?;
-                        
-                        // Parse the result/head
-                        let produces = Some(self.parse_term()?);
-                        
-                        self.expect(Token::Dot)?;
-                        
-                        // Create the goal name as the head term
-                        let head = Term::Atom { name, type_name: None };
-                        Ok(Clause::Rule { head, body, produces })
-                    }
-                    Token::Dot => {
-                        // Named fact: name :: predicate(args).
-                        self.advance(); // consume .
-                        match second_term {
-                            Term::Compound { functor, args } => {
-                                Ok(Clause::Fact { predicate: functor, args, persistent: false, name: Some(name) })
-                            }
-                            Term::Atom { name: pred_name, .. } => {
-                                Ok(Clause::Fact { predicate: pred_name, args: vec![], persistent: false, name: Some(name) })
-                            }
-                            _ => Err(ParseError::InvalidExpression),
-                        }
-                    }
-                    Token::Ampersand => {
-                        // Celf-style rule with conjunction: goal_name :: condition & condition => result
-                        let mut body = vec![second_term];
-                        
-                        // Handle conjunction with &
-                        while matches!(self.current_token(), Token::Ampersand) {
-                            self.advance();
-                            body.push(self.parse_term()?);
-                        }
-                        
-                        // Expect => for the result
-                        self.expect(Token::FatArrow)?;
-                        
-                        // Parse the result/head
-                        let produces = Some(self.parse_term()?);
-                        
-                        self.expect(Token::Dot)?;
-                        
-                        // Create the goal name as the head term
-                        let head = Term::Atom { name, type_name: None };
-                        Ok(Clause::Rule { head, body, produces })
-                    }
-                    _ => Err(ParseError::InvalidExpression),
-                }
-            }
-            Token::Rule => {
-                // Old Prolog-style rule: head :- body (for backward compatibility)
-                if persistent {
-                    return Err(ParseError::InvalidExpression); // Can't have !rule
-                }
-                self.advance();
-                let mut body = Vec::new();
-                let produces = None;
-                
-                // Parse the body goals
-                body.push(self.parse_term()?);
-                
-                while matches!(self.current_token(), Token::Comma) {
+                if matches!(self.current_token(), Token::RightParen) {
                     self.advance();
-                    body.push(self.parse_term()?);
+                    Ok(Expr::Unit)
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(Token::RightParen)?;
+                    Ok(expr)
                 }
-                
-                self.expect(Token::Dot)?;
-                Ok(Clause::Rule { head: first_term, body, produces })
             }
-            _ => Err(ParseError::InvalidExpression),
+            Token::LeftBrace => {
+                // Parse block expression: { statements; result_expr }
+                self.parse_block()
+            }
+            Token::CModule(module) => {
+                let module = module.clone();
+                self.advance();
+                self.expect(Token::Dot)?;
+                
+                if let Token::Identifier(function) = self.current_token() {
+                    let function = function.clone();
+                    self.advance();
+                    self.expect(Token::LeftParen)?;
+                    
+                    let mut args = Vec::new();
+                    while !matches!(self.current_token(), Token::RightParen) {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect(Token::RightParen)?;
+                    
+                    Ok(Expr::CCall { module, function, args })
+                } else {
+                    let location = self.current_location();
+                    Err(ParseError::invalid_syntax("Expected function name after C module".to_string(), location))
+                }
+            }
+            _ => Err(ParseError::invalid_syntax("Expected expression".to_string(), self.current_location()))
         }
     }
     
-    fn parse_term(&mut self) -> Result<Term, ParseError> {
+    /// Parse a type expression
+    fn parse_type(&mut self) -> Result<FlintType, ParseError> {
+        let mut base_type = self.parse_base_type()?;
+        
+        // Handle function types with arrows
+        while matches!(self.current_token(), Token::Arrow) {
+            self.advance();
+            let result_type = self.parse_type()?;
+            
+            // Convert to function type
+            let params = if let FlintType::Function { params, result, .. } = base_type {
+                // If base_type is already a function (from tuple parameters), use its params
+                // but ignore the placeholder result
+                if matches!(result.as_ref(), FlintType::Unit) {
+                    // This was a tuple parameter, use the params
+                    params
+                } else {
+                    // This was a real function type, treat as curried
+                    vec![FlintType::Function { params, result, effects: Vec::new() }]
+                }
+            } else {
+                vec![base_type]
+            };
+            
+            // Parse effects if present
+            let effects = if matches!(self.current_token(), Token::Using) {
+                self.advance();
+                self.parse_effect_list()?
+            } else {
+                Vec::new()
+            };
+            
+            base_type = FlintType::Function {
+                params,
+                result: Box::new(result_type),
+                effects,
+            };
+        }
+        
+        Ok(base_type)
+    }
+    
+    /// Parse base types
+    fn parse_base_type(&mut self) -> Result<FlintType, ParseError> {
         match self.current_token() {
-            Token::Bang => {
-                // Clone operator: !term
+            Token::I32 => {
                 self.advance();
-                let inner_term = self.parse_term()?;
-                Ok(Term::Clone(Box::new(inner_term)))
+                Ok(FlintType::Int32)
             }
-            Token::Variable(name) => {
-                // Variable: $name
-                let name = name.clone();
+            Token::Str => {
                 self.advance();
-                Ok(Term::Var { name, type_name: None })
+                Ok(FlintType::String)
+            }
+            Token::Bool => {
+                self.advance();
+                Ok(FlintType::Bool)
+            }
+            Token::Unit => {
+                self.advance();
+                Ok(FlintType::Unit)
+            }
+            Token::List => {
+                self.advance();
+                self.expect(Token::Less)?;
+                let element_type = self.parse_type()?;
+                self.expect(Token::Greater)?;
+                Ok(FlintType::List(Box::new(element_type)))
             }
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                
-                if matches!(self.current_token(), Token::LeftParen) {
-                    // Compound term
+                Ok(FlintType::Named(name))
+            }
+            Token::LeftParen => {
+                self.advance();
+                if matches!(self.current_token(), Token::RightParen) {
                     self.advance();
-                    let mut args = Vec::new();
+                    Ok(FlintType::Unit)
+                } else {
+                    // Parse first type
+                    let first_type = self.parse_type()?;
                     
-                    if !matches!(self.current_token(), Token::RightParen) {
-                        args.push(self.parse_term()?);
+                    // Check if there are more types (tuple parameter syntax)
+                    if matches!(self.current_token(), Token::Comma) {
+                        let mut params = vec![first_type];
                         
                         while matches!(self.current_token(), Token::Comma) {
-                            self.advance();
-                            args.push(self.parse_term()?);
+                            self.advance(); // consume comma
+                            let param_type = self.parse_type()?;
+                            params.push(param_type);
                         }
+                        
+                        self.expect(Token::RightParen)?;
+                        
+                        // Return a special representation that will be handled in parse_type
+                        // We'll create a temporary function type with no result (to be filled in later)
+                        Ok(FlintType::Function {
+                            params,
+                            result: Box::new(FlintType::Unit), // placeholder
+                            effects: Vec::new(),
+                        })
+                    } else {
+                        // Single parenthesized type
+                        self.expect(Token::RightParen)?;
+                        Ok(first_type)
                     }
-                    
-                    self.expect(Token::RightParen)?;
-                    Ok(Term::Compound { functor: name, args })
-                } else {
-                    // Simple atom/identifier
-                    Ok(Term::Atom { 
-                        name, 
-                        type_name: None 
-                    })
                 }
             }
-            Token::Integer(n) => {
-                let n = *n;
-                self.advance();
-                Ok(Term::Integer(n))
-            }
-            _ => Err(ParseError::InvalidExpression),
+            _ => Err(ParseError::invalid_syntax("Expected type".to_string(), self.current_location()))
         }
     }
     
-    fn parse_logic_type(&mut self) -> Result<LogicType, ParseError> {
-        // Parse the first type
-        let mut current_type = self.parse_base_type()?;
+    /// Parse effect list: Effect1, Effect2, Effect3
+    fn parse_effect_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut effects = Vec::new();
         
-        // If we see arrows, parse as function type
-        let mut types = vec![current_type];
-        while matches!(self.current_token(), Token::Arrow) {
-            self.advance(); // consume ->
-            types.push(self.parse_base_type()?);
-        }
-        
-        if types.len() == 1 {
-            Ok(types.into_iter().next().unwrap())
-        } else {
-            Ok(LogicType::Arrow(types))
-        }
-    }
-    
-    fn parse_base_type(&mut self) -> Result<LogicType, ParseError> {
-        match self.current_token() {
-            Token::Identifier(name) => {
-                let type_name = name.clone();
-                self.advance();
-                match type_name.as_str() {
-                    "int" => Ok(LogicType::Integer),
-                    "string" => Ok(LogicType::String),
-                    "atom" => Ok(LogicType::Atom),
-                    _ => Ok(LogicType::Named(type_name)),
-                }
-            }
-            Token::Type => {
-                self.advance();
-                Ok(LogicType::Type)
-            }
-            _ => Err(ParseError::InvalidExpression),
-        }
-    }
-    
-    fn parse_predicate_type(&mut self) -> Result<PredicateType, ParseError> {
-        // Parse predicate name
-        let name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(ParseError::InvalidExpression),
-        };
-        
-        self.expect(Token::ColonColon)?;
-        
-        // Parse the signature (e.g., person -> person -> type)
-        let signature = self.parse_logic_type()?;
-        
-        self.expect(Token::Dot)?;
-        
-        Ok(PredicateType { name, signature })
-    }
-    
-    fn parse_term_type(&mut self) -> Result<TermType, ParseError> {
-        let name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(ParseError::InvalidExpression),
-        };
-        
-        self.expect(Token::ColonColon)?; // Use ColonColon for consistency
-        
-        let term_type = self.parse_logic_type()?;
-        
-        self.expect(Token::Dot)?;
-        
-        Ok(TermType { name, term_type })
-    }
-
-    fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
-        // Check if this is the new syntax: "type name ..." 
-        if matches!(self.current_token(), Token::Type) {
-            return self.parse_old_style_type_definition();
-        }
-        
-        // Otherwise, parse the old syntax: "name(s) :: type"
-        self.parse_old_type_declaration()
-    }
-    
-    fn parse_old_style_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
-        // Parse: type name [(variant1 | variant2)]
-        self.expect(Token::Type)?;
-        
-        let name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(self.create_error_diagnostic("Expected type name after 'type'".to_string())),
-        };
-        
-        // Check for union variants: (apple | orange) or complex nested unions
-        let union_variants = if matches!(self.current_token(), Token::LeftParen) {
-            Some(self.parse_union_variants()?)
-        } else {
-            None
-        };
-        
-        Ok(TypeDeclaration::TypeDefinition(TypeDefinition {
-            name,
-            union_variants,
-            supertype: None, // Old syntax doesn't support subtyping
-            distinct: false, // Old syntax doesn't support distinct
-        }))
-    }
-    
-    fn parse_new_type_definition(&mut self) -> Result<TypeDeclaration, ParseError> {
-        // Parse: name :: [distinct] type [of supertype]
-        
-        // Parse the type name
-        let name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(self.create_error_diagnostic("Expected type name".to_string())),
-        };
-        
-        self.expect(Token::ColonColon)?;
-        
-        // Check for optional 'distinct' keyword
-        let distinct = if matches!(self.current_token(), Token::Distinct) {
-            self.advance(); // consume 'distinct'
-            true
-        } else {
-            false
-        };
-        
-        // Expect 'type' keyword
-        self.expect(Token::Type)?;
-        
-        // Check for optional 'of supertype' clause
-        let supertype = if matches!(self.current_token(), Token::Of) {
-            self.advance(); // consume 'of'
-            Some(self.parse_logic_type()?)
-        } else {
-            None
-        };
-        
-        Ok(TypeDeclaration::TypeDefinition(TypeDefinition {
-            name,
-            union_variants: None, // New syntax doesn't support union variants directly
-            supertype,
-            distinct,
-        }))
-    }
-    
-    fn parse_union_variants(&mut self) -> Result<UnionVariants, ParseError> {
-        self.expect(Token::LeftParen)?;
-        
-        let mut variants = Vec::new();
-        
-        // Parse first variant
-        let first_variant = self.parse_union_variant()?;
-        variants.push(first_variant);
-        
-        // Parse additional variants
-        while matches!(self.current_token(), Token::Pipe) {
-            self.advance(); // consume |
-            let variant = self.parse_union_variant()?;
-            variants.push(variant);
-        }
-        
-        self.expect(Token::RightParen)?;
-        
-        // Check if this is a simple list or if any have sub-variants
-        let has_nested = variants.iter().any(|v| v.sub_variants.is_some());
-        
-        if has_nested {
-            Ok(UnionVariants::Nested(variants))
-        } else {
-            // Convert to simple list
-            let simple_names = variants.into_iter().map(|v| v.name).collect();
-            Ok(UnionVariants::Simple(simple_names))
-        }
-    }
-    
-    fn parse_union_variant(&mut self) -> Result<UnionVariant, ParseError> {
-        let name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(self.create_error_diagnostic("Expected variant name".to_string())),
-        };
-        
-        // Check for nested union: fruit (apple | orange)
-        let sub_variants = if matches!(self.current_token(), Token::LeftParen) {
-            Some(self.parse_union_variants()?)
-        } else {
-            None
-        };
-        
-        Ok(UnionVariant {
-            name,
-            sub_variants,
-        })
-    }
-    
-    fn parse_old_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
-        // Parse name(s) :: type_signature.
-        // This can be either "name :: type" or "name1, name2, name3 :: type"
-        let mut names = Vec::new();
-        
-        // Parse the first name
-        let first_name = match self.current_token() {
-            Token::Identifier(n) => {
-                let name = n.clone();
-                self.advance();
-                name
-            }
-            _ => return Err(self.create_error_diagnostic("Expected identifier for type declaration".to_string())),
-        };
-        names.push(first_name);
-        
-        // Parse additional names separated by commas
-        while matches!(self.current_token(), Token::Comma) {
-            self.advance(); // consume comma
+        if let Token::Identifier(name) = self.current_token() {
+            effects.push(name.clone());
+            self.advance();
             
-            let name = match self.current_token() {
-                Token::Identifier(n) => {
-                    let name = n.clone();
+            while matches!(self.current_token(), Token::Comma) {
+                self.advance();
+                if let Token::Identifier(name) = self.current_token() {
+                    effects.push(name.clone());
                     self.advance();
-                    name
+                } else {
+                    return Err(ParseError::invalid_syntax("Expected effect name after ','".to_string(), self.current_location()));
                 }
-                _ => return Err(self.create_error_diagnostic("Expected identifier after comma in type declaration".to_string())),
-            };
-            names.push(name);
+            }
         }
         
-        self.expect(Token::ColonColon)?;
+        Ok(effects)
+    }
+    
+    /// Parse a variable (logic or regular)
+    fn parse_variable(&mut self) -> Result<Variable, ParseError> {
+        match self.current_token() {
+            Token::LogicVar(name) => {
+                let name = name.clone();
+                let location = self.current_location();
+                self.advance();
+                Ok(Variable::new_logic(name).with_location(location))
+            }
+            Token::Identifier(name) => {
+                let name = name.clone();
+                let location = self.current_location();
+                self.advance();
+                Ok(Variable::new(name).with_location(location))
+            }
+            _ => Err(ParseError::invalid_syntax("Expected variable".to_string(), self.current_location()))
+        }
+    }
+    
+    /// Check if current position starts a type expression (not a function definition pattern)
+    fn is_type_expression(&self) -> bool {
+        match self.current_token() {
+            Token::I32 | Token::Str | Token::Bool | Token::Unit | Token::List | Token::Identifier(_) => true,
+            Token::LeftParen => {
+                // Look ahead to distinguish between type `()` and function pattern `()`
+                // If we see `() ->`, it's a type. If we see `() =>`, it's a function pattern.
+                self.is_type_not_function_pattern()
+            }
+            _ => false
+        }
+    }
+    
+    /// Check if a parenthesized expression is a type (not a function pattern)
+    fn is_type_not_function_pattern(&self) -> bool {
+        let mut lookahead = self.current;
         
-        let signature = self.parse_logic_type()?;
-        
-        self.expect(Token::Dot)?;
-        
-        // Decide if this is a predicate or term type based on the signature
-        match &signature {
-            LogicType::Arrow(_) => {
-                // Has arrows, so it's a predicate type - only single names allowed
-                if names.len() > 1 {
-                    return Err(self.create_error_diagnostic("Cannot batch assign predicate types - predicates must be declared individually".to_string()));
+        // Skip past the opening parenthesis
+        if lookahead < self.tokens.len() && matches!(self.tokens[lookahead].token, Token::LeftParen) {
+            lookahead += 1;
+            
+            // Skip to the matching closing parenthesis
+            let mut paren_depth = 1;
+            while lookahead < self.tokens.len() && paren_depth > 0 {
+                match &self.tokens[lookahead].token {
+                    Token::LeftParen => paren_depth += 1,
+                    Token::RightParen => paren_depth -= 1,
+                    _ => {}
                 }
-                Ok(TypeDeclaration::Predicate(PredicateType { name: names[0].clone(), signature }))
+                lookahead += 1;
+            }
+            
+            // Now check what comes after the closing parenthesis
+            if lookahead < self.tokens.len() {
+                match &self.tokens[lookahead].token {
+                    Token::Arrow => true,    // `() ->` indicates a type
+                    Token::FatArrow => false, // `() =>` indicates a function pattern
+                    _ => true  // Default to type if unclear
+                }
+            } else {
+                true // Default to type if we hit end of input
+            }
+        } else {
+            true // Default to type if not starting with parenthesis
+        }
+    }
+    
+    /// Get binary operator if current token is one
+    fn current_binary_op(&self) -> Option<BinOp> {
+        match self.current_token() {
+            Token::Plus => Some(BinOp::Add),
+            Token::Minus => Some(BinOp::Sub),
+            Token::Multiply => Some(BinOp::Mul),
+            Token::Divide => Some(BinOp::Div),
+            Token::Modulo => Some(BinOp::Mod),
+            Token::EqualEqual => Some(BinOp::Eq),
+            Token::NotEqual => Some(BinOp::Ne),
+            Token::Less => Some(BinOp::Lt),
+            Token::LessEqual => Some(BinOp::Le),
+            Token::Greater => Some(BinOp::Gt),
+            Token::GreaterEqual => Some(BinOp::Ge),
+            Token::And => Some(BinOp::And),
+            Token::Or => Some(BinOp::Or),
+            Token::PipeGt => Some(BinOp::Append),
+            _ => None,
+        }
+    }
+    
+    /// Parse block expression: { statements; optional_expr }
+    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume '{'
+        
+        let mut statements = Vec::new();
+        let mut result = None;
+        
+        while !matches!(self.current_token(), Token::RightBrace) {
+            // Save current position for backtracking
+            let checkpoint = self.current;
+            
+            // Try to parse a statement first
+            match self.try_parse_statement() {
+                Ok(stmt) => {
+                    statements.push(stmt);
+                    
+                    // Consume optional semicolon
+                    if matches!(self.current_token(), Token::Semicolon) {
+                        self.advance();
+                    }
+                }
+                Err(_) => {
+                    // Restore position and try to parse as final expression
+                    self.current = checkpoint;
+                    let expr = self.parse_block_expr()?;
+                    result = Some(Box::new(expr));
+                    break;
+                }
+            }
+        }
+        
+        self.expect(Token::RightBrace)?;
+        
+        Ok(Expr::Block { statements, result })
+    }
+    
+    /// Try to parse a statement (returns error if it's not a statement)
+    fn try_parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match self.current_token() {
+            Token::Let => {
+                self.advance(); // consume 'let'
+                
+                // Check if this is a constraint (let expr = value) or regular let (let $var = expr)
+                if matches!(self.current_token(), Token::LogicVar(_)) {
+                    // Regular let statement: let $var = expr or let $var: Type = expr
+                    let var = self.parse_variable()?;
+                    
+                    // Check if this is a typed let statement: let $var: Type = value
+                    if matches!(self.current_token(), Token::Colon) {
+                        self.advance(); // consume ':'
+                        let var_type = self.parse_type()?;
+                        
+                        // Expect assignment: = value
+                        self.expect(Token::Equal)?;
+                        let value = self.parse_expr()?;
+                        
+                        Ok(Statement::LetTyped { var, var_type, value })
+                    } else if matches!(self.current_token(), Token::Equal) {
+                        // This is an untyped let statement: let $var = value
+                        self.advance(); // consume '='
+                        let value = self.parse_expr()?;
+                        
+                        Ok(Statement::Let { var, value })
+                    } else {
+                        // Invalid let statement syntax
+                        let location = self.current_location();
+                        Err(ParseError::invalid_syntax("Expected ':' or '=' after variable in let statement".to_string(), location))
+                    }
+                } else {
+                    // Constraint statement: let expr = target
+                    let expr = self.parse_expr()?;
+                    self.expect(Token::Equal)?;
+                    let target = self.parse_expr()?;
+                    
+                    // Convert constraint to expression statement
+                    let constraint_expr = Expr::LetConstraint {
+                        expr: Box::new(expr),
+                        target: Box::new(target),
+                    };
+                    
+                    Ok(Statement::Expr(constraint_expr))
+                }
             }
             _ => {
-                // No arrows, so it's a term type - batch assignment allowed
-                if names.len() == 1 {
-                    Ok(TypeDeclaration::Term(TermType { name: names[0].clone(), term_type: signature }))
-                } else {
-                    if self.debug {
-                        eprintln!("DEBUG: Creating BatchTerms for {} names", names.len());
-                    }
-                    Ok(TypeDeclaration::BatchTerms(names, signature))
-                }
+                // This is not a statement we recognize
+                let location = self.current_location();
+                Err(ParseError::invalid_syntax("Expected statement".to_string(), location))
             }
         }
     }
-
-    /// Create a diagnostic for the current parsing context
-    fn create_diagnostic(&self, message: String, file_path: &str, source_text: &str) -> Diagnostic {
-        let builder = DiagnosticBuilder::new(file_path.to_string(), source_text.to_string());
-        
-        // For now, we'll use a simple line/column estimate
-        // In a real implementation, we'd track exact positions during tokenization
-        let line = 1; // Placeholder
-        let column = 1; // Placeholder
-        let length = 1; // Placeholder
-        
-        builder.error_at(message, line, column, length)
+    
+    /// Parse a block expression (used when statement parsing fails)
+    fn parse_block_expr(&mut self) -> Result<Expr, ParseError> {
+        // This parses the remaining expression in a block
+        // It should not try to parse statements, just expressions
+        self.parse_binary_expr()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::tokenize;
+    use crate::flint_lexer::tokenize;
     
     #[test]
-    fn test_parse_simple_let() {
-        let tokens = tokenize("let x = 42 in x + 1").unwrap();
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
+    fn test_parse_simple_function() {
+        let input = "reverse :: List<T> -> List<T>";
+        let lex_result = tokenize(input).unwrap();
+        let mut parser = FlintParser::new(lex_result.tokens);
         
-        match program.main {
-            Expr::Let { var, value, body } => {
-                assert_eq!(var, "x");
-                assert_eq!(*value, Expr::Int(42));
-                match *body {
-                    Expr::BinOp { op, left, right } => {
-                        assert_eq!(op, BinOpKind::Add);
-                        assert_eq!(*left, Expr::Var("x".to_string()));
-                        assert_eq!(*right, Expr::Int(1));
-                    }
-                    _ => panic!("Expected binary operation"),
-                }
-            }
-            _ => panic!("Expected let expression"),
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.declarations.len(), 1);
+        
+        if let Declaration::FunctionSig { name, .. } = &program.declarations[0] {
+            assert_eq!(name, "reverse");
+        } else {
+            panic!("Expected function signature");
         }
     }
     
     #[test]
-    fn test_parse_lambda() {
-        let tokens = tokenize("lam x. x + 1").unwrap();
-        let mut parser = Parser::new(tokens);
-        let program = parser.parse_program().unwrap();
+    fn test_parse_function_definition() {
+        let input = "reverse :: ([]) => []";
+        let lex_result = tokenize(input).unwrap();
+        let mut parser = FlintParser::new(lex_result.tokens);
         
-        match program.main {
-            Expr::Lambda { param, body } => {
-                assert_eq!(param, "x");
-                match *body {
-                    Expr::BinOp { op, left, right } => {
-                        assert_eq!(op, BinOpKind::Add);
-                        assert_eq!(*left, Expr::Var("x".to_string()));
-                        assert_eq!(*right, Expr::Int(1));
-                    }
-                    _ => panic!("Expected binary operation"),
-                }
-            }
-            _ => panic!("Expected lambda expression"),
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.declarations.len(), 1);
+        
+        if let Declaration::FunctionDef(func) = &program.declarations[0] {
+            assert_eq!(func.name, "reverse");
+            assert_eq!(func.clauses.len(), 1);
+        } else {
+            panic!("Expected function definition");
+        }
+    }
+    
+    #[test]
+    fn test_parse_c_import() {
+        let input = "import C \"stdio.h\" as IO";
+        let lex_result = tokenize(input).unwrap();
+        let mut parser = FlintParser::new(lex_result.tokens);
+        
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.declarations.len(), 1);
+        
+        if let Declaration::CImport(import) = &program.declarations[0] {
+            assert_eq!(import.header_file, "stdio.h");
+            assert_eq!(import.alias, "IO");
+        } else {
+            panic!("Expected C import");
         }
     }
 }

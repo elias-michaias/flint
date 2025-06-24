@@ -1,312 +1,502 @@
-#ifndef RUNTIME_H
-#define RUNTIME_H
+#ifndef FLINT_RUNTIME_H
+#define FLINT_RUNTIME_H
 
-#include <stdint.h>
-#include <stdlib.h>
+#include "types.h"
 
-// Linear pointer type for memory management
-typedef struct {
-    void* ptr;
-    size_t size;
-} linear_ptr_t;
+// =============================================================================
+// MEMORY MANAGEMENT
+// =============================================================================
 
-// Pair type for tensor products
-typedef struct {
-    int64_t first;
-    int64_t second;
-} pair_t;
+// Initialize the runtime system
+void flint_init_runtime(void);
 
-// Logical programming types
-#define MAX_TERMS 1000
-#define MAX_CLAUSES 100
-#define MAX_VARS 50
-#define MAX_SOLUTIONS 100
+// Cleanup the runtime system  
+void flint_cleanup_runtime(void);
 
+// Get the global environment
+Environment* flint_get_global_env(void);
+
+// Get the global constraint store
+ConstraintStore* flint_get_global_constraint_store(void);
+
+// Function registry management
+void flint_register_function(const char* name, Value* (*func_ptr)(Value*));
+void flint_register_function_2(const char* name, Value* (*func_ptr)(Value*, Value*));
+Value* flint_call_registered_function(const char* name, Value* arg);
+Value* flint_call_registered_function_2(const char* name, Value* arg1, Value* arg2);
+bool flint_is_function_registered(const char* name);
+
+// Value conversion helpers
+int flint_value_to_int(Value* val);
+double flint_value_to_double(Value* val);
+const char* flint_value_to_string(Value* val);
+
+// Arithmetic constraint solving
+bool flint_solve_arithmetic_constraint(Value* left, Value* right, Value* result, const char* operation);
+
+// Pending arithmetic constraint management
+ArithmeticConstraint* flint_create_arithmetic_constraint(const char* operation, Value* left, Value* right, Value* result);
+void flint_free_arithmetic_constraint(ArithmeticConstraint* constraint);
+bool flint_add_pending_arithmetic_constraint(ArithmeticConstraint* constraint, Environment* env);
+bool flint_solve_pending_arithmetic_constraint(ArithmeticConstraint* constraint, Environment* env);
+void flint_check_pending_constraints_for_var(VarId var_id, Environment* env);
+void flint_check_all_pending_constraints(Environment* env);
+
+// Logic programming solution generators
+bool flint_generate_add_solutions(Value* left, Value* right, Value* result, Environment* env);
+bool flint_generate_subtract_solutions(Value* left, Value* right, Value* result, Environment* env);
+bool flint_generate_multiply_solutions(Value* left, Value* right, Value* result, Environment* env);
+
+// Allocate memory with automatic cleanup tracking
+void* flint_alloc(size_t size);
+
+// Free memory (for linear types, this happens automatically)
+void flint_free(void* ptr);
+
+// =============================================================================
+// VALUE MANAGEMENT
+// =============================================================================
+
+// Create different types of values
+Value* flint_create_integer(int64_t val);
+Value* flint_create_float(double val);
+Value* flint_create_string(const char* str);
+Value* flint_create_atom(const char* atom);
+Value* flint_create_list(Value** elements, size_t count);
+Value* flint_create_record(char** field_names, Value** field_values, size_t field_count);
+Value* flint_create_function(const char* name, int arity, void* impl);
+Value* flint_create_partial_app(Value* func, Value** args, int applied_count);
+
+// Function application and higher-order operations
+Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environment* env);
+bool flint_is_fully_applied(Value* func);
+
+// Create logical variables
+Value* flint_create_logical_var(bool is_linear);
+LogicalVar* flint_get_logical_var(Value* val);
+
+// Bind unbound logic variables (for constraint solving)
+bool flint_bind_first_unbound_var(int value);
+
+// Deep copy values (respecting linearity)
+Value* flint_copy_value(Value* val);
+
+// Free values (automatic for linear types)
+void flint_free_value(Value* val);
+
+// =============================================================================
+// UNIFICATION ENGINE
+// =============================================================================
+
+// Main unification function with occurs check
+bool flint_unify(Value* val1, Value* val2, Environment* env);
+
+// Check if two values can be unified (without side effects)
+bool flint_can_unify(Value* val1, Value* val2);
+
+// Occurs check to prevent infinite structures
+bool flint_occurs_check(VarId var_id, Value* val);
+
+// Dereference a value (follow variable bindings)
+Value* flint_deref(Value* val);
+
+// Safe dereference with null checking (used internally)
+Value* flint_deref_value(Value* val);
+
+// Assert that two values are equal (used for constraint checking)
+bool flint_assert_equal(Value* val1, Value* val2);
+
+// Solve constraints by unifying two values
+bool flint_solve_constraint(Value* val1, Value* val2);
+
+// =============================================================================
+// UNIFIED CONSTRAINT-UNIFICATION INTERFACE
+// =============================================================================
+
+// Unified constraint-aware unification (preferred for functional logic programming)
+bool flint_unify_with_constraints(Value* val1, Value* val2, Environment* env);
+
+// Create constraint relationships with automatic variable management
+bool flint_constrain_variables(Environment* env, VarId* var_ids, size_t var_count, 
+                              ArithmeticOp constraint_type, double constant,
+                              ConstraintStrength strength);
+
+// Convenience functions for common constraint patterns
+bool flint_add_sum_constraint(Environment* env, VarId x, VarId y, VarId z, ConstraintStrength strength);
+bool flint_constrain_to_value(Environment* env, VarId var_id, double value, ConstraintStrength strength);
+
+// Constraint propagation helpers
+void flint_propagate_constraints_from_values(ConstraintStore* store, Value* val1, Value* val2, Environment* env);
+void flint_extract_variable_ids(Value* val, VarId* var_array, size_t* count, size_t max_vars);
+
+// Variable registration helper
+bool flint_register_variable_with_env(Environment* env, Value* var_value);
+
+// Variable registration with environment
+bool flint_register_variable_with_env(Environment* env, Value* var_value);
+
+// =============================================================================
+// NARROWING ENGINE  
+// =============================================================================
+
+// Evaluate a function call with narrowing
+Value* flint_narrow_call(char* func_name, Value** args, size_t arg_count, Environment* env);
+
+// Create a suspension for delayed evaluation
+Suspension* flint_create_suspension(SuspensionType type, VarId* deps, size_t dep_count, void* computation);
+
+// Resume all suspensions waiting on a variable
+void flint_resume_suspensions(VarId var_id, Environment* env);
+
+// Add suspension to variable's waiting list
+void flint_add_suspension_to_var(LogicalVar* var, Suspension* susp);
+
+// Lazy evaluation support
+Value* flint_create_arithmetic_suspension(const char* op, Value* left, Value* right);
+Value* flint_create_function_call_suspension(const char* func_name, Value* args[], size_t arg_count);
+Value* flint_create_generic_suspension(void);
+Value* flint_force_value(Value* val);
+Value* flint_create_suspended_value(Suspension* susp);
+
+// =============================================================================
+// ENVIRONMENT MANAGEMENT
+// =============================================================================
+
+// Create a new environment
+Environment* flint_create_environment(Environment* parent);
+
+// Free an environment
+void flint_free_environment(Environment* env);
+
+// Bind a variable in the environment
+void flint_bind_variable(Environment* env, VarId var_id, Value* val);
+void flint_register_unbound_variable(Environment* env, VarId var_id, LogicalVar* var);
+
+// Look up a variable in the environment
+LogicalVar* flint_lookup_variable(Environment* env, VarId var_id);
+
+// =============================================================================
+// BACKTRACKING AND CHOICE POINTS
+// =============================================================================
+
+// Create a choice point for backtracking
+ChoicePoint* flint_create_choice_point(Environment* env, Value** alternatives, size_t alt_count);
+
+// Backtrack to the most recent choice point
+bool flint_backtrack(ChoicePoint** current_choice);
+
+// Commit to current choice (remove choice point)
+void flint_commit_choice(ChoicePoint* choice);
+
+// =============================================================================
+// CONSTRAINT STORE
+// =============================================================================
+
+// Create a new constraint store with amoeba solver
+ConstraintStore* flint_create_constraint_store(void);
+
+// Free a constraint store and all associated resources
+void flint_free_constraint_store(ConstraintStore* store);
+
+// Variable management
+FlintConstraintVar* flint_get_or_create_constraint_var(ConstraintStore* store, VarId var_id, const char* name);
+void flint_suggest_constraint_value(ConstraintStore* store, VarId var_id, double value);
+double flint_get_constraint_value(ConstraintStore* store, VarId var_id);
+
+// Constraint creation
+FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store, 
+                                                ArithmeticOp op,
+                                                VarId* variables,
+                                                size_t var_count,
+                                                double constant,
+                                                ConstraintStrength strength);
+
+// Convenience functions for common constraints
+FlintConstraint* flint_add_equals_constraint(ConstraintStore* store, VarId var1, VarId var2, ConstraintStrength strength);
+FlintConstraint* flint_add_addition_constraint(ConstraintStore* store, VarId x, VarId y, VarId sum, ConstraintStrength strength);
+FlintConstraint* flint_add_subtraction_constraint(ConstraintStore* store, VarId x, VarId y, VarId diff, ConstraintStrength strength);
+FlintConstraint* flint_add_inequality_constraint(ConstraintStore* store, VarId var1, VarId var2, bool less_than, ConstraintStrength strength);
+
+// Arithmetic constraint helpers
+bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target);
+bool flint_add_multi_var_linear_constraint(ConstraintStore* store, VarId* var_ids, double* coefficients, 
+                                         size_t var_count, double constant, double target, 
+                                         ConstraintStrength strength);
+bool flint_solve_function_constraint(ConstraintStore* store, VarId var_id, int target_value);
+bool flint_add_function_constraint(ConstraintStore* store, const char* function_name, VarId var_id, int target_value);
+bool flint_solve_general_arithmetic_constraint(ConstraintStore* store, const char* function_name, 
+                                             VarId var_id, double target_value);
+bool flint_add_arithmetic_relationship(ConstraintStore* store, VarId var1, VarId var2, VarId result, 
+                                     ArithmeticOp operation, ConstraintStrength strength);
+
+// Solve function constraints using backtracking
+void flint_solve_function_constraint_runtime(const char* function_name, Value* arg_var, Value* target_value, Environment* env);
+
+// Enhanced value suggestion functions
+bool flint_suggest_multiple_values(ConstraintStore* store, VarId* var_ids, double* values, size_t count);
+void flint_stop_suggesting_values(ConstraintStore* store, VarId* var_ids, size_t count);
+
+// Constraint removal
+void flint_remove_constraint(ConstraintStore* store, FlintConstraint* constraint);
+
+// Legacy constraint functions (for compatibility)
+void flint_add_constraint(ConstraintStore* store, VarId var1, VarId var2, int constraint_type, Value* data);
+bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* env);
+
+// Debugging and introspection
+void flint_print_constraint_values(ConstraintStore* store);
+bool flint_is_constraint_system_satisfiable(ConstraintStore* store);
+void flint_print_constraint_system_status(ConstraintStore* store);
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+// Print a value for debugging
+void flint_print_value(Value* val);
+
+// Check if a value is ground (contains no logical variables)
+bool flint_is_ground(Value* val);
+
+// Get all free variables in a value
+VarId* flint_get_free_vars(Value* val, size_t* count);
+
+// Generate a fresh variable ID
+VarId flint_fresh_var_id(void);
+
+// Get next variable ID
+VarId flint_next_var_id(void);
+
+// Create unbound variable with given ID
+Value* flint_create_unbound_variable(VarId id);
+
+// =============================================================================
+// PATTERN MATCHING ENGINE
+// =============================================================================
+
+// Create a pattern for matching
+Pattern* flint_create_pattern(ValueType type);
+
+// Match a value against a pattern
+bool flint_pattern_match(Value* val, Pattern* pattern, Environment* env);
+
+// Helper functions for complex pattern matching
+bool flint_match_list_pattern(Value* list_val, Pattern* pattern, Environment* env);
+bool flint_match_record_pattern(Value* record_val, Pattern* pattern, Environment* env);
+
+// Free a pattern
+void flint_free_pattern(Pattern* pattern);
+
+// =============================================================================
+// HIGHER-ORDER FUNCTIONS
+// =============================================================================
+
+// Apply a function to arguments (supports partial application)
+Value* flint_apply_function(Value* func, Value** args, size_t arg_count, Environment* env);
+
+// Check if a function is fully applied
+bool flint_is_fully_applied(Value* func);
+
+// =============================================================================
+// NON-DETERMINISTIC CHOICE
+// =============================================================================
+
+// Create a choice between multiple values
+Value* flint_create_choice(Value** alternatives, size_t count, Environment* env);
+
+// Get all solutions for a non-deterministic computation
+Value** flint_get_all_solutions(Value* expr, Environment* env, size_t* solution_count);
+
+// =============================================================================
+// LINEAR RESOURCE MANAGEMENT
+// =============================================================================
+
+// Initialize/cleanup the linear resource management system
+void flint_init_linear_system(void);
+void flint_cleanup_linear_system(void);
+
+// Core linear resource operations
+void flint_mark_linear(Value* value);
+void flint_mark_consumed(Value* value, LinearOp operation);
+bool flint_is_consumed(Value* value);
+Value* flint_consume_value(Value* value, LinearOp operation);
+
+// Opt-in non-consumptive operations
+Value* flint_copy_for_sharing(Value* value);
+Value* flint_deep_copy_value(Value* value);
+
+// Linear operations with automatic consumption
+Value* flint_linear_unify(Value* val1, Value* val2, Environment* env);
+Value* flint_linear_apply_function(Value* func, Value** args, size_t arg_count, Environment* env);
+Value* flint_linear_list_access(Value* list, size_t index);
+LinearListDestructure flint_linear_list_destructure(Value* list);
+
+// Trail management for backtracking
+LinearTrail* flint_create_linear_trail(void);
+void flint_free_linear_trail(LinearTrail* trail);
+void flint_trail_record_consumption(LinearTrail* trail, Value* value, LinearOp operation);
+LinearCheckpoint flint_trail_create_checkpoint(LinearTrail* trail);
+void flint_trail_rollback_to_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoint);
+void flint_trail_commit_checkpoint(LinearTrail* trail, LinearCheckpoint checkpoint);
+
+// Additional convenience functions for the linear system
+void flint_set_linear_context(Environment* env);
+void flint_clear_linear_context(void);
+Value* flint_share_value(Value* value);
+LinearCheckpoint flint_linear_checkpoint(LinearTrail* trail);
+void flint_linear_restore(LinearTrail* trail, LinearCheckpoint checkpoint);
+LinearListDestructure flint_linear_destructure_list(Value* list);
+
+// Choice point integration
+LinearCheckpoint flint_choice_create_linear_checkpoint(void);
+void flint_choice_rollback_linear(LinearCheckpoint checkpoint);
+void flint_choice_commit_linear(LinearCheckpoint checkpoint);
+
+// =============================================================================
+// C INTEROPERABILITY
+// =============================================================================
+
+// C type enumeration for interop
 typedef enum {
-    TERM_ATOM,
-    TERM_VAR,
-    TERM_COMPOUND,
-    TERM_INTEGER,
-    TERM_CLONE
-} term_type_t;
+    C_TYPE_VOID,
+    C_TYPE_INT,
+    C_TYPE_LONG,
+    C_TYPE_DOUBLE,
+    C_TYPE_STRING,      // char*
+    C_TYPE_POINTER      // void*
+} CType;
 
-typedef struct term {
-    term_type_t type;
-    union {
-        char* atom;
-        char* var;
-        int64_t integer;
-        struct {
-            char* functor;
-            struct term** args;
-            int arity;
-        } compound;
-        struct term* cloned;  // For TERM_CLONE
-    } data;
-} term_t;
+// Register C functions with Flint
+bool flint_register_c_function(const char* name, void* func_ptr, 
+                               CType return_type, CType* param_types, size_t param_count,
+                               bool consumes_args);
 
-// Linear resource - facts that can be consumed
-typedef struct linear_resource {
-    term_t* fact;
-    int consumed;  // 0 = available, 1 = consumed
-    int persistent; // 0 = linear (consumable), 1 = persistent (non-consumable)
-    struct linear_resource* next;
-} linear_resource_t;
+// Call a registered C function from Flint (deterministic computation)
+Value* flint_call_c_function(const char* name, Value** args, size_t arg_count, Environment* env);
 
-typedef struct {
-    term_t* head;
-    term_t** body;
-    int body_size;
-    term_t* production;  // Optional production term (NULL if no production)
-    int is_recursive;    // 1 if this rule is recursive, 0 otherwise
-} clause_t;
+// Integration with narrowing system
+Value* flint_narrow_c_function(const char* name, Value** args, size_t arg_count, Environment* env);
 
-typedef struct {
-    char* var;
-    term_t* term;
-} binding_t;
+// Convenience functions for common C function signatures
+bool flint_register_c_int_function(const char* name, int (*func)(int));
+bool flint_register_c_string_function(const char* name, char* (*func)(char*));
+bool flint_register_c_math_function(const char* name, double (*func)(double));
+bool flint_register_c_binary_int_function(const char* name, int (*func)(int, int));
 
-// Type mapping for terms
-typedef struct type_mapping {
-    char* term_name;      // Name of the term (e.g., "c1")
-    char* type_name;      // Type of the term (e.g., "coin")
-    struct type_mapping* next;
-} type_mapping_t;
+// Create Flint function wrapper for C function
+Value* flint_create_c_function_wrapper(const char* c_func_name);
 
-// Union hierarchy mapping (variant -> parent type)
-typedef struct union_mapping {
-    char* variant_type;   // Name of the variant type (e.g., "apple")
-    char* parent_type;    // Name of the parent type (e.g., "fruit")
-    struct union_mapping* next;
-} union_mapping_t;
+// Initialize and cleanup C interop
+void flint_init_builtin_c_functions(void);
+void flint_cleanup_c_interop(void);
 
-// Linear path tracking for showing resource consumption chains
-typedef struct path_step {
-    enum {
-        PATH_CONSUME,    // Consumed a resource: "turkey1"
-        PATH_RULE_APPLY, // Applied a rule: "eat"
-        PATH_PRODUCE     // Produced a resource: "=> satisfied"
-    } type;
-    char* item_name;           // Name of resource or rule
-    char* produced_name;       // For PATH_PRODUCE, what was produced
-    struct path_step* next;
-} path_step_t;
+// =============================================================================
+// ASYNCHRONOUS OPERATIONS AND STRUCTURED CONCURRENCY
+// =============================================================================
 
-typedef struct linear_path {
-    path_step_t* steps;        // Linked list of path steps
-    path_step_t* last_step;    // For easy appending
-} linear_path_t;
+// Forward declarations for async types
+typedef struct AsyncContext AsyncContext;
 
-// Consumed state for backtracking
-typedef struct consumed_state {
-    linear_resource_t* resource;
-    int was_consumed;
-    struct consumed_state* next;
-} consumed_state_t;
+// Channel wrapper for Flint values
+typedef struct FlintChannel {
+    int dill_channel[2];           // libdill channel handle (send and recv)
+    bool is_closed;                // Whether the channel is closed
+    size_t capacity;               // Channel capacity (0 = synchronous)
+    CType value_type;              // Type of values in this channel
+} FlintChannel;
 
-typedef struct {
-    binding_t bindings[MAX_VARS];
-    int count;
-} substitution_t;
+// Bundle for managing multiple coroutines
+typedef struct CoroutineBundle {
+    FlintChannel** result_channels;
+    size_t count;
+    size_t capacity;
+} CoroutineBundle;
 
-// Forward declaration for persistent facts
-typedef struct persistent_fact {
-    term_t* fact;
-    struct persistent_fact* next;
-} persistent_fact_t;
+// Async context management
+AsyncContext* flint_create_async_context(Environment* env);
+void flint_set_async_context(AsyncContext* ctx);
+AsyncContext* flint_get_async_context(void);
+void flint_free_async_context(AsyncContext* ctx);
 
-// Goal stack for recursion detection
-#define MAX_GOAL_STACK_DEPTH 100
-#define MAX_RECURSIVE_DEPTH 10
-#define MAX_GOAL_CACHE 50
-typedef struct goal_stack {
-    term_t* goals[MAX_GOAL_STACK_DEPTH];
-    int depth;
-} goal_stack_t;
+// Channel operations
+FlintChannel* flint_create_channel(size_t capacity, CType value_type);
+bool flint_channel_send(FlintChannel* chan, Value* value, int timeout_ms);
+Value* flint_channel_recv(FlintChannel* chan, int timeout_ms);
+void flint_channel_close(FlintChannel* chan);
 
-// Goal cache for memoization
-typedef struct goal_cache {
-    term_t* goals[MAX_GOAL_CACHE];
-    int results[MAX_GOAL_CACHE];  // 0 = not resolved, 1 = success, -1 = failure
-    int count;
-} goal_cache_t;
+// Coroutine operations
+FlintChannel* flint_spawn_coroutine(Value* (*func)(Value**, size_t, Environment*),
+                                   Value** args, size_t arg_count, Environment* env);
+Value* flint_await_coroutine(FlintChannel* result_channel, int timeout_ms);
 
-// Linear knowledge base
-typedef struct {
-    linear_resource_t* resources;  // Linear facts
-    clause_t* rules;               // Rules (can be reused)
-    int rule_count;
-    type_mapping_t* type_mappings; // Maps terms to their types
-    union_mapping_t* union_mappings; // Maps variant types to parent types
-    persistent_fact_t* persistent_facts; // Persistent facts (not consumed)
-    int* applied_rules;            // Bitmap tracking which rules have been applied
-} linear_kb_t;
+// Structured concurrency (bundles)
+CoroutineBundle* flint_create_bundle(size_t initial_capacity);
+bool flint_bundle_spawn(CoroutineBundle* bundle, 
+                       Value* (*func)(Value**, size_t, Environment*),
+                       Value** args, size_t arg_count, Environment* env);
+Value** flint_bundle_wait_all(CoroutineBundle* bundle, int timeout_ms);
+Value* flint_bundle_wait_any(CoroutineBundle* bundle, size_t* completed_index, int timeout_ms);
+void flint_free_bundle(CoroutineBundle* bundle);
 
-// Runtime function declarations
-linear_ptr_t linear_alloc(size_t size);
-void linear_free(linear_ptr_t lptr);
-int64_t linear_load(linear_ptr_t lptr);
-void linear_store(linear_ptr_t lptr, int64_t value);
+// Async I/O operations
+Value* flint_async_read_file(const char* filename);
+void flint_async_sleep(int milliseconds);
 
-// String handling (simplified)
-typedef struct {
-    char* data;
-    size_t length;
-} linear_string_t;
+// Get current time in milliseconds (for timing measurements)
+int64_t flint_now(void);
 
-linear_string_t linear_string_create(const char* str);
-void linear_string_free(linear_string_t str);
-linear_string_t linear_string_concat(linear_string_t a, linear_string_t b);
+// Integration with Flint runtime
+void flint_init_async_system(Environment* env);
+void flint_cleanup_async_system(void);
+void flint_register_async_functions(void);
 
-// Logical programming functions
-term_t* create_atom(const char* name);
-term_t* create_var(const char* name);
-term_t* create_integer(int64_t value);
-term_t* create_compound(const char* functor, term_t** args, int arity);
-term_t* create_clone(term_t* inner);
-int unify(term_t* t1, term_t* t2, substitution_t* subst);
-int occurs_in_term(const char* var, term_t* term);
-term_t* rename_variables_in_term(term_t* term, int instance_id);
-void create_filtered_substitution(substitution_t* full_subst, char** target_vars, int target_count, substitution_t* filtered_subst);
-term_t* resolve_variable_chain(substitution_t* subst, const char* var);
-int solutions_are_equivalent(substitution_t* s1, substitution_t* s2);
-term_t* apply_substitution(term_t* term, substitution_t* subst);
-void print_term(term_t* term);
-void print_substitution(substitution_t* subst);
-int resolve_query(clause_t* clauses, int clause_count, term_t** goals, int goal_count);
-int string_equal(const char* s1, const char* s2);
-term_t* copy_term(term_t* term);
-void free_term(term_t* term);
+// Narrowing functions for async operations
+Value* flint_narrow_async_spawn(Value** args, size_t arg_count, Environment* env);
+Value* flint_narrow_async_await(Value** args, size_t arg_count, Environment* env);
 
-// Linear path tracking functions
-linear_path_t* create_linear_path();
-void add_path_consume(linear_path_t* path, const char* resource_name);
-void add_path_rule_apply(linear_path_t* path, const char* rule_name);
-void add_path_produce(linear_path_t* path, const char* rule_name, const char* produced_name);
-void print_linear_path(linear_path_t* path);
-void free_linear_path(linear_path_t* path);
-linear_path_t* copy_linear_path(linear_path_t* path);
+// =============================================================================
+// LIST OPERATIONS
+// =============================================================================
 
-// Linear logic functions
-linear_kb_t* create_linear_kb();
-void add_linear_fact(linear_kb_t* kb, term_t* fact);
-void add_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production);
-void add_recursive_rule(linear_kb_t* kb, term_t* head, term_t** body, int body_size, term_t* production);
-void add_type_mapping(linear_kb_t* kb, const char* term_name, const char* type_name);
-void add_union_mapping(linear_kb_t* kb, const char* variant_type, const char* parent_type);
+// List creation and basic operations
+Value* flint_list_create(Value** elements, size_t count);
+Value* flint_list_create_empty(void);
+Value* flint_list_create_single(Value* element);
+size_t flint_list_length(Value* list);
+bool flint_list_is_empty(Value* list);
 
-// Function for adding persistent facts
-void add_persistent_fact(linear_kb_t* kb, term_t* fact);
+// List access and manipulation
+Value* flint_list_get_element(Value* list, size_t index);
+Value* flint_list_get_head(Value* list);
+Value* flint_list_get_tail(Value* list);
+Value* flint_list_prepend(Value* element, Value* list);
+Value* flint_list_append_element(Value* list, Value* element);
 
-// Goal stack functions for recursion detection
-void init_goal_stack(goal_stack_t* stack);
-int push_goal(goal_stack_t* stack, term_t* goal);
-void pop_goal(goal_stack_t* stack);
-int is_goal_in_stack(goal_stack_t* stack, term_t* goal);
-int is_goal_pattern_in_stack(goal_stack_t* stack, term_t* goal);
-int goals_have_same_pattern(term_t* goal1, term_t* goal2);
+// List operations (append, reverse, etc.)
+Value* flint_list_append(Value* list1, Value* list2);
+Value* flint_list_reverse(Value* list);
 
-// Goal cache functions for memoization
-void init_goal_cache(goal_cache_t* cache);
-int check_goal_cache(goal_cache_t* cache, term_t* goal);
-void add_goal_cache(goal_cache_t* cache, term_t* goal, int result);
+// List printing and groundness
+void flint_list_print(Value* list);
+bool flint_list_is_ground(Value* list);
 
-int is_variant_of(linear_kb_t* kb, const char* variant_type, const char* parent_type);
-const char* get_term_type(linear_kb_t* kb, const char* term_name);
-int can_unify_with_type(linear_kb_t* kb, term_t* goal, term_t* fact);
-int linear_resolve_query(linear_kb_t* kb, term_t** goals, int goal_count);
-int linear_resolve_query_with_type(linear_kb_t* kb, term_t** goals, int goal_count, int is_disjunctive);
-int linear_resolve_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path);
-int build_solution_path_single_goal(linear_kb_t* kb, linear_resource_t* start_resource, term_t** goals, int goal_count, linear_path_t* path);
-int linear_resolve_query_with_substitution(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst);
-int linear_resolve_query_with_path(linear_kb_t* kb, term_t** goals, int goal_count, term_t* original_query, substitution_t* global_subst, linear_path_t* path);
-int linear_resolve_forward_chaining(linear_kb_t* kb, term_t** goals, int goal_count, linear_path_t* path);
-void compose_substitutions(substitution_t* dest, substitution_t* src);
-void free_linear_kb(linear_kb_t* kb);
-void reset_consumed_resources(linear_kb_t* kb);
-consumed_state_t* save_consumed_state(linear_kb_t* kb);
-void restore_consumed_state(consumed_state_t* state);
-int consume_resource_and_apply_rules_with_subst(linear_kb_t* kb, linear_resource_t* resource, term_t** goals, int goal_count, int* remaining_goals, int* unsatisfied_count, linear_path_t* path, substitution_t* global_subst);
+// Linear list operations
+Value* flint_list_linear_access(Value* list, size_t index);
+LinearListDestructure flint_list_linear_destructure(Value* list);
+Value* flint_list_deep_copy(Value* list);
+void flint_list_free(Value* list);
 
-// Solution list for backtracking
-typedef struct solution_list {
-    int count;
-    int capacity;
-    substitution_t* solutions;
-} solution_list_t;
+// List pattern matching
+bool flint_list_match_pattern(Value* list_val, Pattern* pattern, Environment* env);
 
-// Function declarations for backtracking
-solution_list_t* create_solution_list();
-void add_solution(solution_list_t* list, substitution_t* solution);
-void free_solution_list(solution_list_t* list);
-int linear_resolve_query_all_solutions(linear_kb_t* kb, term_t** goals, int goal_count, solution_list_t* solutions);
-int linear_resolve_query_with_substitution_backtrack(linear_kb_t* kb, term_t** goals, int goal_count, 
-                                                   term_t* original_query, substitution_t* global_subst, 
-                                                   solution_list_t* solutions);
-int try_rule_with_backtracking(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                              term_t* original_query, substitution_t* global_subst, solution_list_t* solutions);
-int try_rule_with_backtracking_simple(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                     term_t* original_query, substitution_t* global_subst, solution_list_t* solutions);
+// List unification
+bool flint_list_unify(Value* val1, Value* val2, Environment* env);
 
-// Enhanced solution structures for variable binding support
-typedef struct variable_binding {
-    char* var_name;
-    term_t* value;
-} variable_binding_t;
+// Narrowing operations (constraint-based list operations)
+Value* flint_list_narrow_append(Value** args, size_t arg_count, Environment* env);
+Value* flint_list_narrow_reverse(Value** args, size_t arg_count, Environment* env);
+Value* flint_list_narrow_length(Value** args, size_t arg_count, Environment* env);
 
-typedef struct enhanced_solution {
-    substitution_t substitution;
-    variable_binding_t* bindings;
-    int binding_count;
-} enhanced_solution_t;
+// =============================================================================
 
-typedef struct enhanced_solution_list {
-    int count;
-    int capacity;
-    enhanced_solution_t* solutions;
-} enhanced_solution_list_t;
-
-// Enhanced solution functions
-enhanced_solution_list_t* create_enhanced_solution_list();
-void add_enhanced_solution(enhanced_solution_list_t* list, substitution_t* subst);
-void print_enhanced_solution(enhanced_solution_t* solution);
-void free_enhanced_solution_list(enhanced_solution_list_t* list);
-void add_persistent_fact(linear_kb_t* kb, term_t* fact);
-int match_persistent_facts(linear_kb_t* kb, term_t* goal, substitution_t* subst);
-int linear_resolve_query_enhanced(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
-int linear_resolve_query_enhanced_with_stack(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions, goal_stack_t* stack);
-int linear_resolve_query_enhanced_disjunctive(linear_kb_t* kb, term_t** goals, int goal_count, enhanced_solution_list_t* solutions);
-int try_rule_with_backtracking_enhanced(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                                       term_t** original_goals, int original_goal_count, substitution_t* global_subst, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
-int try_rule_body_depth_first(linear_kb_t* kb, clause_t* rule, term_t** goals, int goal_count,
-                              term_t** original_goals, int original_goal_count, substitution_t* rule_subst,
-                              enhanced_solution_list_t* solutions, int rule_depth, term_t** instantiated_body, goal_stack_t* stack);
-int resolve_rule_body_recursive(linear_kb_t* kb, term_t** body_goals, int body_count, int body_index,
-                                substitution_t* current_subst, clause_t* rule, term_t** remaining_goals, int remaining_count,
-                                term_t** original_goals, int original_goal_count, enhanced_solution_list_t* solutions, int rule_depth, goal_stack_t* stack);
-
-// Enhanced solution comparison
-int enhanced_solutions_are_equivalent(enhanced_solution_t* solution, substitution_t* subst);
-
-// Helper functions
-int has_variables(term_t* term);
-int is_persistent_resource(term_t* fact);
-term_t* get_inner_term(term_t* term);
-int terms_equal(term_t* t1, term_t* t2);
-int substitutions_equal(substitution_t* s1, substitution_t* s2);
-int fact_exists(linear_kb_t* kb, term_t* fact);
-void apply_rule_exhaustively(linear_kb_t* kb, clause_t* rule, int* made_progress);
-void apply_rule_combinations(linear_kb_t* kb, clause_t* rule, int body_index, 
-                           linear_resource_t** used_resources, 
-                           substitution_t* current_subst, int* made_progress);
-int can_apply_rule(linear_kb_t* kb, clause_t* rule);
-int can_satisfy_body_conditions(linear_kb_t* kb, clause_t* rule, int body_index, 
-                               linear_resource_t** used_resources);
-
-// Variable extraction and binding checking functions
-void extract_variables_from_term(term_t* term, char** vars, int* var_count, int max_vars);
-void extract_variables_from_goals(term_t** goals, int goal_count, char** vars, int* var_count, int max_vars);
-int all_variables_bound(char** vars, int var_count, substitution_t* subst);
-void free_variable_list(char** vars, int var_count);
-
-#endif // RUNTIME_H
+#endif // FLINT_RUNTIME_H

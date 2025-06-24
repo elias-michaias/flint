@@ -1,11 +1,10 @@
 mod ast;
 mod lexer;
 mod parser;
-mod typechecker;
 mod codegen;
-mod unification;
 mod diagnostic;
-mod resource;
+mod typechecking;
+mod ir;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -16,7 +15,7 @@ use crate::ast::*;
 
 #[derive(Parser)]
 #[command(name = "flint")]
-#[command(about = "A compiler for linear logic programming language")]
+#[command(about = "A compiler for Flint functional logic programming language")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -45,11 +44,17 @@ enum Commands {
         /// Enable debug output
         #[arg(long)]
         debug: bool,
+        /// Dump IR to file
+        #[arg(long)]
+        ir: bool,
     },
-    /// Check syntax and types
+    /// Check a program
     Check {
         /// Input source file
         input: PathBuf,
+        /// Generate detailed analysis report
+        #[arg(long)]
+        report: bool,
         /// Enable debug output
         #[arg(long)]
         debug: bool,
@@ -59,6 +64,7 @@ enum Commands {
 /// Result of the parsing pipeline
 struct ParsedProgram {
     program: Program,
+    ir_program: ir::IRProgram,
     source: String,
     input_path: PathBuf,
 }
@@ -70,11 +76,11 @@ fn main() {
         Commands::Run { input, debug } => {
             run_command(input, debug)
         }
-        Commands::Compile { input, output, executable, debug } => {
-            compile_command(input, output, executable, debug)
+        Commands::Compile { input, output, executable, debug, ir } => {
+            compile_command(input, output, executable, debug, ir)
         }
-        Commands::Check { input, debug } => {
-            check_command(input, debug)
+        Commands::Check { input, report, debug } => {
+            check_command(input, report, debug)
         }
     };
     
@@ -84,25 +90,21 @@ fn main() {
     }
 }
 
-/// Full pipeline: lexing, parsing, typechecking, and linear resource analysis
+/// Full pipeline: lexing, parsing, and code generation
 fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn std::error::Error>> {
     // Read source file
     let source = fs::read_to_string(&input)?;
     
+    if debug {
+        println!("=== PARSING {} ===", input.display());
+    }
+    
     // Tokenize
-    let lex_result = match lexer::tokenize(&source) {
+    let lex_result = match lexer::tokenize_with_filename(&source, input.to_string_lossy().to_string()) {
         Ok(lex_result) => {
             // Report any lexer errors first
             for error in &lex_result.errors {
-                let diagnostic = diagnostic::Diagnostic::error(format!("Lexer error: {}", error.message))
-                    .with_location(diagnostic::SourceLocation::new(
-                        input.to_string_lossy().to_string(),
-                        error.line,
-                        error.column,
-                        error.length,
-                    ))
-                    .with_source_text(source.clone());
-                diagnostic.emit();
+                error.diagnostic.emit();
             }
             
             // Exit if there were lexer errors
@@ -112,8 +114,8 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
             
             if debug {
                 eprintln!("DEBUG: Tokens:");
-                for (i, token) in lex_result.tokens.iter().enumerate() {
-                    eprintln!("  {}: {:?}", i, token);
+                for (i, token_span) in lex_result.tokens.iter().enumerate() {
+                    eprintln!("  {}: {:?}", i, token_span);
                 }
             }
             lex_result
@@ -132,85 +134,228 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
     };
     
     // Parse
-    let mut parser = parser::Parser::new(lex_result.tokens, input.to_string_lossy().to_string(), source.clone()).with_debug(debug);
+    let mut parser = parser::FlintParser::new_with_filename(lex_result.tokens, input.to_string_lossy().to_string());
     let program = match parser.parse_program() {
         Ok(program) => {
             if debug {
                 eprintln!("DEBUG: Parsed program:");
-                eprintln!("  Type definitions: {:?}", program.type_definitions);
-                eprintln!("  Clauses: {:?}", program.clauses);
-                eprintln!("  Queries: {:?}", program.queries);
+                eprintln!("  Type definitions: {:?}", program.types());
+                eprintln!("  Function signatures: {:?}", program.function_signatures());
+                eprintln!("  Function definitions: {:?}", program.functions());
+                eprintln!("  Effect declarations: {:?}", program.effects());
+                eprintln!("  Effect handlers: {:?}", program.handlers());
+                eprintln!("  C imports: {:?}", program.c_imports());
+                eprintln!("  Main function: {:?}", program.main_function());
             }
             program
         },
         Err(e) => {
             match e {
                 parser::ParseError::Diagnostic(diagnostic) => {
-                    diagnostic.emit();
-                },
-                _ => {
-                    let diagnostic = diagnostic::Diagnostic::error(format!("Parse error: {}", e))
-                        .with_location(diagnostic::SourceLocation::new(
-                            input.to_string_lossy().to_string(),
-                            1, 1, 1
-                        ))
-                        .with_source_text(source.clone())
-                        .with_help("Check syntax and ensure all declarations are properly formatted".to_string());
-                    diagnostic.emit();
+                    let diagnostic_with_source = diagnostic.with_source_text(source.clone());
+                    diagnostic_with_source.emit();
                 }
             }
             std::process::exit(1);
         }
     };
     
-    // Type check
-    let mut type_checker = typechecker::TypeChecker::new();
-    if let Err(e) = type_checker.check_program(&program) {
-        let diagnostic = diagnostic::Diagnostic::error(format!("Type error: {}", e))
-            .with_location(diagnostic::SourceLocation::new(
-                input.to_string_lossy().to_string(),
-                1, 1, 1
-            ))
-            .with_help("Ensure all predicates and terms have proper type declarations".to_string());
-        diagnostic.emit();
-        std::process::exit(1);
+    // Type checking for the functional logic language
+    if debug {
+        eprintln!("DEBUG: Starting type checking...");
     }
+    
+    let mut type_checker = typechecking::TypeChecker::new()
+        .with_source(input.to_string_lossy().to_string(), source.clone());
+    match type_checker.check_program(&program) {
+        Ok(type_env) => {
+            if debug {
+                eprintln!("DEBUG: Type checking completed successfully");
+                eprintln!("DEBUG: Type environment has {} variables and {} functions", 
+                         type_env.variables.len(), type_env.functions.len());
+            }
+        },
+        Err(e) => {
+            match e {
+                typechecking::TypeCheckError::Diagnostic(diagnostic) => {
+                    let diagnostic_with_source = diagnostic.with_source_text(source.clone());
+                    diagnostic_with_source.emit();
+                }
+            }
+            std::process::exit(1);
+        }
+    };
+
+    // IR Analysis - build intermediate representation
+    if debug {
+        eprintln!("DEBUG: Starting IR analysis...");
+    }
+    
+    let mut ir_builder = ir::IRBuilder::new(&program);
+    let ir_program = ir_builder.build();
     
     if debug {
-        eprintln!("DEBUG: Type checking passed");
-    }
-    
-    // Perform linear resource analysis
-    let mut resource_manager = resource::LinearResourceManager::new();
-    for clause in &program.clauses {
-        match clause {
-            Clause::Fact { predicate, args, persistent: _, .. } => {
-                resource_manager.add_fact(predicate.clone(), args.clone());
+        eprintln!("DEBUG: IR analysis completed successfully");
+        eprintln!("DEBUG: Found {} functions in IR", ir_program.functions.len());
+        eprintln!("DEBUG: Global constraints: {}", ir_program.global_constraints.len());
+        eprintln!("DEBUG: Symbol table size: {}", ir_program.symbol_table.len());
+        
+        // Print detailed IR for each function
+        for func in &ir_program.functions {
+            eprintln!("=== IR for function '{}' ===", func.name);
+            eprintln!("  Parameters: {:?}", func.parameters);
+            eprintln!("  Determinism: {:?}", func.determinism);
+            eprintln!("  Body: {}", func.body);
+            eprintln!("  Constraints:");
+            for constraint in &func.constraints {
+                eprintln!("    {}", constraint);
             }
-            Clause::Rule { head, body, produces } => {
-                resource_manager.add_rule(head.clone(), body.clone());
-                if debug && produces.is_some() {
-                    eprintln!("DEBUG: Rule produces: {:?}", produces);
-                }
+            eprintln!("  Binding analysis:");
+            for (symbol, status) in &func.binding_analysis {
+                eprintln!("    {} -> {:?}", symbol.name, status);
             }
         }
     }
     
     if debug {
-        let (available, _consumed) = resource_manager.get_resource_counts();
-        eprintln!("DEBUG: Linear resource analysis complete");
-        eprintln!("  Available resources: {}", available);
-        eprintln!("  Resource manager initialized");
+        eprintln!("DEBUG: Parsing completed successfully");
     }
+    
+    // TODO: Add compile-time analysis for the new functional logic language
+    // COMPILE-TIME LINEAR RESOURCE ANALYSIS
+    // if debug {
+    //     eprintln!("DEBUG: Performing linear resource analysis...");
+    // }
+    
+    // // Run comprehensive linearity analysis with actual file name
+    // let filename = input.to_string_lossy().to_string();
+    // if let Err(linearity_errors) = resource::analyze_program_linearity_with_file(&program, &filename) {
+    //     eprintln!("Linear resource errors detected:");
+    //     for error in &linearity_errors {
+    //         match error {
+    //             resource::LinearError::UnconsumedResource { resource_name, location } => {
+    //                 let diagnostic = diagnostic::Diagnostic::error(
+    //                     format!("Unconsumed linear resource: '{}'", resource_name)
+    //                 )
+    //                 .with_location(diagnostic::SourceLocation::new(
+    //                     location.file.clone(),
+    //                     location.line,
+    //                     location.column,
+    //                     location.length,
+    //                 ))
+    //                 .with_help(format!("Linear resource '{}' must be consumed exactly once. Either add a rule that uses this resource, or mark the fact as optional with '?' prefix.", resource_name))
+    //                 .with_source_text(source.clone());
+    //                 diagnostic.emit();
+    //             }
+    //             resource::LinearError::MultipleUseWithoutClone { variable, first_use, second_use } => {
+    //                 let diagnostic = diagnostic::Diagnostic::error(
+    //                     format!("Linear variable '{}' used multiple times", variable)
+    //                 )
+    //                 .with_location(diagnostic::SourceLocation::new(
+    //                     second_use.file.clone(),
+    //                     second_use.line,
+    //                     second_use.column,
+    //                     second_use.length,
+    //                 ))
+    //                 .with_help(format!("Linear variable '{}' was first used at '{}' and then again at '{}'. Use the exponential prefix !{} if multiple uses are intended.", variable, first_use, second_use, variable))
+    //                 .with_source_text(source.clone());
+    //                 diagnostic.emit();
+    //             }
+    //             resource::LinearError::UseAfterFree { resource_name, deallocation_site, use_site } => {
+    //                 let diagnostic = diagnostic::Diagnostic::error(
+    //                     format!("Use after free: '{}'", resource_name)
+    //                 )
+    //                 .with_location(diagnostic::SourceLocation::new(
+    //                     use_site.file.clone(),
+    //                     use_site.line,
+    //                     use_site.column,
+    //                     use_site.length,
+    //                 ))
+    //                 .with_help(format!("Resource '{}' was deallocated at '{}' but used again at '{}'", resource_name, deallocation_site, use_site))
+    //                 .with_source_text(source.clone());
+    //                 diagnostic.emit();
+    //             }
+    //             _ => {
+    //                 eprintln!("  - {:?}", error);
+    //             }
+    //         }
+    //     }
+    //     std::process::exit(1);
+    // }
+    
+    // if debug {
+    //     eprintln!("DEBUG: Linear resource analysis passed - all resources properly consumed");
+    //     // Generate and print linearity report
+    //     let report = resource::generate_linearity_report(&program);
+    //     eprintln!("{}", report);
+    // }
+    
+    // // Perform linear resource analysis
+    // let mut resource_manager = resource::LinearResourceManager::new();
+    // for clause in &program.clauses {
+    //     match clause {
+    //         Clause::Fact { predicate, args, persistent: _, .. } => {
+    //             resource_manager.add_fact(predicate.clone(), args.clone());
+    //         }
+    //         Clause::Rule { head, body, produces, .. } => {
+    //             resource_manager.add_rule(head.clone(), body.clone());
+    //             if debug && produces.is_some() {
+    //                 eprintln!("DEBUG: Rule produces: {:?}", produces);
+    //             }
+    //         }
+    //     }
+    // }
+    
+    // if debug {
+    //     let (available, _consumed) = resource_manager.get_resource_counts();
+    //     eprintln!("DEBUG: Linear resource analysis complete");
+    //     eprintln!("  Available resources: {}", available);
+    //     eprintln!("  Resource manager initialized");
+    // }
     
     Ok(ParsedProgram {
         program,
+        ir_program,
         source,
         input_path: input,
     })
 }
 
-/// Run command: compile and execute with full linear logic resource tracking
+/// Helper function for cross-platform C compilation with dead code elimination
+fn setup_c_compiler(debug: bool) -> Command {
+    // Cross-platform compiler detection and configuration
+    let (compiler, dead_code_flags) = if cfg!(target_os = "macos") {
+        ("clang", vec!["-Wl,-dead_strip"])
+    } else if cfg!(target_os = "windows") {
+        ("gcc", vec!["-Wl,--gc-sections"])
+    } else {
+        // Linux and others
+        ("gcc", vec!["-Wl,--gc-sections"])
+    };
+    
+    let mut command = Command::new(compiler);
+    command
+        .arg("-std=c99")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-O2")
+        .arg("-march=native")
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections");
+    
+    // Add dead code elimination flags
+    for flag in dead_code_flags {
+        command.arg(flag);
+    }
+    
+    if debug {
+        command.arg("-DDEBUG");
+    }
+    
+    command
+}
+
+/// Run command: compile and execute functional logic programs
 fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_program(input, debug)?;
     
@@ -229,8 +374,12 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     
     // Generate C code
     let mut codegen = codegen::CodeGenerator::new().with_debug(debug);
-    let c_code = match codegen.generate(&parsed.program) {
+    let c_code = match codegen.generate_with_context(&parsed.program, &parsed.input_path.to_string_lossy(), &parsed.source) {
         Ok(code) => code,
+        Err(codegen::CodegenError::Diagnostic(diagnostic)) => {
+            diagnostic.emit();
+            std::process::exit(1);
+        }
         Err(e) => {
             let diagnostic = diagnostic::Diagnostic::error(format!("Code generation error: {}", e))
                 .with_location(diagnostic::SourceLocation::new(
@@ -253,22 +402,14 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     
     // Compile to executable
     let exe_file = temp_dir.join("program");
-    let mut command = Command::new(if cfg!(target_os = "macos") { "clang" } else { "gcc" });
-    command
-        .arg("-std=c99")
-        .arg("-Wall")
-        .arg("-Wextra")
-        .arg("-O2");
     
-    if debug {
-        command.arg("-DDEBUG");
-    }
-    
-    let status = command
+    let status = setup_c_compiler(debug)
         .arg(&c_file)
-        .arg("runtime/runtime.c")
+        .arg("runtime/out/libflint_runtime.a")
         .arg("-I")
         .arg("runtime")
+        .arg("-I")
+        .arg("runtime/lib/libdill/libdill-install/include")
         .arg("-o")
         .arg(&exe_file)
         .status()?;
@@ -303,13 +444,33 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
 }
 
 /// Compile command: generate C code and optionally compile to executable
-fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, debug: bool, dump_ir: bool) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_program(input, debug)?;
+    
+    // Dump IR if requested
+    if dump_ir {
+        let ir_path = {
+            let mut path = parsed.input_path.clone();
+            let filename = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            path.set_file_name(format!("{}.ir", filename));
+            path
+        };
+        
+        let ir_content = format!("{}", parsed.ir_program);
+        fs::write(&ir_path, ir_content)?;
+        println!("IR dumped to: {}", ir_path.display());
+    }
     
     // Generate C code
     let mut codegen = codegen::CodeGenerator::new().with_debug(debug);
-    let c_code = match codegen.generate(&parsed.program) {
+    let c_code = match codegen.generate_with_context(&parsed.program, &parsed.input_path.to_string_lossy(), &parsed.source) {
         Ok(code) => code,
+        Err(codegen::CodegenError::Diagnostic(diagnostic)) => {
+            diagnostic.emit();
+            std::process::exit(1);
+        }
         Err(e) => {
             let diagnostic = diagnostic::Diagnostic::error(format!("Code generation error: {}", e))
                 .with_location(diagnostic::SourceLocation::new(
@@ -341,22 +502,13 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
             path
         };
         
-        let mut command = Command::new(if cfg!(target_os = "macos") { "clang" } else { "gcc" });
-        command
-            .arg("-std=c99")
-            .arg("-Wall")
-            .arg("-Wextra")
-            .arg("-O2");
-        
-        if debug {
-            command.arg("-DDEBUG");
-        }
-        
-        let status = command
+        let status = setup_c_compiler(debug)
             .arg(&output_path)
-            .arg("runtime/runtime.c")
+            .arg("runtime/out/libflint_runtime.a")
             .arg("-I")
             .arg("runtime")
+            .arg("-I")
+            .arg("runtime/lib/libdill/libdill-install/include")
             .arg("-o")
             .arg(&exe_path)
             .status()?;
@@ -371,13 +523,22 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
     Ok(())
 }
 
-/// Check command: validate syntax, types, and linear resource usage
-fn check_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// Check command: validate syntax and semantics
+fn check_command(input: PathBuf, report: bool, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
     let _parsed = parse_program(input, debug)?;
-    println!("✓ Type checking passed!");
-    println!("Program is well-typed");
+    
+    if report {
+        // TODO: Implement analysis reports for the functional logic language
+        println!("Analysis reports not yet implemented for functional logic language");
+    }
+    
+    println!("✓ All checks passed!");
+    println!("✓ Syntax and parsing successful!");
+    println!("Program structure is valid.");
     Ok(())
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -388,7 +549,7 @@ mod tests {
     fn test_parse_simple_program() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("test.fl");
-        fs::write(&input_path, "type person.\njohn :: person.").unwrap();
+        fs::write(&input_path, "main = 42").unwrap();
         
         let result = parse_program(input_path, false);
         assert!(result.is_ok());
@@ -398,7 +559,7 @@ mod tests {
     fn test_run_simple_program() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("test.fl");
-        fs::write(&input_path, "type person.\njohn :: person.").unwrap();
+        fs::write(&input_path, "main = 42").unwrap();
         
         let result = run_command(input_path, false);
         assert!(result.is_ok());
@@ -408,7 +569,7 @@ mod tests {
     fn test_compile_simple_program() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("test.fl");
-        fs::write(&input_path, "type person.\njohn :: person.").unwrap();
+        fs::write(&input_path, "main = 42").unwrap();
         
         let result = compile_command(input_path, None, false, false);
         assert!(result.is_ok());
@@ -418,7 +579,7 @@ mod tests {
     fn test_check_valid_program() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("test.fl");
-        fs::write(&input_path, "type person.\njohn :: person.").unwrap();
+        fs::write(&input_path, "main = 42").unwrap();
         
         let result = check_command(input_path, false);
         assert!(result.is_ok());

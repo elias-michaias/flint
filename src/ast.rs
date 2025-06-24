@@ -1,75 +1,110 @@
-use std::collections::HashMap;
+use crate::diagnostic::SourceLocation;
 
-/// Represents a variable name
-pub type VarName = String;
+/// Variable names in the new language (can be logic variables with $)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Variable {
+    pub name: String,
+    pub is_logic_var: bool, // true for $var, false for regular var
+    pub location: Option<SourceLocation>, // Source location for error reporting
+}
 
-/// Represents a function name
-pub type FunctionName = String;
+impl Variable {
+    pub fn new(name: String) -> Self {
+        Self { 
+            name, 
+            is_logic_var: false,
+            location: None,
+        }
+    }
+    
+    pub fn new_logic(name: String) -> Self {
+        Self { 
+            name, 
+            is_logic_var: true,
+            location: None,
+        }
+    }
+    
+    pub fn with_location(mut self, location: SourceLocation) -> Self {
+        self.location = Some(location);
+        self
+    }
+}
 
-/// Represents a type name
-pub type TypeName = String;
-
-/// Type declarations
+/// Types in the functional logic language
 #[derive(Debug, Clone, PartialEq)]
-pub enum LogicType {
-    /// Built-in types
-    Integer,
+pub enum FlintType {
+    /// Primitive types
+    Int32,
     String,
-    Atom,  // New built-in atom type
-    /// User-defined type (e.g., person)
-    Named(TypeName),
-    /// Union type (e.g., fruit = apple | orange)
-    Union(Vec<LogicType>),
-    /// Function type (for predicates): A -> B -> ... -> type
-    Arrow(Vec<LogicType>),
-    /// The special "type" type for predicates
-    Type,
+    Bool,
+    Unit,
+    
+    /// List type: List<T>
+    List(Box<FlintType>),
+    
+    /// Function type: A -> B
+    Function {
+        params: Vec<FlintType>,
+        result: Box<FlintType>,
+        effects: Vec<String>, // Effect names
+    },
+    
+    /// Record type: record { name: str, age: i32 }
+    Record {
+        fields: Vec<(String, FlintType)>,
+    },
+    
+    /// Named type (user-defined)
+    Named(String),
+    
+    /// Type variable for generics
+    TypeVar(String),
 }
 
-/// Type definition with optional nested union types and subtyping
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypeDefinition {
+/// Effect declarations
+#[derive(Debug, Clone)]
+pub struct EffectDecl {
     pub name: String,
-    pub union_variants: Option<UnionVariants>, // for complex union structures
-    pub supertype: Option<LogicType>, // for subtyping: person :: type of atom
-    pub distinct: bool, // whether this is a distinct subtype (affects subtyping rules)
+    pub operations: Vec<EffectOperation>,
 }
 
-/// Union variants can be nested and complex
-#[derive(Debug, Clone, PartialEq)]
-pub enum UnionVariants {
-    /// Simple list of variants: (apple | orange)
-    Simple(Vec<String>),
-    /// Nested unions: fruit (apple | orange) | meat (pork | poultry (chicken | turkey))
-    Nested(Vec<UnionVariant>),
-}
-
-/// A single variant in a union, which can itself have sub-variants
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnionVariant {
+#[derive(Debug, Clone)]
+pub struct EffectOperation {
     pub name: String,
-    pub sub_variants: Option<UnionVariants>,
+    pub signature: FlintType,
 }
 
-/// Type declaration for predicates
-#[derive(Debug, Clone, PartialEq)]
-pub struct PredicateType {
-    pub name: String,
-    pub signature: LogicType, // Now uses the arrow type
+/// Effect handlers
+#[derive(Debug, Clone)]
+pub struct EffectHandler {
+    pub effect_name: String,
+    pub handler_name: String,
+    pub implementations: Vec<HandlerImpl>,
 }
 
-/// Term type declaration  
-#[derive(Debug, Clone, PartialEq)]
-pub struct TermType {
-    pub name: String,
-    pub term_type: LogicType,
+#[derive(Debug, Clone)]
+pub struct HandlerImpl {
+    pub operation_name: String,
+    pub parameters: Vec<Variable>,
+    pub body: Expr,
 }
 
-/// Linear Logic expressions
-#[derive(Debug, Clone, PartialEq)]
+/// C imports
+#[derive(Debug, Clone)]
+pub struct CImport {
+    pub header_file: String,
+    pub alias: String,
+}
+
+/// Expressions in the functional logic language
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// Variable reference
-    Var(VarName),
+    Var(Variable),
+    
+    /// Non-consumptive variable reference (copy) - ~$var
+    NonConsumptiveVar(Variable),
     
     /// Integer literal
     Int(i64),
@@ -77,334 +112,364 @@ pub enum Expr {
     /// String literal
     Str(String),
     
-    /// Function application
-    App {
-        func: FunctionName,
+    /// Boolean literal
+    Bool(bool),
+    
+    /// Unit value
+    Unit,
+    
+    /// List literal: [1, 2, 3] or []
+    List(Vec<Expr>),
+    
+    /// List construction: [head|tail]
+    ListCons {
+        head: Box<Expr>,
+        tail: Box<Expr>,
+    },
+    
+    /// Function call
+    Call {
+        func: Box<Expr>,
         args: Vec<Expr>,
     },
     
-    /// Linear function definition
-    /// `lam x. body` where x is consumed exactly once
-    Lambda {
-        param: VarName,
-        body: Box<Expr>,
+    /// C function call: C.Module.function(args)
+    CCall {
+        module: String,
+        function: String,
+        args: Vec<Expr>,
     },
     
-    /// Let binding with linear consumption
-    /// `let x = value in body` where x must be used exactly once in body
+    /// Let binding: let $x = expr in body
     Let {
-        var: VarName,
+        var: Variable,
         value: Box<Expr>,
         body: Box<Expr>,
     },
     
-    /// Conditional expression
-    If {
-        cond: Box<Expr>,
-        then_branch: Box<Expr>,
-        else_branch: Box<Expr>,
+    /// Let statement with explicit type: let $x: Type = expr
+    LetTyped {
+        var: Variable,
+        var_type: FlintType,
+        value: Box<Expr>,
     },
     
-    /// Pair construction (multiplicative conjunction)
-    Pair(Box<Expr>, Box<Expr>),
-    
-    /// Pair destruction (pattern matching)
-    MatchPair {
+    /// Constraint solving: let f($x) = value
+    LetConstraint {
         expr: Box<Expr>,
-        left_var: VarName,
-        right_var: VarName,
+        target: Box<Expr>,
+    },
+    
+    /// Block expression: { stmt1; stmt2; ... expr }
+    Block {
+        statements: Vec<Statement>,
+        result: Option<Box<Expr>>,
+    },
+    
+    /// Lambda: |$x| => body
+    Lambda {
+        params: Vec<Variable>,
         body: Box<Expr>,
     },
     
-    /// Linear resource allocation
-    Alloc {
-        size: Box<Expr>,
+    /// Record construction: User { name: "Alice", age: 30 }
+    Record {
+        type_name: Option<String>,
+        fields: Vec<(String, Expr)>,
     },
     
-    /// Linear resource deallocation
-    Free {
-        ptr: Box<Expr>,
+    /// Field access: user.name
+    FieldAccess {
+        expr: Box<Expr>,
+        field: String,
     },
     
-    /// Memory read
-    Load {
-        ptr: Box<Expr>,
+    /// Pattern matching (for lists, records, etc.)
+    Match {
+        expr: Box<Expr>,
+        arms: Vec<MatchArm>,
     },
     
-    /// Memory write (consumes the pointer linearly)
-    Store {
-        ptr: Box<Expr>,
-        value: Box<Expr>,
+    /// Effect operation call
+    EffectCall {
+        effect: String,
+        operation: String,
+        args: Vec<Expr>,
+    },
+    
+    /// Handle effect: handle expr with handler
+    Handle {
+        expr: Box<Expr>,
+        handler: String,
     },
     
     /// Binary operations
     BinOp {
-        op: BinOpKind,
+        op: BinOp,
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    
+    /// Unary operations
+    UnaryOp {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
 }
 
-/// Binary operation kinds
+/// Statements in blocks
+#[derive(Debug, Clone)]
+pub enum Statement {
+    /// Let statement with explicit type: let $x: Type = expr
+    LetTyped {
+        var: Variable,
+        var_type: FlintType,
+        value: Expr,
+    },
+    
+    /// Let statement with type inference: let $x = expr
+    Let {
+        var: Variable,
+        value: Expr,
+    },
+    
+    /// Expression statement
+    Expr(Expr),
+}
+
+/// Pattern matching arms
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
+/// Patterns for matching
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// Variable pattern: $x
+    Var(Variable),
+    
+    /// Wildcard pattern: _
+    Wildcard,
+    
+    /// Integer literal pattern: 42
+    Int(i64),
+    
+    /// String literal pattern: "hello"
+    Str(String),
+    
+    /// Boolean literal pattern: true/false
+    Bool(bool),
+    
+    /// Unit pattern: ()
+    Unit,
+    
+    /// Empty list pattern: []
+    EmptyList,
+    
+    /// List cons pattern: [$head|$tail]
+    ListCons {
+        head: Box<Pattern>,
+        tail: Box<Pattern>,
+    },
+    
+    /// List pattern: [1, $x, 3]
+    List(Vec<Pattern>),
+    
+    /// Record pattern: User { name: $n, age: _ }
+    Record {
+        type_name: Option<String>,
+        fields: Vec<(String, Pattern)>,
+    },
+}
+
+/// Binary operators
 #[derive(Debug, Clone, PartialEq)]
-pub enum BinOpKind {
+pub enum BinOp {
     Add,
     Sub,
     Mul,
     Div,
+    Mod,
     Eq,
+    Ne,
     Lt,
+    Le,
     Gt,
+    Ge,
     And,
     Or,
+    Append, // |> for list/string concatenation
 }
 
-/// Linear Logic types
+/// Unary operators
 #[derive(Debug, Clone, PartialEq)]
-pub enum Type {
-    /// Integer type
-    Int,
-    
-    /// String type
-    Str,
-    
-    /// Linear function type A ⊸ B
-    Linear(Box<Type>, Box<Type>),
-    
-    /// Multiplicative conjunction A ⊗ B (pairs)
-    Tensor(Box<Type>, Box<Type>),
-    
-    /// Linear pointer to T
-    LinearPtr(Box<Type>),
-    
-    /// Unit type
-    Unit,
+pub enum UnaryOp {
+    Not,
+    Neg,
 }
 
-/// Function definition
+/// Function definitions with multiple clauses
 #[derive(Debug, Clone)]
-pub struct Function {
-    pub name: FunctionName,
-    pub param: VarName,
-    pub param_type: Type,
-    pub return_type: Type,
+pub struct FunctionDef {
+    pub name: String,
+    pub type_signature: Option<FlintType>,
+    pub clauses: Vec<FunctionClause>,
+}
+
+/// A single function clause/case
+#[derive(Debug, Clone)]
+pub struct FunctionClause {
+    pub patterns: Vec<Pattern>,
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 
-/// Top-level program
+/// Type definitions
+#[derive(Debug, Clone)]
+pub enum TypeDef {
+    /// Record type definition
+    Record {
+        name: String,
+        fields: Vec<(String, FlintType)>,
+    },
+    
+    /// Type alias
+    Alias {
+        name: String,
+        type_expr: FlintType,
+    },
+    
+    /// Enum/sum type
+    Enum {
+        name: String,
+        variants: Vec<EnumVariant>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Option<Vec<FlintType>>,
+}
+
+/// Top-level declarations
+#[derive(Debug, Clone)]
+pub enum Declaration {
+    /// Type definition: User :: record { name: str, age: i32 }
+    TypeDef(TypeDef),
+    
+    /// Function type signature: reverse :: List<T> -> List<T>
+    FunctionSig {
+        name: String,
+        type_sig: FlintType,
+    },
+    
+    /// Function definition: reverse :: ([]) => []
+    FunctionDef(FunctionDef),
+    
+    /// Effect declaration: API :: effect { ... }
+    EffectDecl(EffectDecl),
+    
+    /// Effect handler: APIInProd :: handler for API { ... }
+    EffectHandler(EffectHandler),
+    
+    /// C import: import C "stdio.h" as IO
+    CImport(CImport),
+    
+    /// Main function designation
+    Main(String), // Function name that serves as main
+}
+
+/// Complete program
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub type_definitions: Vec<TypeDefinition>,  // New syntax: type fruit (apple | orange)
-    pub type_declarations: Vec<PredicateType>,
-    pub term_types: Vec<TermType>,
-    pub functions: Vec<Function>,
-    pub clauses: Vec<Clause>,
-    pub queries: Vec<Query>,
-    pub main: Option<Expr>,
+    pub declarations: Vec<Declaration>,
 }
 
-/// Type environment for tracking variable types and usage
-#[derive(Debug, Clone)]
-pub struct TypeEnv {
-    /// Maps variables to their types
-    types: HashMap<VarName, Type>,
-    /// Tracks which variables have been used (for linearity checking)
-    used: HashMap<VarName, bool>,
-}
-
-impl TypeEnv {
+impl Program {
     pub fn new() -> Self {
         Self {
-            types: HashMap::new(),
-            used: HashMap::new(),
+            declarations: Vec::new(),
         }
     }
     
-    pub fn bind(&mut self, var: VarName, ty: Type) {
-        self.types.insert(var.clone(), ty);
-        self.used.insert(var, false);
-    }
-    
-    pub fn lookup(&self, var: &VarName) -> Option<&Type> {
-        self.types.get(var)
-    }
-    
-    pub fn use_var(&mut self, var: &VarName) -> Result<(), String> {
-        if let Some(used) = self.used.get_mut(var) {
-            if *used {
-                return Err(format!("Variable '{}' used more than once", var));
+    /// Get all function definitions
+    pub fn functions(&self) -> Vec<&FunctionDef> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::FunctionDef(func) = decl {
+                Some(func)
+            } else {
+                None
             }
-            *used = true;
-            Ok(())
-        } else {
-            Err(format!("Variable '{}' not in scope", var))
-        }
+        }).collect()
     }
     
-    pub fn check_all_used(&self) -> Result<(), String> {
-        for (var, used) in &self.used {
-            if !used {
-                return Err(format!("Variable '{}' is not used", var));
+    /// Get all function signatures  
+    pub fn function_signatures(&self) -> Vec<(&String, &FlintType)> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::FunctionSig { name, type_sig } = decl {
+                Some((name, type_sig))
+            } else {
+                None
             }
-        }
-        Ok(())
+        }).collect()
     }
     
-    pub fn split(self) -> (Self, Self) {
-        // For branching contexts, we need to ensure linear variables
-        // are used in exactly one branch
-        (self.clone(), self)
-    }
-}
-
-/// Logical programming constructs
-#[derive(Debug, Clone, PartialEq)]
-pub enum Term {
-    /// Atom (constant) with type
-    Atom {
-        name: String,
-        type_name: Option<LogicType>,
-    },
-    
-    /// Variable with type
-    Var {
-        name: String,
-        type_name: Option<LogicType>,
-    },
-    
-    /// Compound term: functor(args...)
-    Compound {
-        functor: String,
-        args: Vec<Term>,
-    },
-    
-    /// Integer
-    Integer(i64),
-    
-    /// Cloned term: !term (creates a copy for linear consumption)
-    Clone(Box<Term>),
-}
-
-/// Resource state for linear logic
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResourceState {
-    Available,
-    Consumed,
-}
-
-/// Linear resource with unique ID and consumption state
-#[derive(Debug, Clone)]
-pub struct LinearResource {
-    pub id: usize,
-    pub clause: Clause,
-    pub state: ResourceState,
-}
-
-/// Logical clause (fact or rule)
-#[derive(Debug, Clone, PartialEq)]
-pub enum Clause {
-    /// Fact: predicate(args).
-    Fact {
-        predicate: String,
-        args: Vec<Term>,
-        persistent: bool,  // true for persistent fact, false for linear fact
-        name: Option<String>, // optional name for persistent facts (persistent name :: fact)
-    },
-    
-    /// Rule: head :- body.
-    Rule {
-        head: Term,
-        body: Vec<Term>,
-        produces: Option<Term>,  // Optional production after =>
-    },
-}
-
-impl Clause {
-    /// Check if this rule is recursive (produces a predicate that also appears in the body)
-    pub fn is_recursive(&self) -> bool {
-        match self {
-            Clause::Fact { .. } => false,
-            Clause::Rule { body, produces, .. } => {
-                if let Some(production) = produces {
-                    let production_predicate = Self::extract_predicate_name(production);
-                    
-                    // Check if any body term has the same predicate as the production
-                    body.iter().any(|body_term| {
-                        Self::extract_predicate_name(body_term) == production_predicate
-                    })
-                } else {
-                    false
-                }
+    /// Get all type definitions
+    pub fn types(&self) -> Vec<&TypeDef> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::TypeDef(typedef) = decl {
+                Some(typedef)
+            } else {
+                None
             }
-        }
+        }).collect()
     }
     
-    /// Extract the predicate name from a term
-    fn extract_predicate_name(term: &Term) -> String {
-        match term {
-            Term::Atom { name, .. } => name.clone(),
-            Term::Compound { functor, .. } => functor.clone(),
-            Term::Var { name, .. } => name.clone(), // Variables don't have predicates, but return name for completeness
-            Term::Integer(n) => n.to_string(), // Integers don't have predicates, return string representation
-            Term::Clone(inner_term) => Self::extract_predicate_name(inner_term), // Recurse into cloned term
-        }
-    }
-    
-    /// Get the production predicate name if this is a rule with production
-    pub fn get_production_predicate(&self) -> Option<String> {
-        match self {
-            Clause::Rule { produces: Some(production), .. } => {
-                Some(Self::extract_predicate_name(production))
+    /// Get all effect declarations
+    pub fn effects(&self) -> Vec<&EffectDecl> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::EffectDecl(effect) = decl {
+                Some(effect)
+            } else {
+                None
             }
-            _ => None
-        }
-    }
-}
-
-/// Query to resolve
-#[derive(Debug, Clone)]
-pub struct Query {
-    pub goals: Vec<Term>,
-    pub is_disjunctive: bool, // true for OR queries, false for AND queries
-}
-
-/// Unification substitution
-#[derive(Debug, Clone)]
-pub struct Substitution {
-    pub bindings: HashMap<String, Term>,
-}
-
-impl Substitution {
-    pub fn new() -> Self {
-        Self {
-            bindings: HashMap::new(),
-        }
+        }).collect()
     }
     
-    pub fn bind(&mut self, var: String, term: Term) {
-        self.bindings.insert(var, term);
-    }
-    
-    pub fn lookup(&self, var: &str) -> Option<&Term> {
-        self.bindings.get(var)
-    }
-    
-    pub fn apply(&self, term: &Term) -> Term {
-        match term {
-            Term::Var { name, type_name: _ } => {
-                if let Some(binding) = self.lookup(name) {
-                    self.apply(binding)
-                } else {
-                    term.clone()
-                }
+    /// Get all effect handlers
+    pub fn handlers(&self) -> Vec<&EffectHandler> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::EffectHandler(handler) = decl {
+                Some(handler)
+            } else {
+                None
             }
-            Term::Compound { functor, args } => {
-                Term::Compound {
-                    functor: functor.clone(),
-                    args: args.iter().map(|arg| self.apply(arg)).collect(),
-                }
+        }).collect()
+    }
+    
+    /// Get all C imports
+    pub fn c_imports(&self) -> Vec<&CImport> {
+        self.declarations.iter().filter_map(|decl| {
+            if let Declaration::CImport(import) = decl {
+                Some(import)
+            } else {
+                None
             }
-            _ => term.clone(),
-        }
+        }).collect()
+    }
+    
+    /// Get the main function name if specified
+    pub fn main_function(&self) -> Option<&str> {
+        self.declarations.iter().find_map(|decl| {
+            if let Declaration::Main(name) = decl {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
     }
 }

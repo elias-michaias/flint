@@ -1,12 +1,14 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until},
-    character::complete::{alpha1, alphanumeric1, char, digit1, multispace0},
-    combinator::{map, opt, recognize, not},
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{alpha1, alphanumeric1, char, digit1, multispace0, multispace1},
+    combinator::{map, opt, recognize},
     multi::many0,
     sequence::{delimited, pair, preceded},
     IResult,
 };
+
+use crate::diagnostic::{Diagnostic, SourceLocation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenSpan {
@@ -25,72 +27,80 @@ impl TokenSpan {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords
-    Let,
-    In,
-    If,
-    Then,
-    Else,
-    Lam,
-    Match,
-    With,
-    Alloc,
-    Free,
-    Load,
-    Store,
-    Persistent,  // persistent
+    Import,      // import
+    As,          // as
+    Record,      // record
+    Effect,      // effect
+    Handler,     // handler
+    For,         // for
+    Let,         // let
+    In,          // in
+    Match,       // match
+    With,        // with
+    Handle,      // handle
+    Using,       // using
+    Main,        // main
+    True,        // true
+    False,       // false
+    
+    // Type keywords
+    I32,         // i32
+    Str,         // str
+    Bool,        // bool
+    List,        // List
+    Unit,        // unit or ()
     
     // Literals
     Integer(i64),
     String(String),
     
-    // Identifiers
-    Identifier(String),
-    Variable(String),  // $variable
+    // Identifiers and variables
+    Identifier(String),     // regular identifier
+    LogicVar(String),      // $variable
+    CModule(String),       // C module reference
     
     // Operators
-    Arrow,      // ->
-    FatArrow,   // =>
-    Ampersand,  // &
-    Pipe,       // |
-    LinearArrow, // -o (linear implication)
-    Tensor,     // *
-    Plus,       // +
-    Minus,      // -
-    Multiply,   // *
-    Divide,     // /
-    Equal,      // =
-    EqualEqual, // ==
-    Less,       // <
-    Greater,    // >
-    And,        // &&
-    Or,         // ||
-    Bang,       // ! (clone operator)
+    Arrow,          // ->
+    FatArrow,       // =>
+    DoubleColon,    // ::
+    Pipe,           // |
+    PipeGt,         // |>
+    Ampersand,      // &
+    Plus,           // +
+    Minus,          // -
+    Multiply,       // *
+    Divide,         // /
+    Modulo,         // %
+    Equal,          // =
+    EqualEqual,     // ==
+    NotEqual,       // !=
+    Less,           // <
+    LessEqual,      // <=
+    Greater,        // >
+    GreaterEqual,   // >=
+    And,            // &&
+    Or,             // ||
+    Not,            // !
+    Dot,            // .
+    Tilde,          // ~ (non-consumptive copy)
     
     // Punctuation
-    LeftParen,   // (
-    RightParen,  // )
-    LeftBrace,   // {
-    RightBrace,  // }
-    Comma,       // ,
-    Dot,         // .
-    Semicolon,   // ;
+    LeftParen,      // (
+    RightParen,     // )
+    LeftBrace,      // {
+    RightBrace,     // }
+    LeftBracket,    // [
+    RightBracket,   // ]
+    Comma,          // ,
+    Semicolon,      // ;
+    Colon,          // :
+    Underscore,     // _ (wildcard)
     
     // Special
     Eof,
-    
-    // Logical programming tokens
-    Query,      // ?-
-    Rule,       // :-
-    
-    // Types
-    Type,       // type
-    Of,         // of
-    Distinct,   // distinct
-    Colon,      // :
-    ColonColon, // ::
 }
 
-/// Parse an identifier
+/// Parse an identifier (starts with letter or underscore)
 fn identifier(input: &str) -> IResult<&str, String> {
     map(
         recognize(pair(
@@ -116,8 +126,8 @@ fn keyword_with_boundary(keyword: &str) -> impl Fn(&str) -> IResult<&str, &str> 
     }
 }
 
-/// Parse a variable (prefixed with $)
-fn variable(input: &str) -> IResult<&str, String> {
+/// Parse a logic variable (prefixed with $)
+fn logic_variable(input: &str) -> IResult<&str, String> {
     map(
         recognize(pair(
             char('$'),
@@ -144,14 +154,30 @@ fn string_literal(input: &str) -> IResult<&str, String> {
         .map(|(rest, s)| (rest, s.to_string()))
 }
 
+/// Parse C module reference (C.ModuleName)
+fn c_module(input: &str) -> IResult<&str, String> {
+    map(
+        recognize(pair(
+            tag("C."),
+            pair(
+                alpha1,
+                many0(alt((alphanumeric1, tag("_")))),
+            ),
+        )),
+        |s: &str| s[2..].to_string(), // Remove the "C." prefix
+    )(input)
+}
+
 /// Parse a single token
 fn token(input: &str) -> IResult<&str, Token> {
     alt((
         parse_keywords,
+        parse_type_keywords,
         parse_operators,
         parse_punctuation,
         parse_literals,
-        map(variable, Token::Variable),
+        map(logic_variable, Token::LogicVar),
+        map(c_module, Token::CModule),
         map(identifier, Token::Identifier),
     ))(input)
 }
@@ -159,61 +185,92 @@ fn token(input: &str) -> IResult<&str, Token> {
 /// Parse keywords
 fn parse_keywords(input: &str) -> IResult<&str, Token> {
     alt((
-        map(keyword_with_boundary("persistent"), |_| Token::Persistent),
-        map(keyword_with_boundary("distinct"), |_| Token::Distinct),
-        map(keyword_with_boundary("match"), |_| Token::Match),
-        map(keyword_with_boundary("alloc"), |_| Token::Alloc),
-        map(keyword_with_boundary("store"), |_| Token::Store),
-        map(keyword_with_boundary("free"), |_| Token::Free),
-        map(keyword_with_boundary("load"), |_| Token::Load),
-        map(keyword_with_boundary("then"), |_| Token::Then),
-        map(keyword_with_boundary("else"), |_| Token::Else),
-        map(keyword_with_boundary("with"), |_| Token::With),
+        map(keyword_with_boundary("import"), |_| Token::Import),
+        map(keyword_with_boundary("as"), |_| Token::As),
+        map(keyword_with_boundary("record"), |_| Token::Record),
+        map(keyword_with_boundary("effect"), |_| Token::Effect),
+        map(keyword_with_boundary("handler"), |_| Token::Handler),
+        map(keyword_with_boundary("for"), |_| Token::For),
         map(keyword_with_boundary("let"), |_| Token::Let),
-        map(keyword_with_boundary("lam"), |_| Token::Lam),
         map(keyword_with_boundary("in"), |_| Token::In),
-        map(keyword_with_boundary("if"), |_| Token::If),
-        map(keyword_with_boundary("type"), |_| Token::Type),
-        map(keyword_with_boundary("of"), |_| Token::Of),
+        map(keyword_with_boundary("match"), |_| Token::Match),
+        map(keyword_with_boundary("with"), |_| Token::With),
+        map(keyword_with_boundary("handle"), |_| Token::Handle),
+        map(keyword_with_boundary("using"), |_| Token::Using),
+        map(keyword_with_boundary("main"), |_| Token::Main),
+        map(keyword_with_boundary("true"), |_| Token::True),
+        map(keyword_with_boundary("false"), |_| Token::False),
+    ))(input)
+}
+
+/// Parse type keywords
+fn parse_type_keywords(input: &str) -> IResult<&str, Token> {
+    alt((
+        map(keyword_with_boundary("i32"), |_| Token::I32),
+        map(keyword_with_boundary("Str"), |_| Token::Str),
+        map(keyword_with_boundary("str"), |_| Token::Str),
+        map(keyword_with_boundary("bool"), |_| Token::Bool),
+        map(keyword_with_boundary("List"), |_| Token::List),
+        map(keyword_with_boundary("unit"), |_| Token::Unit),
     ))(input)
 }
 
 /// Parse operators
 fn parse_operators(input: &str) -> IResult<&str, Token> {
     alt((
+        parse_operators_part1,
+        parse_operators_part2,
+    ))(input)
+}
+
+/// Parse operators part 1 (comparison and arrow operators)
+fn parse_operators_part1(input: &str) -> IResult<&str, Token> {
+    alt((
         map(tag("=>"), |_| Token::FatArrow),
-        map(tag("-o"), |_| Token::LinearArrow),
         map(tag("->"), |_| Token::Arrow),
+        map(tag("::"), |_| Token::DoubleColon),
+        map(tag("|>"), |_| Token::PipeGt),
         map(tag("=="), |_| Token::EqualEqual),
+        map(tag("!="), |_| Token::NotEqual),
+        map(tag("<="), |_| Token::LessEqual),
+        map(tag(">="), |_| Token::GreaterEqual),
         map(tag("&&"), |_| Token::And),
         map(tag("||"), |_| Token::Or),
+        map(tag("|"), |_| Token::Pipe),
+    ))(input)
+}
+
+/// Parse operators part 2 (arithmetic and other operators)
+fn parse_operators_part2(input: &str) -> IResult<&str, Token> {
+    alt((
         map(tag("&"), |_| Token::Ampersand),
         map(tag("+"), |_| Token::Plus),
         map(tag("-"), |_| Token::Minus),
         map(tag("*"), |_| Token::Multiply),
         map(tag("/"), |_| Token::Divide),
+        map(tag("%"), |_| Token::Modulo),
         map(tag("="), |_| Token::Equal),
         map(tag("<"), |_| Token::Less),
         map(tag(">"), |_| Token::Greater),
-        map(tag("!"), |_| Token::Bang),
-        map(tag("|"), |_| Token::Pipe),
+        map(tag("!"), |_| Token::Not),
+        map(tag("."), |_| Token::Dot),
+        map(tag("~"), |_| Token::Tilde),
     ))(input)
 }
 
 /// Parse punctuation
 fn parse_punctuation(input: &str) -> IResult<&str, Token> {
     alt((
-        map(tag(":-"), |_| Token::Rule),
-        map(tag("?-"), |_| Token::Query),
-        map(tag("::"), |_| Token::ColonColon),
-        map(tag(":"), |_| Token::Colon),
         map(tag("("), |_| Token::LeftParen),
         map(tag(")"), |_| Token::RightParen),
         map(tag("{"), |_| Token::LeftBrace),
         map(tag("}"), |_| Token::RightBrace),
+        map(tag("["), |_| Token::LeftBracket),
+        map(tag("]"), |_| Token::RightBracket),
         map(tag(","), |_| Token::Comma),
-        map(tag("."), |_| Token::Dot),
         map(tag(";"), |_| Token::Semicolon),
+        map(tag(":"), |_| Token::Colon),
+        map(tag("_"), |_| Token::Underscore),
     ))(input)
 }
 
@@ -225,15 +282,27 @@ fn parse_literals(input: &str) -> IResult<&str, Token> {
     ))(input)
 }
 
-/// Tokenize the entire input
+/// Lexing errors
 #[derive(Debug, Clone)]
 pub struct LexError {
-    pub message: String,
-    pub line: usize,
-    pub column: usize,
-    pub length: usize,
+    pub diagnostic: Diagnostic,
 }
 
+impl LexError {
+    pub fn new(message: String, file: String, line: usize, column: usize, length: usize) -> Self {
+        let location = SourceLocation::new(file, line, column, length);
+        let diagnostic = Diagnostic::error(format!("Lexer error: {}", message))
+            .with_location(location);
+        Self { diagnostic }
+    }
+    
+    pub fn with_source_text(mut self, source_text: String) -> Self {
+        self.diagnostic = self.diagnostic.with_source_text(source_text);
+        self
+    }
+}
+
+/// Lexing result
 #[derive(Debug)]
 pub struct LexResult {
     pub tokens: Vec<TokenSpan>,
@@ -246,7 +315,13 @@ impl LexResult {
     }
 }
 
+/// Tokenize the entire input
 pub fn tokenize(input: &str) -> Result<LexResult, String> {
+    tokenize_with_filename(input, "input".to_string())
+}
+
+/// Tokenize with a specific filename for better error reporting
+pub fn tokenize_with_filename(input: &str, filename: String) -> Result<LexResult, String> {
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
     let mut remaining = input;
@@ -296,8 +371,7 @@ pub fn tokenize(input: &str) -> Result<LexResult, String> {
                 tokens.push(TokenSpan::new(tok, line, token_start_column, token_length));
                 
                 // Update position for consumed characters
-                let consumed = &remaining[..token_length];
-                for ch in consumed.chars() {
+                for ch in remaining[..token_length].chars() {
                     if ch == '\n' {
                         line += 1;
                         column = 1;
@@ -309,35 +383,39 @@ pub fn tokenize(input: &str) -> Result<LexResult, String> {
                 remaining = rest;
             }
             Err(_) => {
-                // Record the error but continue lexing
-                let error_char = remaining.chars().next().unwrap_or('\0');
-                let error_length = if error_char == '\0' { 0 } else { 1 };
-                
-                errors.push(LexError {
-                    message: format!("Unexpected character: '{}'", error_char),
+                // Skip the problematic character and report an error
+                let error_char = remaining.chars().next().unwrap_or(' ');
+                let error = LexError::new(
+                    format!("Unexpected character: '{}'", error_char),
+                    filename.clone(),
                     line,
                     column,
-                    length: error_length,
-                });
+                    1,
+                ).with_source_text(input.to_string());
+                errors.push(error);
                 
-                // Skip the problematic character and continue
-                if !remaining.is_empty() {
-                    let mut chars = remaining.chars();
-                    let skipped_char = chars.next().unwrap();
-                    remaining = chars.as_str();
-                    
-                    if skipped_char == '\n' {
-                        line += 1;
-                        column = 1;
-                    } else {
-                        column += 1;
-                    }
+                // Skip one character
+                let mut char_indices = remaining.char_indices();
+                char_indices.next();
+                if let Some((next_index, _)) = char_indices.next() {
+                    remaining = &remaining[next_index..];
+                } else {
+                    remaining = &remaining[1..];
+                }
+                
+                if error_char == '\n' {
+                    line += 1;
+                    column = 1;
+                } else {
+                    column += 1;
                 }
             }
         }
     }
     
+    // Add EOF token
     tokens.push(TokenSpan::new(Token::Eof, line, column, 0));
+    
     Ok(LexResult { tokens, errors })
 }
 
@@ -346,36 +424,66 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_tokenize_simple() {
-        let input = "let x = 42 in x + 1";
-        let tokens = tokenize(input).unwrap();
-        let expected_tokens = vec![
-            TokenSpan::new(Token::Let, 1, 1, 3),
-            TokenSpan::new(Token::Identifier("x".to_string()), 1, 5, 1),
-            TokenSpan::new(Token::Equal, 1, 7, 1),
-            TokenSpan::new(Token::Integer(42), 1, 9, 2),
-            TokenSpan::new(Token::In, 1, 12, 2),
-            TokenSpan::new(Token::Identifier("x".to_string()), 1, 15, 1),
-            TokenSpan::new(Token::Plus, 1, 17, 1),
-            TokenSpan::new(Token::Integer(1), 1, 19, 1),
-            TokenSpan::new(Token::Eof, 1, 20, 0),
-        ];
-        assert_eq!(tokens, expected_tokens);
+    fn test_basic_tokens() {
+        let input = "reverse :: List<T> -> List<T>";
+        let result = tokenize(input).unwrap();
+        
+        assert!(!result.has_errors());
+        let tokens: Vec<Token> = result.tokens.into_iter().map(|ts| ts.token).collect();
+        
+        assert_eq!(tokens, vec![
+            Token::Identifier("reverse".to_string()),
+            Token::DoubleColon,
+            Token::List,
+            Token::Less,
+            Token::Identifier("T".to_string()),
+            Token::Greater,
+            Token::Arrow,
+            Token::List,
+            Token::Less,
+            Token::Identifier("T".to_string()),
+            Token::Greater,
+            Token::Eof,
+        ]);
     }
     
     #[test]
-    fn test_tokenize_lambda() {
-        let input = "lam x. x + 1";
-        let tokens = tokenize(input).unwrap();
-        let expected_tokens = vec![
-            TokenSpan::new(Token::Lam, 1, 1, 3),
-            TokenSpan::new(Token::Identifier("x".to_string()), 1, 5, 1),
-            TokenSpan::new(Token::Dot, 1, 6, 1),
-            TokenSpan::new(Token::Identifier("x".to_string()), 1, 8, 1),
-            TokenSpan::new(Token::Plus, 1, 10, 1),
-            TokenSpan::new(Token::Integer(1), 1, 12, 1),
-            TokenSpan::new(Token::Eof, 1, 13, 0),
-        ];
-        assert_eq!(tokens, expected_tokens);
+    fn test_logic_variables() {
+        let input = "reverse :: ([$h|$t]) => reverse($t)";
+        let result = tokenize(input).unwrap();
+        
+        assert!(!result.has_errors());
+        let tokens: Vec<Token> = result.tokens.into_iter().map(|ts| ts.token).collect();
+        
+        // Check that logic variables are properly tokenized
+        assert!(tokens.contains(&Token::LogicVar("h".to_string())));
+        assert!(tokens.contains(&Token::LogicVar("t".to_string())));
+    }
+    
+    #[test]
+    fn test_c_imports() {
+        let input = "import C \"stdio.h\" as IO";
+        let result = tokenize(input).unwrap();
+        
+        assert!(!result.has_errors());
+        let tokens: Vec<Token> = result.tokens.into_iter().map(|ts| ts.token).collect();
+        
+        assert_eq!(tokens[0], Token::Import);
+        assert_eq!(tokens[1], Token::Identifier("C".to_string()));
+        assert_eq!(tokens[2], Token::String("stdio.h".to_string()));
+        assert_eq!(tokens[3], Token::As);
+        assert_eq!(tokens[4], Token::Identifier("IO".to_string()));
+    }
+    
+    #[test]
+    fn test_effect_syntax() {
+        let input = "API :: effect { fetch_users :: () -> List<User> using IO, C }";
+        let result = tokenize(input).unwrap();
+        
+        assert!(!result.has_errors());
+        let tokens: Vec<Token> = result.tokens.into_iter().map(|ts| ts.token).collect();
+        
+        assert!(tokens.contains(&Token::Effect));
+        assert!(tokens.contains(&Token::Using));
     }
 }
