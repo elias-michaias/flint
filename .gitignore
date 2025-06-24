@@ -12,6 +12,17 @@ runtime/test/*.dSYM/
 runtime/test/*.o
 runtime/.deps/
 
+# Library dependencies and build artifacts
+runtime/lib/libdill/
+runtime/lib/amoeba/
+
+# Generated example files (keep .fl source, ignore generated artifacts)
+examples/*.c
+examples/*.ir
+examples/*.o
+examples/*.exe
+examples/*.dSYM/
+
 # C build artifacts (general)
 *.o
 *.a
@@ -22,7 +33,23 @@ runtime/.deps/
 # macOS debug symbols
 *.dSYM/
 
+# macOS system files
+.DS_Store
+
+# Temporary build directories
+/tmp/
+temp/
+*.tmp
+
+# Log files
+*.log
+config.log
+
 # Backup files
 *~
 *.bak
 *.swp
+
+# Editor temporary files
+.#*
+#*#
