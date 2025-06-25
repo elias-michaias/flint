@@ -8,7 +8,7 @@ The goal is to utilize a resource-consumption model of data processing that allo
 
 ## Examples
 
-```
+```php
 // automatically resolves C imports
 // becomes submodule scoped under C effect
 import C "stdio.h" as stdio
@@ -16,9 +16,6 @@ import C "stdio.h" as stdio
 // automatically resolves pypi dependencies
 // does type conversion and runs using Python C API
 import Python "pypi::numpy::2.3.1" as numpy
-
-add :: (i32, i32) -> i32
-add :: ($x, $y) => $x + $y
 
 add :: (i32, i32) -> i32
 add :: ($x, $y) => $x + $y
