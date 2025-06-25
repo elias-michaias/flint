@@ -42,6 +42,7 @@ pub enum Token {
     Main,        // main
     True,        // true
     False,       // false
+    Python,      // Python
     
     // Type keywords
     I32,         // i32
@@ -58,6 +59,7 @@ pub enum Token {
     Identifier(String),     // regular identifier
     LogicVar(String),      // $variable
     CModule(String),       // C module reference
+    PythonModule(String),  // Python module reference
     
     // Operators
     Arrow,          // ->
@@ -168,16 +170,27 @@ fn c_module(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
+/// Parse Python module reference (Python.ModuleName)
+fn python_module(input: &str) -> IResult<&str, String> {
+    let (input, _) = tag("Python.")(input)?;
+    let (input, module_name) = recognize(pair(
+        alpha1,
+        many0(alt((alphanumeric1, tag("_")))),
+    ))(input)?;
+    Ok((input, module_name.to_string()))
+}
+
 /// Parse a single token
 fn token(input: &str) -> IResult<&str, Token> {
     alt((
+        map(c_module, Token::CModule),
+        map(python_module, Token::PythonModule),
         parse_keywords,
         parse_type_keywords,
         parse_operators,
         parse_punctuation,
         parse_literals,
         map(logic_variable, Token::LogicVar),
-        map(c_module, Token::CModule),
         map(identifier, Token::Identifier),
     ))(input)
 }
@@ -200,6 +213,7 @@ fn parse_keywords(input: &str) -> IResult<&str, Token> {
         map(keyword_with_boundary("main"), |_| Token::Main),
         map(keyword_with_boundary("true"), |_| Token::True),
         map(keyword_with_boundary("false"), |_| Token::False),
+        map(keyword_with_boundary("Python"), |_| Token::Python),
     ))(input)
 }
 

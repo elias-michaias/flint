@@ -1,0 +1,14 @@
+import C "stdio.h" as stdio
+import Python "pypi::numpy::2.3.1" as numpy
+
+add :: (i32, i32) -> i32
+add :: ($x, $y) => $x + $y
+
+main :: () -> () using C, Python
+main :: () => { 
+    let add($z, 7) = 11
+    let add($a, $z) = 15
+    let $res = Python.numpy.power(~$a, ~$z)
+    C.stdio.printf("Result: a = %d, z = %d, a^z = %d\n", $a, $z, $res)
+    // Result: a = 11, z = 4, a^z = 14641
+}

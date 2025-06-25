@@ -13,19 +13,25 @@ The goal is to utilize a resource-consumption model of data processing that allo
 // becomes submodule scoped under C effect
 import C "stdio.h" as stdio
 
-// Test file for unification constraints
+// automatically resolves pypi dependencies
+// does type conversion and runs using Python C API
+import Python "pypi::numpy::2.3.1" as numpy
+
 add :: (i32, i32) -> i32
 add :: ($x, $y) => $x + $y
 
-// C = algebraic effect
-main :: () -> () using C
-main :: () => { 
-    let add($z, 2) = 11
-    let add($a, $z) = 15
-    let $test = add(~$a, ~$a)
-    C.stdio.printf("Result: a = %d, z = %d, test = %d\n", $a, $z, $test)
-}
+add :: (i32, i32) -> i32
+add :: ($x, $y) => $x + $y
 
+// C, Python = algebraic effects
+main :: () -> () using C, Python
+main :: () => { 
+    let add($z, 7) = 11
+    let add($a, $z) = 15
+    let $res = Python.numpy.power(~$a, ~$z)
+    C.stdio.printf("Result: a = %d, z = %d, a^z = %d\n", $a, $z, $res)
+    // Result: a = 11, z = 4, a^z = 14641
+}
 ```
 
 ## Build Instructions
@@ -131,4 +137,4 @@ Check files:
 ```bash
 cargo run -- check flint_file.fl
 ```
-Use the `--debug` flag on any command for more details.
+`se the `--debug` flag on any command for more details.

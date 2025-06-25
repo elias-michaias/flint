@@ -76,6 +76,7 @@ pub struct TypeEnvironment {
     pub variables: HashMap<String, FlintType>,
     pub functions: HashMap<String, FlintType>,
     pub c_imports: HashMap<String, String>, // module name -> header file
+    pub python_imports: HashMap<String, String>, // module name -> package spec
 }
 
 impl TypeEnvironment {
@@ -84,6 +85,7 @@ impl TypeEnvironment {
             variables: HashMap::new(),
             functions: HashMap::new(),
             c_imports: HashMap::new(),
+            python_imports: HashMap::new(),
         };
         
         // Add built-in C functions from standard headers
@@ -107,6 +109,10 @@ impl TypeEnvironment {
     
     pub fn add_c_import(&mut self, module: String, header: String) {
         self.c_imports.insert(module, header);
+    }
+    
+    pub fn add_python_import(&mut self, module: String, package_spec: String) {
+        self.python_imports.insert(module, package_spec);
     }
     
     pub fn get_variable(&self, name: &str) -> Option<&FlintType> {
@@ -214,6 +220,11 @@ impl TypeChecker {
             
             Declaration::CImport(import) => {
                 self.env.add_c_import(import.alias.clone(), import.header_file.clone());
+                Ok(())
+            }
+            
+            Declaration::PythonImport(import) => {
+                self.env.add_python_import(import.alias.clone(), import.package_spec.clone());
                 Ok(())
             }
             

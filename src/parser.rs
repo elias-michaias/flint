@@ -98,7 +98,7 @@ impl FlintParser {
     /// Parse a top-level declaration
     fn parse_declaration(&mut self) -> Result<Declaration, ParseError> {
         match self.current_token() {
-            Token::Import => self.parse_c_import(),
+            Token::Import => self.parse_import(),
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
@@ -181,6 +181,48 @@ impl FlintParser {
                     location
                 ))
             }
+        }
+    }
+    
+    /// Parse import statement: either C or Python import
+    fn parse_import(&mut self) -> Result<Declaration, ParseError> {
+        self.expect(Token::Import)?;
+        
+        match self.current_token() {
+            Token::Identifier(lang) if lang == "C" => {
+                // Backtrack and use existing C import logic
+                self.current -= 1; // Go back to Import token
+                self.parse_c_import()
+            }
+            Token::Python => {
+                self.parse_python_import()
+            }
+            _ => Err(ParseError::invalid_syntax(
+                "Expected 'C' or 'Python' after 'import'".to_string(), 
+                self.current_location()
+            ))
+        }
+    }
+    
+    /// Parse Python import: import Python "pypi::package::version" as alias
+    fn parse_python_import(&mut self) -> Result<Declaration, ParseError> {
+        self.expect(Token::Python)?;
+        
+        if let Token::String(package_spec) = self.current_token() {
+            let package_spec = package_spec.clone();
+            self.advance();
+            self.expect(Token::As)?;
+            
+            if let Token::Identifier(alias) = self.current_token() {
+                let alias = alias.clone();
+                self.advance();
+                
+                Ok(Declaration::PythonImport(PythonImport { package_spec, alias }))
+            } else {
+                Err(ParseError::invalid_syntax("Expected module alias after 'as'".to_string(), self.current_location()))
+            }
+        } else {
+            Err(ParseError::invalid_syntax("Expected string literal for package specification".to_string(), self.current_location()))
         }
     }
     
@@ -476,18 +518,30 @@ impl FlintParser {
         if matches!(self.current_token(), Token::Let) {
             self.advance();
             
-            // Traditional let binding: let $var = expr in body
-            let var = self.parse_variable()?;
-            self.expect(Token::Equal)?;
-            let value = self.parse_expr()?;
-            self.expect(Token::In)?;
-            let body = self.parse_expr()?;
+            // Try to parse as constraint equation: let expr = expr
+            // First, try to parse the left side as an expression
+            let left_expr = self.parse_call_expr()?;
             
-            Ok(Expr::Let {
-                var,
-                value: Box::new(value),
-                body: Box::new(body),
-            })
+            if matches!(self.current_token(), Token::Equal) {
+                // This is a constraint equation: let expr = expr
+                self.advance(); // consume '='
+                let right_expr = self.parse_expr()?;
+                
+                // Create a constraint equation
+                Ok(Expr::BinOp {
+                    op: BinOp::Eq,
+                    left: Box::new(left_expr),
+                    right: Box::new(right_expr),
+                })
+            } else {
+                // Backtrack: this might be a traditional let binding
+                // Re-parse as variable
+                // For now, return an error since we don't support backtracking easily
+                Err(ParseError::invalid_syntax(
+                    "Expected '=' after expression in let constraint".to_string(),
+                    SourceLocation::new("unknown".to_string(), 0, 0, 0),
+                ))
+            }
         } else {
             self.parse_binary_expr()
         }
@@ -708,6 +762,31 @@ impl FlintParser {
                     Err(ParseError::invalid_syntax("Expected function name after C module".to_string(), location))
                 }
             }
+            Token::PythonModule(module) => {
+                let module = module.clone();
+                self.advance();
+                self.expect(Token::Dot)?;
+                
+                if let Token::Identifier(function) = self.current_token() {
+                    let function = function.clone();
+                    self.advance();
+                    self.expect(Token::LeftParen)?;
+                    
+                    let mut args = Vec::new();
+                    while !matches!(self.current_token(), Token::RightParen) {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.advance();
+                        }
+                    }
+                    self.expect(Token::RightParen)?;
+                    
+                    Ok(Expr::PythonCall { module, function, args })
+                } else {
+                    let location = self.current_location();
+                    Err(ParseError::invalid_syntax("Expected function name after Python module".to_string(), location))
+                }
+            }
             _ => Err(ParseError::invalid_syntax("Expected expression".to_string(), self.current_location()))
         }
     }
@@ -828,16 +907,34 @@ impl FlintParser {
     fn parse_effect_list(&mut self) -> Result<Vec<String>, ParseError> {
         let mut effects = Vec::new();
         
-        if let Token::Identifier(name) = self.current_token() {
-            effects.push(name.clone());
-            self.advance();
-            
-            while matches!(self.current_token(), Token::Comma) {
+        // Parse first effect (can be identifier or Python keyword)
+        match self.current_token() {
+            Token::Identifier(name) => {
+                effects.push(name.clone());
                 self.advance();
-                if let Token::Identifier(name) = self.current_token() {
+            }
+            Token::Python => {
+                effects.push("Python".to_string());
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError::invalid_syntax("Expected effect name".to_string(), self.current_location()));
+            }
+        }
+        
+        // Parse additional effects
+        while matches!(self.current_token(), Token::Comma) {
+            self.advance();
+            match self.current_token() {
+                Token::Identifier(name) => {
                     effects.push(name.clone());
                     self.advance();
-                } else {
+                }
+                Token::Python => {
+                    effects.push("Python".to_string());
+                    self.advance();
+                }
+                _ => {
                     return Err(ParseError::invalid_syntax("Expected effect name after ','".to_string(), self.current_location()));
                 }
             }

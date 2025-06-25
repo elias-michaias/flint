@@ -97,6 +97,13 @@ pub struct CImport {
     pub alias: String,
 }
 
+/// Python import declaration: import Python "pypi::package::version" as alias
+#[derive(Debug, Clone)]
+pub struct PythonImport {
+    pub package_spec: String, // e.g., "pypi::numpy::2.3.1"
+    pub alias: String,
+}
+
 /// Expressions in the functional logic language
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -135,6 +142,13 @@ pub enum Expr {
     
     /// C function call: C.Module.function(args)
     CCall {
+        module: String,
+        function: String,
+        args: Vec<Expr>,
+    },
+    
+    /// Python function call: Python.module.function(args)
+    PythonCall {
         module: String,
         function: String,
         args: Vec<Expr>,
@@ -378,6 +392,9 @@ pub enum Declaration {
     
     /// C import: import C "stdio.h" as IO
     CImport(CImport),
+    
+    /// Python import: import Python "pypi::numpy::2.3.1" as numpy
+    PythonImport(PythonImport),
     
     /// Main function designation
     Main(String), // Function name that serves as main
