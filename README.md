@@ -131,4 +131,4 @@ Check files:
 ```bash
 cargo run -- check flint_file.fl
 ```
-Use the `--debug` flag on any command for more details.
+`se the `--debug` flag on any command for more details.

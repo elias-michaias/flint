@@ -104,6 +104,13 @@ pub enum IRExpression {
         arguments: Vec<IRExpression>,
     },
     
+    /// Python function call (via Python C API)
+    PythonCall {
+        module: String,
+        function: String,
+        arguments: Vec<IRExpression>,
+    },
+
     /// Effect call
     EffectCall {
         effect: String,
@@ -758,6 +765,19 @@ impl<'a> IRBuilder<'a> {
                 }
             },
             
+            // Python function calls - these are deterministic (via Python C API)
+            ast::Expr::PythonCall { module, function, args } => {
+                let args_ir: Vec<IRExpression> = args.iter()
+                    .map(|arg| self.analyze_expression(arg, constraints))
+                    .collect();
+                
+                IRExpression::PythonCall {
+                    module: module.clone(),
+                    function: function.clone(),
+                    arguments: args_ir,
+                }
+            },
+            
             // Let bindings
             ast::Expr::Let { var, value, body } => {
                 let value_ir = self.analyze_expression(value, constraints);
@@ -1162,6 +1182,14 @@ impl std::fmt::Display for IRExpression {
             },
             IRExpression::CCall { module, function, arguments } => {
                 write!(f, "C.{}.{}(", module, function)?;
+                for (i, arg) in arguments.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ")")
+            },
+            IRExpression::PythonCall { module, function, arguments } => {
+                write!(f, "Py.{}.{}(", module, function)?;
                 for (i, arg) in arguments.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
                     write!(f, "{}", arg)?;

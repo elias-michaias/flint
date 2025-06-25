@@ -22,6 +22,7 @@ examples/*.ir
 examples/*.o
 examples/*.exe
 examples/*.dSYM/
+examples/.flint/
 
 # C build artifacts (general)
 *.o

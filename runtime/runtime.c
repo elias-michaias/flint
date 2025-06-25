@@ -837,84 +837,8 @@ void flint_free_value(Value* val) {
 }
 
 // =============================================================================
-// SUSPENSION FUNCTIONS (for lazy evaluation)
+// CONSTRAINT SOLVING FUNCTIONS
 // =============================================================================
-
-Value* flint_create_arithmetic_suspension(const char* op, Value* left, Value* right) {
-    printf("[DEBUG] Creating arithmetic suspension for %s\n", op);
-    
-    // For now, immediately evaluate arithmetic (can be made lazy later)
-    if (strcmp(op, "add") == 0) {
-        int left_val = flint_value_to_int(left);
-        int right_val = flint_value_to_int(right);
-        int result_val = left_val + right_val;
-        return flint_create_integer(result_val);
-    } else if (strcmp(op, "subtract") == 0) {
-        int left_val = flint_value_to_int(left);
-        int right_val = flint_value_to_int(right);
-        int result_val = left_val - right_val;
-        return flint_create_integer(result_val);
-    } else if (strcmp(op, "multiply") == 0) {
-        int left_val = flint_value_to_int(left);
-        int right_val = flint_value_to_int(right);
-        int result_val = left_val * right_val;
-        return flint_create_integer(result_val);
-    } else if (strcmp(op, "divide") == 0) {
-        double left_val = flint_value_to_double(left);
-        double right_val = flint_value_to_double(right);
-        if (right_val != 0.0) {
-            double result_val = left_val / right_val;
-            return flint_create_float(result_val);
-        } else {
-            printf("[DEBUG] Error: Division by zero\n");
-            return flint_create_integer(0);
-        }
-    }
-    
-    printf("[DEBUG] Warning: Unknown arithmetic operation %s\n", op);
-    return flint_create_integer(0);
-}
-
-Value* flint_create_function_call_suspension(const char* func_name, Value* args[], size_t arg_count) {
-    printf("[DEBUG] Creating function call suspension for %s with %zu args\n", func_name, arg_count);
-    
-    // For now, immediately call the function (can be made lazy later)
-    if (arg_count == 1) {
-        return flint_call_registered_function(func_name, args[0]);
-    } else if (arg_count == 2) {
-        return flint_call_registered_function_2(func_name, args[0], args[1]);
-    }
-    
-    printf("[DEBUG] Warning: Function call suspension with %zu args not supported\n", arg_count);
-    return NULL;
-}
-
-Value* flint_create_generic_suspension(void) {
-    printf("[DEBUG] Creating generic suspension\n");
-    // For now, return a placeholder value
-    return flint_create_atom("suspension");
-}
-
-Value* flint_force_value(Value* val) {
-    if (!val) return NULL;
-    
-    // Dereference logical variables
-    val = flint_deref(val);
-    
-    // If it's already a concrete value, return it
-    if (val && val->type != VAL_SUSPENSION) {
-        return val;
-    }
-    
-    // For now, suspensions are immediately evaluated, so this is a no-op
-    return val;
-}
-
-Value* flint_create_suspended_value(Suspension* susp) {
-    printf("[DEBUG] Creating suspended value\n");
-    // For now, return a placeholder
-    return flint_create_atom("suspended");
-}
 
 /// Solve arithmetic constraints using unification
 /// This handles different modes: forward (X + Y = Z), backward (X + ? = Z), etc.

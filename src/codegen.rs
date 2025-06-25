@@ -1,6 +1,7 @@
 // Code generation for Flint functional logic language
 use crate::ast::*;
 use crate::diagnostic::{Diagnostic, SourceLocation};
+use crate::package::PackageManager;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -121,6 +122,7 @@ pub struct CodeGenerator {
     declared_variables: HashSet<String>,
     defined_functions: HashSet<String>,  // Track functions that need registration
     debug: bool,
+    package_manager: Option<*const PackageManager>,
 }
 
 impl CodeGenerator {
@@ -136,7 +138,14 @@ impl CodeGenerator {
             declared_variables: HashSet::new(),
             defined_functions: HashSet::new(),
             debug: false,
+            package_manager: None,
         }
+    }
+
+    /// Create a new code generator with a package manager
+    pub fn with_package_manager(mut self, package_manager: &PackageManager) -> Self {
+        self.package_manager = Some(package_manager as *const PackageManager);
+        self
     }
 
     /// Enable debug output
@@ -212,6 +221,9 @@ impl CodeGenerator {
                 result.as_ref().map_or(false, |r| self.expression_contains_logic_vars(r))
             }
             Expr::CCall { args, .. } => {
+                args.iter().any(|arg| self.expression_contains_logic_vars(arg))
+            }
+            Expr::PythonCall { args, .. } => {
                 args.iter().any(|arg| self.expression_contains_logic_vars(arg))
             }
             _ => false,
@@ -452,6 +464,10 @@ impl CodeGenerator {
                 self.generate_c_call_expression(module, function, args)
             }
             
+            Expr::PythonCall { module, function, args } => {
+                self.generate_python_call_expression(module, function, args)
+            }
+            
             Expr::Block { statements, result } => {
                 self.generate_block_expression(statements, result.as_deref(), ctx)
             }
@@ -606,6 +622,11 @@ impl CodeGenerator {
                     self.collect_logic_vars_in_expr(arg, vars);
                 }
             }
+            Expr::PythonCall { args, .. } => {
+                for arg in args {
+                    self.collect_logic_vars_in_expr(arg, vars);
+                }
+            }
             _ => {}
         }
     }
@@ -659,6 +680,102 @@ impl CodeGenerator {
         
         // Simply use the function name directly - C.stdio.printf becomes printf
         Ok(format!("{}({})", function, arg_codes.join(", ")))
+    }
+
+    /// Generate Python function call expression
+    fn generate_python_call_expression(&mut self, module: &str, function: &str, args: &[Expr]) -> Result<String, CodegenError> {
+        // Generate arguments and collect their types for conversion
+        let mut arg_conversions = Vec::new();
+        let mut arg_names = Vec::new();
+        
+        for (i, arg) in args.iter().enumerate() {
+            let arg_name = format!("py_arg_{}", i);
+            let arg_code = self.generate_expr(arg, &mut CompilationContext::new())?;
+            
+            // Generate conversion from Flint type to PyObject*
+            let conversion = match self.infer_expr_type(arg) {
+                Some("int") | Some("i32") | Some("i64") => {
+                    format!("PyObject* {} = PyLong_FromLong({});", arg_name, arg_code)
+                },
+                Some("float") | Some("f32") | Some("f64") | Some("double") => {
+                    format!("PyObject* {} = PyFloat_FromDouble({});", arg_name, arg_code)
+                },
+                Some("str") | Some("string") | Some("char*") => {
+                    format!("PyObject* {} = PyUnicode_FromString({});", arg_name, arg_code)
+                },
+                Some("bool") => {
+                    format!("PyObject* {} = PyBool_FromLong({} ? 1 : 0);", arg_name, arg_code)
+                },
+                _ => {
+                    // Default: assume it's already a PyObject* or convert via string representation
+                    format!("PyObject* {} = PyLong_FromLong({});", arg_name, arg_code)
+                }
+            };
+            
+            arg_conversions.push(conversion);
+            arg_names.push(arg_name);
+        }
+        
+        // Generate the Python call using C API
+        let call_code = format!(r#"({{
+    // Convert arguments to Python objects
+    {}
+    
+    // Import the module
+    PyObject* module_obj = PyImport_ImportModule("{}");
+    if (!module_obj) {{
+        PyErr_Print();
+        // Cleanup arguments
+        {}
+        return 0; // or appropriate error value
+    }}
+    
+    // Get the function from the module
+    PyObject* func = PyObject_GetAttrString(module_obj, "{}");
+    if (!func || !PyCallable_Check(func)) {{
+        PyErr_Print();
+        Py_DECREF(module_obj);
+        {}
+        return 0; // or appropriate error value
+    }}
+    
+    // Create tuple of arguments
+    PyObject* args_tuple = PyTuple_New({});
+    {}
+    
+    // Call the function
+    PyObject* result = PyObject_CallObject(func, args_tuple);
+    
+    // Cleanup
+    Py_DECREF(args_tuple);
+    Py_DECREF(func);
+    Py_DECREF(module_obj);
+    {}
+    
+    if (!result) {{
+        PyErr_Print();
+        return 0; // or appropriate error value
+    }}
+    
+    // Convert result back to C type (this will be type-specific)
+    // For now, assume integer result
+    long c_result = PyLong_AsLong(result);
+    Py_DECREF(result);
+    c_result;
+}})"#,
+            arg_conversions.join("\n    "),
+            module,
+            arg_names.iter().map(|name| format!("Py_DECREF({});", name)).collect::<Vec<_>>().join("\n        "),
+            function,
+            arg_names.iter().map(|name| format!("Py_DECREF({});", name)).collect::<Vec<_>>().join("\n        "),
+            arg_names.len(),
+            arg_names.iter().enumerate().map(|(i, name)| 
+                format!("PyTuple_SetItem(args_tuple, {}, {});", i, name)
+            ).collect::<Vec<_>>().join("\n    "),
+            arg_names.iter().map(|name| format!("// {} already transferred to tuple", name)).collect::<Vec<_>>().join("\n    ")
+        );
+        
+        Ok(call_code)
     }
 
     /// Basic block expression generation (placeholder)
@@ -772,6 +889,7 @@ impl CodeGenerator {
             Expr::ListCons { .. } => "ListCons",
             Expr::Call { .. } => "Call",
             Expr::CCall { .. } => "CCall",
+            Expr::PythonCall { .. } => "PythonCall",
             Expr::Let { .. } => "Let",
             Expr::LetTyped { .. } => "LetTyped",
             Expr::LetConstraint { .. } => "LetConstraint",
@@ -925,6 +1043,19 @@ impl CodeGenerator {
         writeln!(self.output, "#include <stdbool.h>")?;
         writeln!(self.output, "#include <stdint.h>")?;
         writeln!(self.output, "#include \"../runtime/runtime.h\"")?;
+        
+        // Include Python.h if we have Python packages
+        let has_python_packages = if let Some(package_manager_ptr) = self.package_manager {
+            let package_manager = unsafe { &*package_manager_ptr };
+            !package_manager.packages.is_empty()
+        } else {
+            false
+        };
+        
+        if has_python_packages {
+            writeln!(self.output, "#include <Python.h>")?;
+        }
+        
         writeln!(self.output)?;
         Ok(())
     }
@@ -1006,6 +1137,9 @@ impl CodeGenerator {
 
     /// Generate function definition from IR
     fn generate_function_from_ir(&mut self, ir_function: &crate::ir::IRFunction, program: &Program, ctx: &mut CompilationContext) -> Result<(), CodegenError> {
+        // Clear declared variables for this function
+        self.declared_variables.clear();
+        
         // Handle main function specially - rename it to avoid conflict with C main
         let function_name = if ir_function.name == "main" {
             "flint_main".to_string()
@@ -1076,6 +1210,46 @@ impl CodeGenerator {
         writeln!(self.output, "    flint_init_runtime();")?;
         writeln!(self.output)?;
         
+        // Initialize Python if we have Python packages
+        let has_python_packages = if let Some(package_manager_ptr) = self.package_manager {
+            let package_manager = unsafe { &*package_manager_ptr };
+            !package_manager.packages.is_empty()
+        } else {
+            false
+        };
+        
+        if has_python_packages {
+            writeln!(self.output, "    // Initialize Python interpreter")?;
+            writeln!(self.output, "    Py_Initialize();")?;
+            writeln!(self.output, "    if (!Py_IsInitialized()) {{")?;
+            writeln!(self.output, "        fprintf(stderr, \"Failed to initialize Python\\n\");")?;
+            writeln!(self.output, "        return 1;")?;
+            writeln!(self.output, "    }}")?;
+            writeln!(self.output)?;
+            
+            // Add the package directories to Python path and activate venv
+            if let Some(package_manager_ptr) = self.package_manager {
+                let package_manager = unsafe { &*package_manager_ptr };
+                writeln!(self.output, "    // Add venv site-packages and package directories to Python path")?;
+                
+                // Add the venv site-packages directory first
+                if let Some((_, package)) = package_manager.packages.iter().next() {
+                    let venv_site_packages = package.install_path.parent()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.join("venv/lib/python3.13/site-packages"))
+                        .unwrap_or_else(|| std::path::Path::new(".flint/lib/python/venv/lib/python3.13/site-packages").to_path_buf());
+                    writeln!(self.output, "    PyRun_SimpleString(\"import sys; sys.path.insert(0, '{}')\");", venv_site_packages.display())?;
+                }
+                
+                // Add each package directory
+                for (_, package) in &package_manager.packages {
+                    let package_dir = package.install_path.display();
+                    writeln!(self.output, "    PyRun_SimpleString(\"import sys; sys.path.insert(0, '{}')\");", package_dir)?;
+                }
+                writeln!(self.output)?;
+            }
+        }
+        
         // Register all user-defined functions (except main)
         writeln!(self.output, "    // Register user-defined functions")?;
         for func in &ir_program.functions {
@@ -1089,6 +1263,12 @@ impl CodeGenerator {
         writeln!(self.output, "    // Call main function")?;
         writeln!(self.output, "    int result = flint_main();")?;
         writeln!(self.output)?;
+        
+        if has_python_packages {
+            writeln!(self.output, "    // Finalize Python interpreter")?;
+            writeln!(self.output, "    Py_Finalize();")?;
+        }
+        
         writeln!(self.output, "    // Cleanup runtime")?;
         writeln!(self.output, "    flint_cleanup_runtime();")?;
         writeln!(self.output, "    return result;")?;
@@ -1103,8 +1283,33 @@ impl CodeGenerator {
         writeln!(self.output, "    // Initialize Flint runtime")?;
         writeln!(self.output, "    flint_init_runtime();")?;
         writeln!(self.output)?;
+        
+        // Initialize Python if we have Python packages
+        let has_python_packages = if let Some(package_manager_ptr) = self.package_manager {
+            let package_manager = unsafe { &*package_manager_ptr };
+            !package_manager.packages.is_empty()
+        } else {
+            false
+        };
+        
+        if has_python_packages {
+            writeln!(self.output, "    // Initialize Python interpreter")?;
+            writeln!(self.output, "    Py_Initialize();")?;
+            writeln!(self.output, "    if (!Py_IsInitialized()) {{")?;
+            writeln!(self.output, "        fprintf(stderr, \"Failed to initialize Python\\n\");")?;
+            writeln!(self.output, "        return 1;")?;
+            writeln!(self.output, "    }}")?;
+            writeln!(self.output)?;
+        }
+        
         writeln!(self.output, "    printf(\"No main function found.\\n\");")?;
         writeln!(self.output)?;
+        
+        if has_python_packages {
+            writeln!(self.output, "    // Finalize Python interpreter")?;
+            writeln!(self.output, "    Py_Finalize();")?;
+        }
+        
         writeln!(self.output, "    // Cleanup runtime")?;
         writeln!(self.output, "    flint_cleanup_runtime();")?;
         writeln!(self.output, "    return 1;")?;
@@ -1145,6 +1350,10 @@ impl CodeGenerator {
             crate::ir::IRExpression::CCall { module, function, arguments } => {
                 // Generate C function call
                 self.generate_c_call(module, function, arguments, ir_function)?;
+            },
+            crate::ir::IRExpression::PythonCall { module, function, arguments } => {
+                // Generate Python function call (via Python C API)
+                self.generate_python_call(module, function, arguments, ir_function)?;
             },
             _ => {
                 writeln!(self.output, "    // Unsupported IR expression: {:?}", expr)?;
@@ -1298,20 +1507,6 @@ impl CodeGenerator {
 
     /// Generate C function call
     fn generate_c_call(&mut self, _module: &str, function: &str, arguments: &[crate::ir::IRExpression], ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
-        // For main function, we need to generate variable declarations and the call
-        if ir_function.name == "main" {
-            // First, generate any variable assignments from binding analysis
-            for (symbol, _status) in &ir_function.binding_analysis {
-                if !symbol.is_temporary && symbol.name == "result" {
-                    writeln!(self.output, "    Value* {} = flint_create_logical_var(true);", symbol.name)?;
-                    
-                    // Generate the function call that assigns to this variable
-                    // We need to look at the AST or IR to find what assigns to result
-                    writeln!(self.output, "    flint_unify({}, multiply(flint_create_integer(3), flint_create_integer(7)), flint_get_global_env());", symbol.name)?;
-                }
-            }
-        }
-        
         // Generate the C call
         write!(self.output, "    {}(", function)?;
         for (i, arg) in arguments.iter().enumerate() {
@@ -1425,16 +1620,37 @@ impl CodeGenerator {
     
     /// Generate C code for function call constraint
     fn generate_function_call_constraint(&mut self, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
-        // Generate arguments
+        eprintln!("DEBUG: generate_function_call_constraint called with function = '{}'", function);
+        
+        // Check if this is a Python function call (format: module_function)
+        if let Some(underscore_pos) = function.find('_') {
+            let module = &function[..underscore_pos];
+            let func_name = &function[underscore_pos + 1..];
+            
+            eprintln!("DEBUG: Found underscore, module = '{}', func_name = '{}'", module, func_name);
+            
+            // Check if this module is a Python package
+            if let Some(package_manager_ptr) = self.package_manager {
+                let package_manager = unsafe { &*package_manager_ptr };
+                if package_manager.packages.contains_key(module) {
+                    eprintln!("DEBUG: Module '{}' is a Python package, using Python C API", module);
+                    // This is a Python function call - use our Python C API integration
+                    self.generate_python_function_call_constraint(module, func_name, arguments, result, ir_function)?;
+                    return Ok(());
+                }
+            }
+        }
+        
+        eprintln!("DEBUG: Using regular function call for '{}'", function);
+        
+        // Generate regular function call constraint
         let mut arg_codes = Vec::new();
         for arg in arguments {
             arg_codes.push(self.generate_ir_expression_value(arg, ir_function)?);
         }
         
-        // Generate result
         let result_code = self.generate_ir_expression_value(result, ir_function)?;
         
-        // Generate function call and unification
         writeln!(self.output, "    // Function call constraint: {} = {}({})", result_code, function, arg_codes.join(", "))?;
         writeln!(self.output, "    flint_unify({}, {}({}), flint_get_global_env());", result_code, function, arg_codes.join(", "))?;
         
@@ -1468,7 +1684,279 @@ impl CodeGenerator {
                 }
                 Ok(format!("{}({})", func_code, arg_codes.join(", ")))
             },
+            crate::ir::IRExpression::PythonCall { module, function, arguments } => {
+                // Generate Python function call using C API
+                let mut arg_conversions = Vec::new();
+                let mut arg_names = Vec::new();
+                
+                for (i, arg) in arguments.iter().enumerate() {
+                    let arg_name = format!("py_arg_{}", i);
+                    let arg_code = self.generate_ir_expression_c_value(arg, ir_function)?;
+                    
+                    let conversion = format!("PyObject* {} = PyLong_FromLong({});", arg_name, arg_code);
+                    arg_conversions.push(conversion);
+                    arg_names.push(arg_name);
+                }
+                
+                // Generate the Python call using C API as a compound statement
+                let call_code = format!("({{
+    // Convert arguments to Python objects
+    {}
+    
+    // Import the module
+    PyObject* module_obj = PyImport_ImportModule(\"{}\");
+    if (!module_obj) {{
+        PyErr_Print();
+        // Cleanup arguments
+        {}
+        return 0; // Error in inline expression
+    }}
+    
+    // Get the function from the module  
+    PyObject* func = PyObject_GetAttrString(module_obj, \"{}\");
+    if (!func || !PyCallable_Check(func)) {{
+        PyErr_Print();
+        Py_DECREF(module_obj);
+        {}
+        return 0; // Error in inline expression
+    }}
+    
+    // Create tuple of arguments
+    PyObject* args_tuple = PyTuple_New({});
+    {}
+    
+    // Call the function
+    PyObject* py_result = PyObject_CallObject(func, args_tuple);
+    
+    // Cleanup
+    Py_DECREF(args_tuple);
+    Py_DECREF(func);
+    Py_DECREF(module_obj);
+    {}
+    
+    if (!py_result) {{
+        PyErr_Print();
+        return 0; // Error in inline expression
+    }}
+    
+    // Convert result back to C and create Flint integer
+    long c_result = PyLong_AsLong(py_result);
+    Py_DECREF(py_result);
+    flint_create_integer(c_result);
+}})",
+                    arg_conversions.join("\n    "),
+                    module,
+                    arg_names.iter().map(|name| format!("Py_DECREF({});", name)).collect::<Vec<_>>().join("\n        "),
+                    function,
+                    arg_names.iter().map(|name| format!("Py_DECREF({});", name)).collect::<Vec<_>>().join("\n        "),
+                    arg_names.len(),
+                    arg_names.iter().enumerate().map(|(i, name)| 
+                        format!("PyTuple_SetItem(args_tuple, {}, {}); // steals reference", i, name)
+                    ).collect::<Vec<_>>().join("\n    "),
+                    arg_names.iter().map(|name| format!("// {} reference transferred to tuple", name)).collect::<Vec<_>>().join("\n    ")
+                );
+                
+                Ok(call_code)
+            },
             _ => Err(CodegenError::unsupported_feature("Complex IR expression in value generation"))
         }
+    }
+
+    /// Infer the type of an expression for Python conversion
+    fn infer_expr_type(&self, expr: &Expr) -> Option<&'static str> {
+        match expr {
+            Expr::Int(_) => Some("int"),
+            Expr::Str(_) => Some("string"),
+            Expr::Bool(_) => Some("bool"),
+            Expr::Var(_) => {
+                // For variables, we'd need type information from the type checker
+                // For now, assume int as default
+                Some("int")
+            },
+            Expr::BinOp { .. } => {
+                // Binary operations typically result in numeric types
+                Some("int")
+            },
+            Expr::CCall { .. } => {
+                // C calls return whatever the C function returns
+                Some("int")
+            },
+            _ => None,
+        }
+    }
+
+    fn generate_python_call(&mut self, module: &str, function: &str, arguments: &[crate::ir::IRExpression], ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+        // Generate Python function call via Python C API
+        // The naming convention is: {module}_{function}
+        let wrapper_function = format!("{}_{}", module, function);
+        
+        if ir_function.name == "main" {
+            // For main function, we need to generate the call that assigns to variables
+            write!(self.output, "    int result = {}(", wrapper_function)?;
+            
+            for (i, arg) in arguments.iter().enumerate() {
+                if i > 0 {
+                    write!(self.output, ", ")?;
+                }
+                let arg_code = self.generate_ir_expression_value(arg, ir_function)?;
+                write!(self.output, "flint_value_to_int({})", arg_code)?;
+            }
+            
+            writeln!(self.output, ");")?;
+            writeln!(self.output, "    printf(\"Result: %d\\n\", result);")?;
+        } else {
+            // For other functions, generate assignment or expression
+            write!(self.output, "{}(", wrapper_function)?;
+            
+            for (i, arg) in arguments.iter().enumerate() {
+                if i > 0 {
+                    write!(self.output, ", ")?;
+                }
+                let arg_code = self.generate_ir_expression_value(arg, ir_function)?;
+                write!(self.output, "flint_value_to_int({})", arg_code)?;
+            }
+            
+            write!(self.output, ")")?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Generate Python function call constraint using C API
+    fn generate_python_function_call_constraint(&mut self, module: &str, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+        // Convert IR arguments to C arguments for Python C API
+        let mut arg_conversions = Vec::new();
+        let mut arg_names = Vec::new();
+        
+        for (i, arg) in arguments.iter().enumerate() {
+            let arg_name = format!("py_arg_{}", i);
+            let arg_code = self.generate_ir_expression_c_value(arg, ir_function)?;
+            
+            // For now, assume integers - we can extend this later
+            let conversion = format!("PyObject* {} = PyLong_FromLong({});", arg_name, arg_code);
+            arg_conversions.push(conversion);
+            arg_names.push(arg_name);
+        }
+        
+        let result_code = self.generate_ir_expression_value(result, ir_function)?;
+        
+        // Generate the Python call using C API with proper error handling
+        writeln!(self.output, "    // Python function call: {} = {}.{}({})", result_code, module, function, arg_names.join(", "))?;
+        writeln!(self.output, "    {{")?;
+        
+        // Convert arguments to Python objects
+        for conversion in &arg_conversions {
+            writeln!(self.output, "        {};", conversion)?;
+        }
+        
+        writeln!(self.output, "        ")?;
+        writeln!(self.output, "        // Import the module")?;
+        writeln!(self.output, "        PyObject* module_obj = PyImport_ImportModule(\"{}\");", module)?;
+        writeln!(self.output, "        if (!module_obj) {{")?;
+        writeln!(self.output, "            PyErr_Print();")?;
+        
+        // Cleanup arguments on error
+        for arg_name in &arg_names {
+            writeln!(self.output, "            Py_DECREF({});", arg_name)?;
+        }
+        writeln!(self.output, "            return -1; // Error")?;
+        writeln!(self.output, "        }}")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Get the function from the module")?;
+        writeln!(self.output, "        PyObject* func = PyObject_GetAttrString(module_obj, \"{}\");", function)?;
+        writeln!(self.output, "        if (!func || !PyCallable_Check(func)) {{")?;
+        writeln!(self.output, "            PyErr_Print();")?;
+        writeln!(self.output, "            Py_DECREF(module_obj);")?;
+        for arg_name in &arg_names {
+            writeln!(self.output, "            Py_DECREF({});", arg_name)?;
+        }
+        writeln!(self.output, "            return -1; // Error")?;
+        writeln!(self.output, "        }}")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Create tuple of arguments")?;
+        writeln!(self.output, "        PyObject* args_tuple = PyTuple_New({});", arg_names.len())?;
+        for (i, arg_name) in arg_names.iter().enumerate() {
+            writeln!(self.output, "        PyTuple_SetItem(args_tuple, {}, {}); // steals reference", i, arg_name)?;
+        }
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Call the function")?;
+        writeln!(self.output, "        PyObject* py_result = PyObject_CallObject(func, args_tuple);")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Cleanup")?;
+        writeln!(self.output, "        Py_DECREF(args_tuple);")?;
+        writeln!(self.output, "        Py_DECREF(func);")?;
+        writeln!(self.output, "        Py_DECREF(module_obj);")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        if (!py_result) {{")?;
+        writeln!(self.output, "            PyErr_Print();")?;
+        writeln!(self.output, "            return -1; // Error")?;
+        writeln!(self.output, "        }}")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Convert result back to C type and create Flint value")?;
+        writeln!(self.output, "        long c_result = PyLong_AsLong(py_result);")?;
+        writeln!(self.output, "        Py_DECREF(py_result);")?;
+        writeln!(self.output, "        ")?;
+        
+        writeln!(self.output, "        // Unify result directly without extra conversion")?;
+        writeln!(self.output, "        flint_unify({}, flint_create_integer(c_result), flint_get_global_env());", result_code)?;
+        writeln!(self.output, "    }}")?;
+        
+        Ok(())
+    }
+    
+    /// Generate IR expression as a raw C value (not wrapped in Flint Value)
+    fn generate_ir_expression_c_value(&mut self, expr: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<String, CodegenError> {
+        match expr {
+            crate::ir::IRExpression::Symbol(symbol) => {
+                // For variables, extract the value from the Flint Value
+                Ok(format!("flint_value_to_int({})", symbol.name))
+            },
+            crate::ir::IRExpression::Literal(lit) => {
+                match lit {
+                    crate::ir::Literal::Integer(n) => Ok(n.to_string()),
+                    crate::ir::Literal::String(s) => Ok(format!("\"{}\"", s)),
+                    crate::ir::Literal::Boolean(b) => Ok(if *b { "1".to_string() } else { "0".to_string() }),
+                    crate::ir::Literal::Unit => Ok("0".to_string()),
+                }
+            },
+            crate::ir::IRExpression::InlineArithmetic { operation, left, right } => {
+                let left_code = self.generate_ir_expression_c_value(left, ir_function)?;
+                let right_code = self.generate_ir_expression_c_value(right, ir_function)?;
+                Ok(format!("({} {} {})", left_code, operation.to_c_op(), right_code))
+            },
+            _ => {
+                // For other expressions, fall back to generating the full Flint value and extracting
+                let full_expr = self.generate_ir_expression_value(expr, ir_function)?;
+                Ok(format!("flint_value_to_int({})", full_expr))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op_str = match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::Append => "+", // Use + for string/list concatenation in C
+        };
+        write!(f, "{}", op_str)
     }
 }

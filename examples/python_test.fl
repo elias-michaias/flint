@@ -1,0 +1,12 @@
+import C "stdio.h" as stdio
+import Python "pypi::numpy::2.3.1" as numpy
+
+add :: (i32, i32) -> i32
+add :: ($x, $y) => $x + $y
+
+main :: () -> () using C, Python
+main :: () => { 
+    let add($x, 12) = 24
+    let $result = Python.numpy.add(~$x, ~$x)
+    C.stdio.printf("Result: %d\n", $result)
+}

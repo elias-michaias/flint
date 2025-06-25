@@ -5,6 +5,7 @@ mod codegen;
 mod diagnostic;
 mod typechecking;
 mod ir;
+mod package;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -355,9 +356,37 @@ fn setup_c_compiler(debug: bool) -> Command {
     command
 }
 
+/// Setup C compiler with Python package linking
+fn setup_c_compiler_with_packages(debug: bool, package_manager: &package::PackageManager) -> Command {
+    let mut command = setup_c_compiler(debug);
+    
+    // Add Python package include directories
+    for include_dir in package_manager.get_include_dirs() {
+        command.arg("-I").arg(&include_dir);
+    }
+    
+    // Add Python package linking flags
+    for flag in package_manager.get_linking_flags() {
+        command.arg(flag);
+    }
+    
+    command
+}
+
 /// Run command: compile and execute functional logic programs
 fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
     let parsed = parse_program(input, debug)?;
+    
+    // Handle package management (Python imports, etc.)
+    let project_dir = parsed.input_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let mut package_manager = package::PackageManager::new(project_dir);
+    
+    if let Err(diagnostic) = package_manager.process_packages(&parsed.program) {
+        diagnostic.emit();
+        std::process::exit(1);
+    }
     
     // Create temporary directory for compilation
     let temp_dir = env::temp_dir().join(format!("flint-{}", std::process::id()));
@@ -373,7 +402,9 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     let _guard = TempDirGuard(temp_dir.clone());
     
     // Generate C code
-    let mut codegen = codegen::CodeGenerator::new().with_debug(debug);
+    let mut codegen = codegen::CodeGenerator::new()
+        .with_debug(debug)
+        .with_package_manager(&package_manager);
     let c_code = match codegen.generate_with_context(&parsed.program, &parsed.input_path.to_string_lossy(), &parsed.source) {
         Ok(code) => code,
         Err(codegen::CodegenError::Diagnostic(diagnostic)) => {
@@ -403,13 +434,39 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     // Compile to executable
     let exe_file = temp_dir.join("program");
     
-    let status = setup_c_compiler(debug)
+    // Get the path to the Flint project root (where runtime/ directory is located)
+    // Try to find the project root by looking for runtime/ directory
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let flint_root = if current_dir.join("runtime").exists() {
+        // We're in the project root
+        current_dir
+    } else if current_dir.parent().map(|p| p.join("runtime").exists()).unwrap_or(false) {
+        // We're in a subdirectory (like examples), go up one level
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        // Fallback: assume we're relative to the executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            exe_path.parent()
+                .and_then(|p| p.parent())  // Go up from target/debug
+                .and_then(|p| p.parent())  // Go up from target to project root
+                .unwrap_or(&current_dir)
+                .to_path_buf()
+        } else {
+            current_dir
+        }
+    };
+    
+    let runtime_lib = flint_root.join("runtime/out/libflint_runtime.a");
+    let runtime_include = flint_root.join("runtime");
+    let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
+    
+    let status = setup_c_compiler_with_packages(debug, &package_manager)
         .arg(&c_file)
-        .arg("runtime/out/libflint_runtime.a")
+        .arg(&runtime_lib)
         .arg("-I")
-        .arg("runtime")
+        .arg(&runtime_include)
         .arg("-I")
-        .arg("runtime/lib/libdill/libdill-install/include")
+        .arg(&libdill_include)
         .arg("-o")
         .arg(&exe_file)
         .status()?;
@@ -445,7 +502,23 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
 
 /// Compile command: generate C code and optionally compile to executable
 fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, debug: bool, dump_ir: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if input is a C file (Flint-generated)
+    if input.extension().and_then(|s| s.to_str()) == Some("c") {
+        return compile_c_file(input, output, debug);
+    }
+
     let parsed = parse_program(input, debug)?;
+    
+    // Handle package management (Python imports, etc.)
+    let project_dir = parsed.input_path.parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let mut package_manager = package::PackageManager::new(project_dir);
+    
+    if let Err(diagnostic) = package_manager.process_packages(&parsed.program) {
+        diagnostic.emit();
+        std::process::exit(1);
+    }
     
     // Dump IR if requested
     if dump_ir {
@@ -464,7 +537,9 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
     }
     
     // Generate C code
-    let mut codegen = codegen::CodeGenerator::new().with_debug(debug);
+    let mut codegen = codegen::CodeGenerator::new()
+        .with_debug(debug)
+        .with_package_manager(&package_manager);
     let c_code = match codegen.generate_with_context(&parsed.program, &parsed.input_path.to_string_lossy(), &parsed.source) {
         Ok(code) => code,
         Err(codegen::CodegenError::Diagnostic(diagnostic)) => {
@@ -502,13 +577,39 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
             path
         };
         
-        let status = setup_c_compiler(debug)
+        // Get the path to the Flint project root (where runtime/ directory is located)
+        // Try to find the project root by looking for runtime/ directory
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let flint_root = if current_dir.join("runtime").exists() {
+            // We're in the project root
+            current_dir
+        } else if current_dir.parent().map(|p| p.join("runtime").exists()).unwrap_or(false) {
+            // We're in a subdirectory (like examples), go up one level
+            current_dir.parent().unwrap().to_path_buf()
+        } else {
+            // Fallback: assume we're relative to the executable
+            if let Ok(exe_path) = std::env::current_exe() {
+                exe_path.parent()
+                    .and_then(|p| p.parent())  // Go up from target/debug
+                    .and_then(|p| p.parent())  // Go up from target to project root
+                    .unwrap_or(&current_dir)
+                    .to_path_buf()
+            } else {
+                current_dir
+            }
+        };
+        
+        let runtime_lib = flint_root.join("runtime/out/libflint_runtime.a");
+        let runtime_include = flint_root.join("runtime");
+        let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
+        
+        let status = setup_c_compiler_with_packages(debug, &package_manager)
             .arg(&output_path)
-            .arg("runtime/out/libflint_runtime.a")
+            .arg(&runtime_lib)
             .arg("-I")
-            .arg("runtime")
+            .arg(&runtime_include)
             .arg("-I")
-            .arg("runtime/lib/libdill/libdill-install/include")
+            .arg(&libdill_include)
             .arg("-o")
             .arg(&exe_path)
             .status()?;
@@ -520,6 +621,205 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
         println!("Compiled executable: {}", exe_path.display());
     }
     
+    Ok(())
+}
+
+/// Compile a Flint-generated C file with automatic Python linking detection
+fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Read the C file to detect Python imports
+    let c_content = fs::read_to_string(&input)?;
+    
+    // Detect if this C file uses Python imports by looking for Python headers
+    let has_python_imports = c_content.contains("#include \".flint/lib/python/") || 
+                             c_content.contains("_wrapper.h") ||
+                             c_content.contains("#include <Python.h>");
+    
+    if debug {
+        println!("=== COMPILING C FILE {} ===", input.display());
+        if has_python_imports {
+            println!("Detected Python imports - will add Python linking flags");
+        }
+    }
+    
+    // Determine output path
+    let output_path = output.unwrap_or_else(|| {
+        let mut path = input.clone();
+        path.set_extension("");
+        path
+    });
+    
+    // Get the path to the Flint project root (where runtime/ directory is located)
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let flint_root = if current_dir.join("runtime").exists() {
+        // We're in the project root
+        current_dir
+    } else if current_dir.parent().map(|p| p.join("runtime").exists()).unwrap_or(false) {
+        // We're in a subdirectory (like examples), go up one level
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        // Fallback: assume we're relative to the executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            exe_path.parent()
+                .and_then(|p| p.parent())  // Go up from target/debug
+                .and_then(|p| p.parent())  // Go up from target to project root
+                .unwrap_or(&current_dir)
+                .to_path_buf()
+        } else {
+            current_dir
+        }
+    };
+
+    let runtime_lib = flint_root.join("runtime/out/libflint_runtime.a");
+    let runtime_include = flint_root.join("runtime");
+    let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
+    
+    // Start building the compilation command
+    let mut cmd = if debug {
+        let mut c = Command::new("gcc");
+        c.arg("-g").arg("-O0");
+        c
+    } else {
+        let mut c = Command::new("gcc");
+        c.arg("-O2");
+        c
+    };
+    
+    // Add basic flags
+    cmd.arg("-std=c99")
+       .arg("-Wall")
+       .arg("-Wextra")
+       .arg(&input)
+       .arg(&runtime_lib)
+       .arg("-I")
+       .arg(&runtime_include)
+       .arg("-I")
+       .arg(&libdill_include);
+    
+    // If Python imports detected, add Python linking flags
+    if has_python_imports {
+        // Get Python include path using sysconfig
+        let python_include = Command::new("python3")
+            .arg("-c")
+            .arg("import sysconfig; print(sysconfig.get_paths()['include'])")
+            .output();
+            
+        match python_include {
+            Ok(output) if output.status.success() => {
+                let include_path_string = String::from_utf8_lossy(&output.stdout).to_string();
+                let include_path = include_path_string.trim();
+                cmd.arg("-I").arg(include_path);
+                
+                if debug {
+                    println!("Added Python include path: {}", include_path);
+                }
+                
+                // Get Python library linking flags
+                let python_ldflags = Command::new("python3")
+                    .arg("-c")
+                    .arg("import sysconfig; print(sysconfig.get_config_var('LDFLAGS') or '')")
+                    .output();
+                    
+                if let Ok(ldflags_output) = python_ldflags {
+                    if ldflags_output.status.success() {
+                        let ldflags_string = String::from_utf8_lossy(&ldflags_output.stdout).to_string();
+                        let ldflags = ldflags_string.trim();
+                        if !ldflags.is_empty() {
+                            for flag in ldflags.split_whitespace() {
+                                cmd.arg(flag);
+                            }
+                            if debug {
+                                println!("Added Python LDFLAGS: {}", ldflags);
+                            }
+                        }
+                    }
+                }
+                
+                // Get Python library path and name
+                // First try to determine if we should use -framework Python or direct linking
+                let python_libs = Command::new("python3")
+                    .arg("-c")
+                    .arg("import sysconfig; libdir = sysconfig.get_config_var('LIBDIR'); ldlibrary = sysconfig.get_config_var('LDLIBRARY'); version = sysconfig.get_config_var('VERSION'); print(f'-L{libdir} -lpython{version}')")
+                    .output();
+                    
+                if let Ok(libs_output) = python_libs {
+                    if libs_output.status.success() {
+                        let libs_string = String::from_utf8_lossy(&libs_output.stdout).to_string();
+                        let libs = libs_string.trim();
+                        
+                        // Test if the library flags work by attempting a simple compile test
+                        let test_compile = Command::new("clang")
+                            .args(&["-x", "c", "-", "-o", "/dev/null"])
+                            .args(libs.split_whitespace())
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                            
+                        if let Ok(mut child) = test_compile {
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                use std::io::Write;
+                                let _ = stdin.write_all(b"int main() { return 0; }");
+                            }
+                            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                                // Direct linking works
+                                for flag in libs.split_whitespace() {
+                                    cmd.arg(flag);
+                                }
+                                if debug {
+                                    println!("Added Python library flags: {}", libs);
+                                }
+                            } else {
+                                // Try framework linking as fallback
+                                let framework_test = Command::new("clang")
+                                    .args(&["-framework", "Python", "-x", "c", "-", "-o", "/dev/null"])
+                                    .stdin(std::process::Stdio::piped())
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                                    
+                                if let Ok(mut child) = framework_test {
+                                    if let Some(stdin) = child.stdin.as_mut() {
+                                        use std::io::Write;
+                                        let _ = stdin.write_all(b"int main() { return 0; }");
+                                    }
+                                    if child.wait().map(|s| s.success()).unwrap_or(false) {
+                                        cmd.arg("-framework").arg("Python");
+                                        if debug {
+                                            println!("Added Python library flags: -framework Python");
+                                        }
+                                    } else if debug {
+                                        println!("Warning: Could not determine working Python linking flags");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                eprintln!("Warning: Could not get Python include path");
+                eprintln!("Make sure python3 is installed and available in PATH");
+            }
+        }
+        
+        // Note: We no longer link against external libraries since we're using Python C API directly
+    }
+    
+    // Set output
+    cmd.arg("-o").arg(&output_path);
+    
+    if debug {
+        println!("Compilation command: {:?}", cmd);
+    }
+    
+    // Execute compilation
+    let status = cmd.status()?;
+    
+    if !status.success() {
+        return Err("C compilation failed".into());
+    }
+    
+    println!("Successfully compiled to: {}", output_path.display());
     Ok(())
 }
 
