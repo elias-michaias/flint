@@ -63,6 +63,18 @@ typedef struct FunctionRegistry {
     size_t count;
 } FunctionRegistry;
 
+// Linear operation types for tracking consumption
+typedef enum {
+    LINEAR_OP_UNIFY,
+    LINEAR_OP_FUNCTION_CALL,
+    LINEAR_OP_DESTRUCTURE,
+    LINEAR_OP_PATTERN_MATCH,
+    LINEAR_OP_ASSIGNMENT,
+    LINEAR_OP_EXPLICIT_CONSUME,
+    LINEAR_OP_CHANNEL_SEND,
+    LINEAR_OP_VARIABLE_USE        // Variable consumption after first use
+} LinearOp;
+
 // Value types in the functional logic system
 typedef enum {
     VAL_INTEGER,
@@ -75,7 +87,8 @@ typedef enum {
     VAL_FUNCTION,        // Function values for higher-order programming
     VAL_PARTIAL_APP,     // Partially applied functions
     VAL_SUSPENSION,      // Suspended computations
-    VAL_PARTIAL          // Partial structures
+    VAL_PARTIAL,         // Partial structures
+    VAL_CONSUMED         // Consumed linear values (freed memory)
 } ValueType;
 
 // Function value structure
@@ -118,6 +131,10 @@ struct Value {
             VarId* free_vars;   // Array of free variable IDs
             size_t var_count;
         } partial;
+        struct {
+            void* original_address;  // Address of the consumed value (for debugging)
+            LinearOp consumption_op; // How it was consumed
+        } consumed;
     } data;
 };
 
@@ -270,17 +287,6 @@ typedef enum {
 // =============================================================================
 // LINEAR RESOURCE MANAGEMENT TYPES
 // =============================================================================
-
-// Linear operation types for tracking consumption
-typedef enum {
-    LINEAR_OP_UNIFY,
-    LINEAR_OP_FUNCTION_CALL,
-    LINEAR_OP_DESTRUCTURE,
-    LINEAR_OP_PATTERN_MATCH,
-    LINEAR_OP_ASSIGNMENT,
-    LINEAR_OP_EXPLICIT_CONSUME,
-    LINEAR_OP_CHANNEL_SEND
-} LinearOp;
 
 // Trail entry for tracking consumed values
 typedef struct LinearTrailEntry {

@@ -221,8 +221,38 @@ bool flint_is_consumed(Value* value) {
 Value* flint_consume_value(Value* value, LinearOp operation) {
     if (!value) return NULL;
     
-    // Allow multiple consumption attempts but track them
+    // Check if already consumed
+    if (value->is_consumed) {
+        #ifdef DEBUG_LINEAR
+        fprintf(stderr, "ERROR: Attempting to use already consumed linear value %p\n", value);
+        #endif
+        // Return NULL to cause segfault or error when accessed
+        return NULL;
+    }
+    
+    // Mark as consumed and track consumption
     flint_mark_consumed(value, operation);
+    
+    // For LINEAR_OP_VARIABLE_USE, we should make the value inaccessible
+    // by freeing its memory and returning NULL
+    if (operation == LINEAR_OP_VARIABLE_USE) {
+        #ifdef DEBUG_LINEAR
+        printf("LINEAR: Freeing consumed variable %p\n", value);
+        #endif
+        
+        // Free the value's memory
+        flint_free_value_memory(value);
+        
+        // Mark the value as a consumed sentinel
+        value->type = VAL_CONSUMED;  
+        value->data.consumed.original_address = (void*)value;
+        value->data.consumed.consumption_op = operation;
+        
+        // Return NULL so any attempt to use it will fail
+        return NULL;
+    }
+    
+    // For other operations, return the value but mark it as consumed
     return value;
 }
 

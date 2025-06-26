@@ -225,6 +225,16 @@ int flint_value_to_int(Value* val) {
     val = flint_deref(val);
     if (!val) return 0;
     
+    // Check if this value has been consumed (linearity enforcement)
+    if (val->is_consumed && val->consumption_count > 0) {
+        #ifdef DEBUG_LINEAR
+        printf("[DEBUG] LINEAR: Attempting to access consumed value %p (count=%u)\n", 
+               val, val->consumption_count);
+        #endif
+        printf("[DEBUG] Warning: Cannot convert consumed value to int, returning 0\n");
+        return 0;
+    }
+    
     if (val->type == VAL_INTEGER) {
         return (int)val->data.integer;
     } else if (val->type == VAL_FLOAT) {

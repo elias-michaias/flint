@@ -4,11 +4,15 @@ import Python "pypi::numpy::2.3.1" as numpy
 add :: (i32, i32) -> i32
 add :: ($x, $y) => $x + $y
 
+// add3 :: (i32, i32, i32) -> i32
+// add3 :: ($x1, $x2, $x3) => $x1 + $x2 + $x3
+
 main :: () -> () using C, Python
 main :: () => { 
     let add($z, 7) = 11
     let add($a, $z) = 15
+    let add($as, 5) = add(9, $bs)
     let $res = Python.numpy.power(~$a, ~$z)
-    C.stdio.printf("Result: a = %d, z = %d, a^z = %d\n", $a, $z, $res)
+    C.stdio.printf("Result: a = %d, z = %d, a^z = %d, as = %d, bs = %d\n", $a, $z, $res, $as, $bs)
     // Result: a = 11, z = 4, a^z = 14641
 }

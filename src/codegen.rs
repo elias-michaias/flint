@@ -120,7 +120,13 @@ pub struct CodeGenerator {
     functions: HashMap<String, FunctionInfo>,
     effect_handlers: HashMap<String, EffectHandlerInfo>,
     declared_variables: HashSet<String>,
+    // Track total occurrences of each variable across all constraints
+    variable_occurrences: HashMap<String, usize>,
+    // Track current occurrence number for each variable (for linearity)
+    current_variable_occurrence: HashMap<String, usize>,
     defined_functions: HashSet<String>,  // Track functions that need registration
+    // Track variables consumed in the current constraint for immediate freeing
+    consumed_variables_in_constraint: Vec<String>,
     debug: bool,
     package_manager: Option<*const PackageManager>,
 }
@@ -136,7 +142,10 @@ impl CodeGenerator {
             functions: HashMap::new(),
             effect_handlers: HashMap::new(),
             declared_variables: HashSet::new(),
+            variable_occurrences: HashMap::new(),
+            current_variable_occurrence: HashMap::new(),
             defined_functions: HashSet::new(),
+            consumed_variables_in_constraint: Vec::new(),
             debug: false,
             package_manager: None,
         }
@@ -145,6 +154,7 @@ impl CodeGenerator {
     /// Create a new code generator with a package manager
     pub fn with_package_manager(mut self, package_manager: &PackageManager) -> Self {
         self.package_manager = Some(package_manager as *const PackageManager);
+        self.consumed_variables_in_constraint = Vec::new();
         self
     }
 
@@ -172,14 +182,77 @@ impl CodeGenerator {
         var
     }
 
-    /// Convert a Flint variable to a C variable name
-    fn var_to_c_name(&self, var: &Variable) -> String {
-        if var.is_logic_var {
+    /// Convert a Flint variable to a C variable name, handling linearity
+    fn var_to_c_name(&mut self, var: &Variable) -> String {
+        let var_name = if var.is_logic_var {
             // For logic variables, just use the name without the $ prefix
             var.name.clone()
         } else {
             format!("var_{}", var.name)
+        };
+        
+        // Track variable occurrences for linearity
+        let occurrence_count = self.variable_occurrences.entry(var_name.clone()).or_insert(0);
+        *occurrence_count += 1;
+        
+        var_name
+    }
+    
+    /// Check if this is the first occurrence of a variable (binding/initialization)
+    fn is_first_occurrence(&self, var: &Variable) -> bool {
+        let var_name = if var.is_logic_var {
+            var.name.clone()
+        } else {
+            format!("var_{}", var.name)
+        };
+        
+        self.variable_occurrences.get(&var_name).map_or(true, |&count| count == 0)
+    }
+    
+    /// Generate variable access with proper consumption handling
+    fn generate_variable_access(&mut self, var: &Variable, is_non_consumptive: bool) -> String {
+        let var_name = self.var_to_c_name(var);
+        
+        // Call_result variables are temporary containers and should not be consumed
+        if var_name.starts_with("call_result_") {
+            return var_name;
         }
+        
+        if is_non_consumptive {
+            // Non-consumptive access with ~ - create a copy for sharing
+            format!("flint_copy_for_sharing({})", var_name)
+        } else {
+            // Track which occurrence this is for the variable
+            let current_occurrence = self.current_variable_occurrence.entry(var_name.clone()).or_insert(0);
+            *current_occurrence += 1;
+            
+            if *current_occurrence == 1 {
+                // First occurrence - this is initialization/binding, not consumption
+                var_name
+            } else {
+                // Subsequent occurrence - this consumes the value
+                // Track this variable for immediate freeing after the constraint
+                self.consumed_variables_in_constraint.push(var_name.clone());
+                format!("flint_consume_value({}, LINEAR_OP_VARIABLE_USE)", var_name)
+            }
+        }
+    }
+
+    /// Generate freeing calls for variables consumed in the current constraint
+    fn generate_consumed_variable_freeing(&mut self, is_main_function: bool) -> Result<(), CodegenError> {
+        // Only free call_result variables, not user variables like a, z, etc.
+        if is_main_function && !self.consumed_variables_in_constraint.is_empty() {
+            writeln!(self.output, "    // Free call_result variables after use")?;
+            for var_name in &self.consumed_variables_in_constraint {
+                if var_name.starts_with("call_result_") {
+                    writeln!(self.output, "    flint_free_value({});", var_name)?;
+                }
+                // Don't free user variables (a, z, as, bs, etc.) as they may be used later
+            }
+        }
+        // Always clear the consumed variables list
+        self.consumed_variables_in_constraint.clear();
+        Ok(())
     }
 
     /// Add consumption metadata for a resource
@@ -409,23 +482,13 @@ impl CodeGenerator {
 
         match expr {
             Expr::Var(var) => {
-                if var.is_logic_var {
-                    // For logic variables, use the variable directly (it's already a Value*)
-                    Ok(self.var_to_c_name(var))
-                } else {
-                    Ok(self.var_to_c_name(var))
-                }
+                // Generate variable access with consumption tracking
+                Ok(self.generate_variable_access(var, false))
             }
             
             Expr::NonConsumptiveVar(var) => {
-                // Non-consumptive variables generate the same code as regular vars
-                // The difference is only in the type checking (no consumption tracking)
-                if var.is_logic_var {
-                    // For logic variables, use the variable directly (it's already a Value*)
-                    Ok(self.var_to_c_name(var))
-                } else {
-                    Ok(self.var_to_c_name(var))
-                }
+                // Non-consumptive variables are marked with ~, no consumption
+                Ok(self.generate_variable_access(var, true))
             }
             
             Expr::Int(n) => {
@@ -574,7 +637,7 @@ impl CodeGenerator {
     }
 
     /// Collect all logic variables referenced in an expression (implementation for missing method)
-    fn collect_logic_vars_in_expr(&self, expr: &Expr, vars: &mut HashSet<String>) {
+    fn collect_logic_vars_in_expr(&mut self, expr: &Expr, vars: &mut HashSet<String>) {
         match expr {
             Expr::Var(var) if var.is_logic_var => {
                 vars.insert(var.name.clone());
@@ -632,7 +695,7 @@ impl CodeGenerator {
     }
 
     /// Collect logic variables from statements (implementation for missing method)
-    fn collect_logic_vars_in_statement(&self, statement: &Statement, vars: &mut HashSet<String>) {
+    fn collect_logic_vars_in_statement(&mut self, statement: &Statement, vars: &mut HashSet<String>) {
         match statement {
             Statement::LetTyped { var, value, .. } => {
                 if var.is_logic_var {
@@ -1088,13 +1151,15 @@ impl CodeGenerator {
                 }
                 match pattern {
                     Pattern::Var(var) if var.is_logic_var => {
-                        params.push_str(&format!("Value* {}", self.var_to_c_name(var)));
+                        let var_name = self.var_to_c_name(var);
+                        params.push_str(&format!("Value* {}", var_name));
                         // Declare this variable in the function scope
-                        self.declared_variables.insert(self.var_to_c_name(var));
+                        self.declared_variables.insert(var_name);
                     }
                     Pattern::Var(var) => {
-                        params.push_str(&format!("Value* {}", self.var_to_c_name(var)));
-                        self.declared_variables.insert(self.var_to_c_name(var));
+                        let var_name = self.var_to_c_name(var);
+                        params.push_str(&format!("Value* {}", var_name));
+                        self.declared_variables.insert(var_name);
                     }
                     _ => {
                         params.push_str("Value* arg");
@@ -1139,6 +1204,8 @@ impl CodeGenerator {
     fn generate_function_from_ir(&mut self, ir_function: &crate::ir::IRFunction, program: &Program, ctx: &mut CompilationContext) -> Result<(), CodegenError> {
         // Clear declared variables for this function
         self.declared_variables.clear();
+        self.variable_occurrences.clear();
+        self.current_variable_occurrence.clear();
         
         // Handle main function specially - rename it to avoid conflict with C main
         let function_name = if ir_function.name == "main" {
@@ -1170,7 +1237,8 @@ impl CodeGenerator {
         self.collect_and_declare_constraint_variables(ir_function)?;
         
         // Generate function body based on IR
-        self.generate_ir_expression_as_statement(&ir_function.body, ir_function)?;
+        let is_main_function = ir_function.name == "main";
+        self.generate_ir_expression_as_statement(&ir_function.body, ir_function, is_main_function)?;
         
         writeln!(self.output, "}}")?;
         writeln!(self.output)?;
@@ -1332,9 +1400,9 @@ impl CodeGenerator {
     }
 
     /// Generate IR expression as a C statement
-    fn generate_ir_expression_as_statement(&mut self, expr: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_ir_expression_as_statement(&mut self, expr: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
         // First, generate code for all constraints in the function
-        self.generate_ir_constraints(&ir_function.constraints, ir_function)?;
+        self.generate_ir_constraints(&ir_function.constraints, ir_function, is_main_function)?;
         
         // Then generate the main body expression
         match expr {
@@ -1371,6 +1439,9 @@ impl CodeGenerator {
     fn collect_and_declare_constraint_variables(&mut self, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
         let mut variables_to_declare = std::collections::HashSet::new();
         
+        // First pass: collect all variables and count their occurrences
+        self.analyze_variable_occurrences(ir_function)?;
+        
         // Collect variables from all constraints
         for constraint in &ir_function.constraints {
             match constraint {
@@ -1403,6 +1474,68 @@ impl CodeGenerator {
         }
         
         Ok(())
+    }
+
+    /// Analyze variable occurrences across all constraints to enable linearity tracking
+    fn analyze_variable_occurrences(&mut self, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+        self.variable_occurrences.clear();
+        
+        // Count occurrences of each variable
+        for constraint in &ir_function.constraints {
+            match constraint {
+                crate::ir::IRConstraint::Unification { left, right } => {
+                    self.count_variable_occurrences_in_expression(left);
+                    self.count_variable_occurrences_in_expression(right);
+                },
+                crate::ir::IRConstraint::Arithmetic { operation: _, operands, result } => {
+                    for operand in operands {
+                        self.count_variable_occurrences_in_expression(operand);
+                    }
+                    self.count_variable_occurrences_in_expression(result);
+                },
+                crate::ir::IRConstraint::FunctionCall { function: _, arguments, result } => {
+                    for arg in arguments {
+                        self.count_variable_occurrences_in_expression(arg);
+                    }
+                    self.count_variable_occurrences_in_expression(result);
+                },
+                _ => {}
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Helper to count variable occurrences in an IR expression
+    fn count_variable_occurrences_in_expression(&mut self, expr: &crate::ir::IRExpression) {
+        match expr {
+            crate::ir::IRExpression::Symbol(symbol) => {
+                // Skip ~ prefixed variables (non-consumptive)
+                let var_name = if symbol.name.starts_with("~") {
+                    symbol.name.trim_start_matches('~').to_string()
+                } else {
+                    symbol.name.clone()
+                };
+                *self.variable_occurrences.entry(var_name).or_insert(0) += 1;
+            },
+            crate::ir::IRExpression::InlineArithmetic { operation: _, left, right } => {
+                self.count_variable_occurrences_in_expression(left);
+                self.count_variable_occurrences_in_expression(right);
+            },
+            crate::ir::IRExpression::FunctionCall { function, arguments } => {
+                self.count_variable_occurrences_in_expression(function);
+                for arg in arguments {
+                    self.count_variable_occurrences_in_expression(arg);
+                }
+            },
+            crate::ir::IRExpression::PythonCall { module: _, function: _, arguments } => {
+                for arg in arguments {
+                    self.count_variable_occurrences_in_expression(arg);
+                }
+            },
+            // Literals don't contain variables
+            _ => {}
+        }
     }
     
     /// Helper to collect variable names from an IR expression
@@ -1554,20 +1687,20 @@ impl CodeGenerator {
     }
     
     /// Generate C code for IR constraints
-    fn generate_ir_constraints(&mut self, constraints: &[crate::ir::IRConstraint], ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_ir_constraints(&mut self, constraints: &[crate::ir::IRConstraint], ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
         for constraint in constraints {
             match constraint {
                 crate::ir::IRConstraint::Unification { left, right } => {
                     // Generate unification constraint
-                    self.generate_unification_constraint(left, right, ir_function)?;
+                    self.generate_unification_constraint(left, right, ir_function, is_main_function)?;
                 },
                 crate::ir::IRConstraint::Arithmetic { operation, operands, result } => {
                     // Generate arithmetic constraint
-                    self.generate_arithmetic_constraint(operation, operands, result, ir_function)?;
+                    self.generate_arithmetic_constraint(operation, operands, result, ir_function, is_main_function)?;
                 },
                 crate::ir::IRConstraint::FunctionCall { function, arguments, result } => {
                     // Generate function call constraint
-                    self.generate_function_call_constraint(function, arguments, result, ir_function)?;
+                    self.generate_function_call_constraint(function, arguments, result, ir_function, is_main_function)?;
                 },
                 _ => {
                     // Skip other constraint types for now
@@ -1579,7 +1712,10 @@ impl CodeGenerator {
     }
     
     /// Generate C code for unification constraint
-    fn generate_unification_constraint(&mut self, left: &crate::ir::IRExpression, right: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_unification_constraint(&mut self, left: &crate::ir::IRExpression, right: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
+        // Clear consumed variables tracker for this constraint
+        self.consumed_variables_in_constraint.clear();
+        
         match (left, right) {
             (crate::ir::IRExpression::Symbol(var_symbol), value_expr) => {
                 // This is a variable assignment: var = expression
@@ -1590,6 +1726,12 @@ impl CodeGenerator {
                 
                 // Generate unification
                 writeln!(self.output, "    flint_unify({}, {}, flint_get_global_env());", var_name, value_code)?;
+                
+                // If this is a call_result temporary variable, free it immediately after unification
+                if var_name.starts_with("call_result_") {
+                    writeln!(self.output, "    // Free temporary call_result variable after use")?;
+                    writeln!(self.output, "    flint_free_value({});", var_name)?;
+                }
             },
             _ => {
                 // General unification between two expressions
@@ -1598,11 +1740,18 @@ impl CodeGenerator {
                 writeln!(self.output, "    flint_unify({}, {}, flint_get_global_env());", left_code, right_code)?;
             }
         }
+        
+        // Generate freeing calls for any variables consumed in this constraint
+        self.generate_consumed_variable_freeing(is_main_function)?;
+        
         Ok(())
     }
     
     /// Generate C code for arithmetic constraint
-    fn generate_arithmetic_constraint(&mut self, operation: &crate::ir::ArithmeticOp, operands: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_arithmetic_constraint(&mut self, operation: &crate::ir::ArithmeticOp, operands: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
+        // Clear consumed variables tracker for this constraint
+        self.consumed_variables_in_constraint.clear();
+        
         if operands.len() == 2 {
             let left_code = self.generate_ir_expression_value(&operands[0], ir_function)?;
             let right_code = self.generate_ir_expression_value(&operands[1], ir_function)?;
@@ -1615,12 +1764,19 @@ impl CodeGenerator {
             // Don't generate direct assignment - let the constraint solver handle it
             // The constraint variables are already declared at the top of the function
         }
+        
+        // Generate freeing calls for any variables consumed in this constraint
+        self.generate_consumed_variable_freeing(is_main_function)?;
+        
         Ok(())
     }
     
     /// Generate C code for function call constraint
-    fn generate_function_call_constraint(&mut self, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_function_call_constraint(&mut self, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
         eprintln!("DEBUG: generate_function_call_constraint called with function = '{}'", function);
+        
+        // Clear consumed variables tracker for this constraint
+        self.consumed_variables_in_constraint.clear();
         
         // Check if this is a Python function call (format: module_function)
         if let Some(underscore_pos) = function.find('_') {
@@ -1635,7 +1791,7 @@ impl CodeGenerator {
                 if package_manager.packages.contains_key(module) {
                     eprintln!("DEBUG: Module '{}' is a Python package, using Python C API", module);
                     // This is a Python function call - use our Python C API integration
-                    self.generate_python_function_call_constraint(module, func_name, arguments, result, ir_function)?;
+                    self.generate_python_function_call_constraint(module, func_name, arguments, result, ir_function, is_main_function)?;
                     return Ok(());
                 }
             }
@@ -1654,6 +1810,9 @@ impl CodeGenerator {
         writeln!(self.output, "    // Function call constraint: {} = {}({})", result_code, function, arg_codes.join(", "))?;
         writeln!(self.output, "    flint_unify({}, {}({}), flint_get_global_env());", result_code, function, arg_codes.join(", "))?;
         
+        // Generate freeing calls for any variables consumed in this constraint
+        self.generate_consumed_variable_freeing(is_main_function)?;
+        
         Ok(())
     }
     
@@ -1661,7 +1820,28 @@ impl CodeGenerator {
     fn generate_ir_expression_value(&mut self, expr: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<String, CodegenError> {
         match expr {
             crate::ir::IRExpression::Symbol(symbol) => {
-                Ok(symbol.name.clone())
+                // Convert IR symbol to Variable for linearity tracking
+                let var = Variable {
+                    name: symbol.name.clone(),
+                    is_logic_var: true, // IR symbols are typically logic variables
+                    location: Some(SourceLocation::new("".to_string(), 0, 0, 0)), // Dummy location for IR
+                };
+                
+                // Check if this is a non-consumptive access (starts with ~)
+                let is_non_consumptive = symbol.name.starts_with("~");
+                
+                if is_non_consumptive {
+                    // Remove ~ prefix for the actual variable name
+                    let clean_name = symbol.name.trim_start_matches('~');
+                    let clean_var = Variable {
+                        name: clean_name.to_string(),
+                        is_logic_var: true,
+                        location: Some(SourceLocation::new("".to_string(), 0, 0, 0)), // Dummy location for IR
+                    };
+                    Ok(self.generate_variable_access(&clean_var, true))
+                } else {
+                    Ok(self.generate_variable_access(&var, false))
+                }
             },
             crate::ir::IRExpression::Literal(lit) => {
                 match lit {
@@ -1823,7 +2003,7 @@ impl CodeGenerator {
     }
     
     /// Generate Python function call constraint using C API
-    fn generate_python_function_call_constraint(&mut self, module: &str, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<(), CodegenError> {
+    fn generate_python_function_call_constraint(&mut self, module: &str, function: &str, arguments: &[crate::ir::IRExpression], result: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction, is_main_function: bool) -> Result<(), CodegenError> {
         // Convert IR arguments to C arguments for Python C API
         let mut arg_conversions = Vec::new();
         let mut arg_names = Vec::new();
@@ -1906,6 +2086,9 @@ impl CodeGenerator {
         writeln!(self.output, "        // Unify result directly without extra conversion")?;
         writeln!(self.output, "        flint_unify({}, flint_create_integer(c_result), flint_get_global_env());", result_code)?;
         writeln!(self.output, "    }}")?;
+        
+        // Generate freeing calls for any variables consumed in this constraint
+        self.generate_consumed_variable_freeing(is_main_function)?;
         
         Ok(())
     }
