@@ -1617,8 +1617,7 @@ impl CodeGenerator {
         let left_code = self.generate_ir_expression_value(&operands[0], ir_function)?;
         let right_code = self.generate_ir_expression_value(&operands[1], ir_function)?;
         
-        writeln!(self.output, "    flint_solve_arithmetic_constraint({}, {}, result, \"{}\");", 
-                 left_code, right_code, op_name)?;
+        writeln!(self.output, "    flint_solve_arithmetic_constraint({}, {}, result, \"{}\");", left_code, right_code, op_name)?;
         writeln!(self.output, "    // Always return the result variable, even if constraint couldn't be solved immediately")?;
         writeln!(self.output, "    return result;")?;
         
@@ -1820,28 +1819,8 @@ impl CodeGenerator {
     fn generate_ir_expression_value(&mut self, expr: &crate::ir::IRExpression, ir_function: &crate::ir::IRFunction) -> Result<String, CodegenError> {
         match expr {
             crate::ir::IRExpression::Symbol(symbol) => {
-                // Convert IR symbol to Variable for linearity tracking
-                let var = Variable {
-                    name: symbol.name.clone(),
-                    is_logic_var: true, // IR symbols are typically logic variables
-                    location: Some(SourceLocation::new("".to_string(), 0, 0, 0)), // Dummy location for IR
-                };
-                
-                // Check if this is a non-consumptive access (starts with ~)
-                let is_non_consumptive = symbol.name.starts_with("~");
-                
-                if is_non_consumptive {
-                    // Remove ~ prefix for the actual variable name
-                    let clean_name = symbol.name.trim_start_matches('~');
-                    let clean_var = Variable {
-                        name: clean_name.to_string(),
-                        is_logic_var: true,
-                        location: Some(SourceLocation::new("".to_string(), 0, 0, 0)), // Dummy location for IR
-                    };
-                    Ok(self.generate_variable_access(&clean_var, true))
-                } else {
-                    Ok(self.generate_variable_access(&var, false))
-                }
+                // Return the symbol name directly, as it represents a Value*
+                Ok(symbol.name.clone())
             },
             crate::ir::IRExpression::Literal(lit) => {
                 match lit {
