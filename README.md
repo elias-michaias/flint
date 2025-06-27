@@ -47,7 +47,7 @@ The Flint runtime automatically downloads and builds the following dependencies:
 | Dependency | Purpose | URL | Type |
 |------------|---------|-----|------|
 | **libdill** | Structured concurrency and async operations | [libdill.org](http://libdill.org/libdill-2.14.tar.gz) | C library (built) |
-| **amoeba** | Cassowary constraint solver | [starwing/amoeba](https://github.com/starwing/amoeba) | Header-only C library |
+| **NLopt** | Nonlinear optimization and constraint solving | [NLopt GitHub](https://github.com/stevengj/nlopt) | C library (built) |
 
 ### Building the Flint Compiler
 
@@ -65,7 +65,7 @@ The Flint runtime automatically downloads and builds the following dependencies:
 ### Building the Runtime
 
 The Flint runtime is written in C and provides:
-- Unification and constraint solving with the amoeba constraint solver
+- Unification and constraint solving with the NLopt nonlinear optimization library
 - Linear resource management  
 - Async operations with structured concurrency (libdill)
 - C interoperability
@@ -88,7 +88,7 @@ The Flint runtime is written in C and provides:
    
    The first build will automatically:
    - Download and build libdill for structured concurrency
-   - Download amoeba header files for constraint solving
+   - Download and build NLopt for constraint solving
    - Create status tracking files in `.deps/`
 
 4. **Run the test suite** to verify everything works:
