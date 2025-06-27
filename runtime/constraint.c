@@ -1,12 +1,96 @@
-#define AM_IMPLEMENTATION  // Enable amoeba implementation
-#include "amoeba.h"
+#include <nlopt.h>
 #include "runtime.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h> // For fabs
+
+// Structure to pass data to NLopt functions
+typedef struct {
+    ConstraintStore* store;
+    FlintConstraint* constraint; // The specific constraint being evaluated
+} NloptFuncData;
 
 // Forward declarations
 bool flint_solve_function_constraint_algebraically(ConstraintStore* store, const char* function_name, VarId var_id, int target_value, Environment* env);
+
+// NLopt objective function (dummy for constraint satisfaction)
+static double nlopt_objective_function(unsigned n, const double* x, double* grad, void* func_data) {
+    // For constraint satisfaction, we can use a dummy objective function, e.g., minimize 0
+    // or minimize the sum of squares of constraint violations if we were doing least-squares fitting.
+    // For now, we'll just return 0.0.
+    (void)n; // Unused
+    (void)x; // Unused
+    if (grad) {
+        for (unsigned i = 0; i < n; ++i) {
+            grad[i] = 0.0;
+        }
+    }
+    (void)func_data; // Unused
+    return 0.0;
+}
+
+// NLopt linear equality constraint function
+// result[0] = a*x + b*y + ... - C = 0
+static double nlopt_linear_equality_constraint(unsigned n, const double* x, double* grad, void* func_data) {
+    NloptFuncData* data = (NloptFuncData*)func_data;
+    FlintConstraint* constraint = data->constraint;
+    
+    double sum = 0.0;
+    for (size_t i = 0; i < constraint->var_count; ++i) {
+        unsigned x_idx = constraint->var_ids[i];
+        sum += constraint->coefficients[i] * x[x_idx];
+    }
+    double constraint_value = sum - constraint->constant_term;
+
+    if (grad) {
+        for (unsigned i = 0; i < n; ++i) {
+            grad[i] = 0.0; // Initialize gradients to zero
+        }
+        for (size_t i = 0; i < constraint->var_count; ++i) {
+            unsigned x_idx = constraint->var_ids[i];
+            grad[x_idx] = constraint->coefficients[i];
+        }
+    }
+    return constraint_value;
+}
+
+// NLopt linear inequality constraint function
+// result[0] = a*x + b*y + ... - C <= 0
+static double nlopt_linear_inequality_constraint(unsigned n, const double* x, double* grad, void* func_data) {
+    NloptFuncData* data = (NloptFuncData*)func_data;
+    FlintConstraint* constraint = data->constraint;
+
+    double sum = 0.0;
+    for (size_t i = 0; i < constraint->var_count; ++i) {
+        unsigned x_idx = constraint->var_ids[i];
+        sum += constraint->coefficients[i] * x[x_idx];
+    }
+
+    double constraint_value;
+    if (constraint->type == CONSTRAINT_LEQ) {
+        constraint_value = sum - constraint->constant_term; // a*x + b*y + ... - C <= 0
+    } else if (constraint->type == CONSTRAINT_GEQ) {
+        constraint_value = constraint->constant_term - sum; // C - (a*x + b*y + ...) <= 0
+    } else {
+        constraint_value = 0.0; // Should not happen for inequality constraints
+    }
+
+    if (grad) {
+        for (unsigned i = 0; i < n; ++i) {
+            grad[i] = 0.0; // Initialize gradients to zero
+        }
+        for (size_t i = 0; i < constraint->var_count; ++i) {
+            unsigned x_idx = constraint->var_ids[i];
+            if (constraint->type == CONSTRAINT_LEQ) {
+                grad[x_idx] = constraint->coefficients[i];
+            } else if (constraint->type == CONSTRAINT_GEQ) {
+                grad[x_idx] = -constraint->coefficients[i];
+            }
+        }
+    }
+    return constraint_value;
+}
 
 // =============================================================================
 // CONSTRAINT STORE MANAGEMENT
@@ -15,26 +99,22 @@ bool flint_solve_function_constraint_algebraically(ConstraintStore* store, const
 ConstraintStore* flint_create_constraint_store(void) {
     ConstraintStore* store = flint_alloc(sizeof(ConstraintStore));
     
-    // Create amoeba solver
-    store->solver = am_newsolver(NULL, NULL);
-    if (!store->solver) {
-        flint_free(store);
-        return NULL;
-    }
-    
+    // Initialize NLopt solver
+    store->nlopt_solver = NULL; // Will be initialized when constraints are added
+
     // Initialize variable arrays
     store->variables = NULL;
     store->var_count = 0;
     store->var_capacity = 0;
-    
+
     // Initialize constraint arrays
     store->constraints = NULL;
     store->constraint_count = 0;
     store->constraint_capacity = 0;
-    
-    // Enable auto-update for real-time constraint solving
-    store->auto_update = true;
-    am_autoupdate(store->solver, 1);
+
+    // Auto-update is not directly applicable to NLopt in the same way, 
+    // as optimization is a discrete step. We'll manage updates manually.
+    store->auto_update = false;
     
     return store;
 }
@@ -48,32 +128,33 @@ void flint_free_constraint_store(ConstraintStore* store) {
             if (store->variables[i].name) {
                 flint_free(store->variables[i].name);
             }
-            if (store->variables[i].amoeba_var) {
-                am_delvariable(store->variables[i].amoeba_var);
-            }
+            // No NLopt-specific deallocation for variables, as they are just doubles
         }
         flint_free(store->variables);
     }
-    
+
     // Free all constraints
     if (store->constraints) {
         for (size_t i = 0; i < store->constraint_count; i++) {
-            if (store->constraints[i].amoeba_constraint) {
-                am_delconstraint(store->constraints[i].amoeba_constraint);
-            }
             if (store->constraints[i].var_ids) {
                 flint_free(store->constraints[i].var_ids);
             }
             if (store->constraints[i].description) {
                 flint_free(store->constraints[i].description);
             }
+            if (store->constraints[i].function_name) {
+                flint_free(store->constraints[i].function_name);
+            }
+            if (store->constraints[i].coefficients) {
+                flint_free(store->constraints[i].coefficients);
+            }
         }
         flint_free(store->constraints);
     }
-    
-    // Free amoeba solver (this also frees all variables and constraints)
-    if (store->solver) {
-        am_delsolver(store->solver);
+
+    // Destroy NLopt solver
+    if (store->nlopt_solver) {
+        nlopt_destroy(store->nlopt_solver);
     }
     
     flint_free(store);
@@ -107,15 +188,11 @@ FlintConstraintVar* flint_get_or_create_constraint_var(ConstraintStore* store, V
         if (!store->variables) return NULL;
     }
     
-    // Create new amoeba variable
-    am_Var* amoeba_var = am_newvariable(store->solver);
-    if (!amoeba_var) return NULL;
-    
     // Initialize Flint constraint variable
     FlintConstraintVar* var = &store->variables[store->var_count];
     var->flint_id = var_id;
-    var->amoeba_var = amoeba_var;
     var->name = name ? strdup(name) : NULL;
+    var->value = 0.0; // Initialize value
     
     store->var_count++;
     
@@ -134,18 +211,9 @@ void flint_suggest_constraint_value(ConstraintStore* store, VarId var_id, double
     }
     
     if (var) {
-        printf("DEBUG: Adding edit constraint and suggesting value %f\n", value);
-        // Add edit constraint and suggest value using amoeba's edit system
-        int result = am_addedit(var->amoeba_var, AM_MEDIUM);
-        if (result == AM_OK) {
-            am_suggest(var->amoeba_var, (am_Num)value);
-            // Auto-update is enabled, so constraints should propagate automatically
-            if (!store->auto_update) {
-                am_updatevars(store->solver);
-            }
-        } else {
-            printf("DEBUG: Failed to add edit constraint: %d\n", result);
-        }
+        // For NLopt, suggesting a value means setting the initial guess for the variable.
+        // We store the suggested value directly in the FlintConstraintVar.
+        var->value = value;
     } else {
         printf("DEBUG: Failed to create constraint variable for %llu\n", (unsigned long long)var_id);
     }
@@ -162,21 +230,13 @@ bool flint_suggest_multiple_values(ConstraintStore* store, VarId* var_ids, doubl
     for (size_t i = 0; i < count; i++) {
         FlintConstraintVar* var = flint_get_or_create_constraint_var(store, var_ids[i], NULL);
         if (var) {
-            int result = am_addedit(var->amoeba_var, AM_MEDIUM);
-            if (result == AM_OK) {
-                am_suggest(var->amoeba_var, (am_Num)values[i]);
-            } else {
-                all_success = false;
-            }
+            var->value = values[i];
         } else {
             all_success = false;
         }
     }
     
-    // Update all variables after all suggestions
-    if (!store->auto_update) {
-        am_updatevars(store->solver);
-    }
+    // No auto-update needed for NLopt, as optimization is a discrete step.
     
     return all_success;
 }
@@ -185,14 +245,10 @@ bool flint_suggest_multiple_values(ConstraintStore* store, VarId* var_ids, doubl
  * Remove edit constraints from variables (stops suggesting values)
  */
 void flint_stop_suggesting_values(ConstraintStore* store, VarId* var_ids, size_t count) {
-    if (!store || !var_ids) return;
-    
-    for (size_t i = 0; i < count; i++) {
-        FlintConstraintVar* var = find_constraint_var(store, var_ids[i]);
-        if (var && am_hasedit(var->amoeba_var)) {
-            am_deledit(var->amoeba_var);
-        }
-    }
+    // For NLopt, stopping suggestions means simply not setting the initial guess
+    // or not including the variable in the optimization problem if it's not constrained.
+    // No explicit action needed here as values are stored directly in FlintConstraintVar.
+    // If a variable is not part of an active constraint, its value won't be optimized.
 }
 
 double flint_get_constraint_value(ConstraintStore* store, VarId var_id) {
@@ -201,7 +257,7 @@ double flint_get_constraint_value(ConstraintStore* store, VarId var_id) {
     FlintConstraintVar* var = find_constraint_var(store, var_id);
     if (!var) return 0.0;
     
-    return (double)am_value(var->amoeba_var);
+    return var->value;
 }
 
 // =============================================================================
@@ -224,101 +280,8 @@ FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store,
         if (!store->constraints) return NULL;
     }
     
-    // Create amoeba constraint
-    am_Constraint* amoeba_constraint = am_newconstraint(store->solver, (am_Num)strength);
-    if (!amoeba_constraint) return NULL;
-    
-    // Get or create constraint variables
-    FlintConstraintVar* constraint_vars[var_count];
-    for (size_t i = 0; i < var_count; i++) {
-        constraint_vars[i] = flint_get_or_create_constraint_var(store, variables[i], NULL);
-        if (!constraint_vars[i]) {
-            am_delconstraint(amoeba_constraint);
-            return NULL;
-        }
-    }
-    
-    // Build constraint based on operation
-    int result = AM_OK;
-    switch (op) {
-        case ARITH_ADD:
-            // X + Y = Z  ->  X + Y - Z = 0
-            if (var_count >= 3) {
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, 1.0);
-                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, -1.0);  // Z gets -1.0 coefficient
-                am_setrelation(amoeba_constraint, AM_EQUAL);
-                if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
-            }
-            break;
-            
-        case ARITH_SUB:
-            // X - Y = Z  ->  X - Y - Z = 0
-            if (var_count >= 3) {
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, -1.0);
-                am_addterm(amoeba_constraint, constraint_vars[2]->amoeba_var, -1.0);  // Z gets -1.0 coefficient
-                am_setrelation(amoeba_constraint, AM_EQUAL);
-                if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
-            }
-            break;
-            
-        case ARITH_EQUAL:
-            // Handle both X = Y and X = constant cases
-            if (var_count == 1 && constant != 0.0) {
-                // X = constant  ->  X = constant
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_setrelation(amoeba_constraint, AM_EQUAL);
-                am_addconstant(amoeba_constraint, (am_Num)constant);
-            } else if (var_count >= 2) {
-                // X = Y  ->  X - Y = 0
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, -1.0);  // Y gets -1.0 coefficient
-                am_setrelation(amoeba_constraint, AM_EQUAL);
-                if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
-            }
-            break;
-            
-        case ARITH_LEQ:
-            // X <= Y  ->  X - Y <= 0
-            if (var_count >= 2) {
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_setrelation(amoeba_constraint, AM_LESSEQUAL);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, 1.0);
-                if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
-            }
-            break;
-            
-        case ARITH_GEQ:
-            // X >= Y  ->  X - Y >= 0
-            if (var_count >= 2) {
-                am_addterm(amoeba_constraint, constraint_vars[0]->amoeba_var, 1.0);
-                am_setrelation(amoeba_constraint, AM_GREATEQUAL);
-                am_addterm(amoeba_constraint, constraint_vars[1]->amoeba_var, 1.0);
-                if (constant != 0.0) am_addconstant(amoeba_constraint, (am_Num)constant);
-            }
-            break;
-            
-        case ARITH_MUL:
-        case ARITH_DIV:
-            // Multiplication and division are non-linear and not directly supported by Cassowary
-            // These would require linearization or specialized handling
-            printf("Warning: Non-linear constraints (multiply/divide) not yet supported\n");
-            am_delconstraint(amoeba_constraint);
-            return NULL;
-    }
-    
-    // Add constraint to solver
-    result = am_add(amoeba_constraint);
-    if (result != AM_OK) {
-        printf("Failed to add constraint to solver: %d\n", result);
-        am_delconstraint(amoeba_constraint);
-        return NULL;
-    }
-    
     // Initialize Flint constraint
     FlintConstraint* constraint = &store->constraints[store->constraint_count];
-    constraint->amoeba_constraint = amoeba_constraint;
     constraint->type = (op == ARITH_EQUAL) ? CONSTRAINT_EQUAL : 
                       (op == ARITH_LEQ) ? CONSTRAINT_LEQ : 
                       (op == ARITH_GEQ) ? CONSTRAINT_GEQ : CONSTRAINT_EQUAL;
@@ -342,52 +305,39 @@ FlintConstraint* flint_add_arithmetic_constraint(ConstraintStore* store,
  * This is useful for constraints like increment($x) = 11 where increment($x) = $x + 1
  * So we get: $x + 1 = 11, which becomes 1 * $x + 1 = 11
  */
-bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target) {
-    if (!store || !store->solver) {
-        printf("[DEBUG] flint_add_linear_constraint: no store or solver\n");
+bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target, ConstraintStrength strength) {
+    if (!store) { // Removed !store->solver check as NLopt is initialized later
+        printf("DEBUG: flint_add_linear_constraint: no store\n");
         return false;
     }
     
-    printf("[DEBUG] flint_add_linear_constraint: %f * var_%llu + %f = %f\n", 
+    printf("DEBUG: flint_add_linear_constraint: %f * var_%llu + %f = %f\n", 
            coefficient, (unsigned long long)var_id, constant, target);
     
     // Get or create the constraint variable
     FlintConstraintVar* var = flint_get_or_create_constraint_var(store, var_id, NULL);
     if (!var) {
-        printf("[DEBUG] flint_add_linear_constraint: failed to create constraint variable\n");
+        printf("DEBUG: flint_add_linear_constraint: failed to create constraint variable\n");
         return false;
     }
     
-    // Create amoeba constraint with high strength (required)
-    am_Constraint* constraint = am_newconstraint(store->solver, AM_REQUIRED);
-    if (!constraint) {
-        printf("[DEBUG] flint_add_linear_constraint: failed to create amoeba constraint\n");
-        return false;
-    }
+    // For NLopt, we don't add constraints directly here.
+    // Constraints are added to the nlopt_opt object before optimization.
+    // We just store the constraint information in the ConstraintStore.
     
-    // Build the constraint: coefficient * var + constant = target
-    // This becomes: coefficient * var = target - constant
-    am_addterm(constraint, var->amoeba_var, (am_Num)coefficient);
-    am_setrelation(constraint, AM_EQUAL);
-    am_addconstant(constraint, (am_Num)(target - constant));
+    // Create a dummy constraint to store the info
+    FlintConstraint* constraint = flint_add_arithmetic_constraint(store, ARITH_EQUAL, &var_id, 1, constant, strength);
+    if (!constraint) return false;
     
-    // Add constraint to solver
-    int result = am_add(constraint);
-    if (result != AM_OK) {
-        printf("[DEBUG] flint_add_linear_constraint: failed to add constraint to solver: %d\n", result);
-        am_delconstraint(constraint);
-        return false;
-    }
+    // Store the linear equation: coefficient * var - (target - constant) = 0
+    // Store coefficients and constant term directly in the constraint struct
+    constraint->coefficients = flint_alloc(sizeof(double));
+    constraint->coefficients[0] = coefficient;
+    constraint->constant_term = target - constant;
     
-    printf("[DEBUG] flint_add_linear_constraint: constraint added successfully\n");
+    printf("DEBUG: flint_add_linear_constraint: constraint added successfully\n");
     
-    // Update variables to get the solution
-    am_updatevars(store->solver);
-    
-    // Get the solved value
-    double solved_value = (double)am_value(var->amoeba_var);
-    printf("[DEBUG] flint_add_linear_constraint: solved value for var_%llu = %f\n", 
-           (unsigned long long)var_id, solved_value);
+    // No direct solving here. Solving happens when flint_solve_constraints is called.
     
     return true;
 }
@@ -399,51 +349,25 @@ bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double co
 bool flint_add_multi_var_linear_constraint(ConstraintStore* store, VarId* var_ids, double* coefficients, 
                                          size_t var_count, double constant, double target, 
                                          ConstraintStrength strength) {
-    if (!store || !store->solver || !var_ids || !coefficients || var_count == 0) {
-        printf("[DEBUG] flint_add_multi_var_linear_constraint: invalid parameters\n");
+    if (!store || !var_ids || !coefficients || var_count == 0) { // Removed !store->solver check
+        printf("DEBUG: flint_add_multi_var_linear_constraint: invalid parameters\n");
         return false;
     }
     
-    printf("[DEBUG] flint_add_multi_var_linear_constraint: creating constraint with %zu variables\n", var_count);
+    printf("DEBUG: flint_add_multi_var_linear_constraint: creating constraint with %zu variables\n", var_count);
     
-    // Create amoeba constraint
-    am_Constraint* constraint = am_newconstraint(store->solver, (am_Num)strength);
-    if (!constraint) {
-        printf("[DEBUG] flint_add_multi_var_linear_constraint: failed to create amoeba constraint\n");
-        return false;
-    }
+    // Create a dummy constraint to store the info
+    FlintConstraint* constraint = flint_add_arithmetic_constraint(store, ARITH_EQUAL, var_ids, var_count, constant, strength);
+    if (!constraint) return false;
     
-    // Add terms for each variable
-    for (size_t i = 0; i < var_count; i++) {
-        FlintConstraintVar* var = flint_get_or_create_constraint_var(store, var_ids[i], NULL);
-        if (!var) {
-            printf("[DEBUG] flint_add_multi_var_linear_constraint: failed to create constraint variable %llu\n", 
-                   (unsigned long long)var_ids[i]);
-            am_delconstraint(constraint);
-            return false;
-        }
-        
-        am_addterm(constraint, var->amoeba_var, (am_Num)coefficients[i]);
-        printf("[DEBUG] flint_add_multi_var_linear_constraint: added term %f * var_%llu\n", 
-               coefficients[i], (unsigned long long)var_ids[i]);
-    }
+    // Store coefficients and target for later use by NLopt
+    constraint->coefficients = flint_alloc(sizeof(double) * var_count);
+    memcpy(constraint->coefficients, coefficients, sizeof(double) * var_count);
+    constraint->constant_term = target - constant;
     
-    // Set relation and constant
-    am_setrelation(constraint, AM_EQUAL);
-    am_addconstant(constraint, (am_Num)(target - constant));
+    printf("DEBUG: flint_add_multi_var_linear_constraint: constraint added successfully\n");
     
-    // Add constraint to solver
-    int result = am_add(constraint);
-    if (result != AM_OK) {
-        printf("[DEBUG] flint_add_multi_var_linear_constraint: failed to add constraint to solver: %d\n", result);
-        am_delconstraint(constraint);
-        return false;
-    }
-    
-    printf("[DEBUG] flint_add_multi_var_linear_constraint: constraint added successfully\n");
-    
-    // Update variables to get the solution
-    am_updatevars(store->solver);
+    // No direct solving here. Solving happens when flint_solve_constraints is called.
     
     return true;
 }
@@ -456,7 +380,7 @@ bool flint_add_multi_var_linear_constraint(ConstraintStore* store, VarId* var_id
 bool flint_solve_function_constraint(ConstraintStore* store, VarId var_id, int target_value) {
     if (!store) return false;
     
-    printf("[DEBUG] flint_solve_function_constraint: var_%llu, target=%d\n", 
+    printf("DEBUG: flint_solve_function_constraint: var_%llu, target=%d\n", 
            (unsigned long long)var_id, target_value);
     
     // For the increment function pattern: increment($x) = $x + 1 = target
@@ -464,7 +388,7 @@ bool flint_solve_function_constraint(ConstraintStore* store, VarId var_id, int t
     // Which solves to: $x = target - 1
     
     // Assume increment function for now (can be generalized later)
-    return flint_add_linear_constraint(store, var_id, 1.0, 1.0, (double)target_value);
+    return flint_add_linear_constraint(store, var_id, 1.0, 1.0, (double)target_value, STRENGTH_REQUIRED);
 }
 
 /**
@@ -474,44 +398,44 @@ bool flint_solve_general_arithmetic_constraint(ConstraintStore* store, const cha
                                              VarId var_id, double target_value) {
     if (!store || !function_name) return false;
     
-    printf("[DEBUG] flint_solve_general_arithmetic_constraint: %s(var_%llu) = %f\n", 
+    printf("DEBUG: flint_solve_general_arithmetic_constraint: %s(var_%llu) = %f\n", 
            function_name, (unsigned long long)var_id, target_value);
     
     // Handle different arithmetic function patterns
     if (strcmp(function_name, "increment") == 0 || strcmp(function_name, "inc") == 0) {
         // increment(x) = x + 1
-        return flint_add_linear_constraint(store, var_id, 1.0, 1.0, target_value);
+        return flint_add_linear_constraint(store, var_id, 1.0, 1.0, target_value, STRENGTH_REQUIRED);
     } 
     else if (strcmp(function_name, "decrement") == 0 || strcmp(function_name, "dec") == 0) {
         // decrement(x) = x - 1
-        return flint_add_linear_constraint(store, var_id, 1.0, -1.0, target_value);
+        return flint_add_linear_constraint(store, var_id, 1.0, -1.0, target_value, STRENGTH_REQUIRED);
     }
     else if (strcmp(function_name, "double") == 0 || strcmp(function_name, "twice") == 0) {
         // double(x) = 2 * x
-        return flint_add_linear_constraint(store, var_id, 2.0, 0.0, target_value);
+        return flint_add_linear_constraint(store, var_id, 2.0, 0.0, target_value, STRENGTH_REQUIRED);
     }
     else if (strcmp(function_name, "half") == 0) {
         // half(x) = x / 2 = 0.5 * x
-        return flint_add_linear_constraint(store, var_id, 0.5, 0.0, target_value);
+        return flint_add_linear_constraint(store, var_id, 0.5, 0.0, target_value, STRENGTH_REQUIRED);
     }
     else if (strcmp(function_name, "square") == 0) {
         // Non-linear - not supported by Cassowary directly
-        printf("[WARNING] Non-linear constraint 'square' not supported by Cassowary solver\n");
+        printf("[WARNING] Non-linear constraint 'square' not supported by NLopt directly for linear problems\n");
         return false;
     }
     else {
         // Try to parse generic linear functions like "add5" -> x + 5
         if (strncmp(function_name, "add", 3) == 0) {
             double constant = atof(function_name + 3);
-            return flint_add_linear_constraint(store, var_id, 1.0, constant, target_value);
+            return flint_add_linear_constraint(store, var_id, 1.0, constant, target_value, STRENGTH_REQUIRED);
         }
         else if (strncmp(function_name, "sub", 3) == 0) {
             double constant = atof(function_name + 3);
-            return flint_add_linear_constraint(store, var_id, 1.0, -constant, target_value);
+            return flint_add_linear_constraint(store, var_id, 1.0, -constant, target_value, STRENGTH_REQUIRED);
         }
         else if (strncmp(function_name, "mul", 3) == 0) {
             double multiplier = atof(function_name + 3);
-            return flint_add_linear_constraint(store, var_id, multiplier, 0.0, target_value);
+            return flint_add_linear_constraint(store, var_id, multiplier, 0.0, target_value, STRENGTH_REQUIRED);
         }
         
         printf("[WARNING] Unknown function pattern '%s' for constraint solving\n", function_name);
@@ -555,7 +479,7 @@ bool flint_add_arithmetic_relationship(ConstraintStore* store, VarId var1, VarId
 // =============================================================================
 
 bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* env) {
-    if (!store || !store->solver) return true;
+    if (!store) return true; // Removed !store->solver check
     
     printf("DEBUG: flint_solve_constraints called for var %llu\n", (unsigned long long)var_id);
     
@@ -598,28 +522,109 @@ bool flint_solve_constraints(ConstraintStore* store, VarId var_id, Environment* 
             printf("DEBUG: Suggesting float value %f for var %llu\n", binding->data.float_val, (unsigned long long)var_id);
             flint_suggest_constraint_value(store, var_id, binding->data.float_val);
         }
-    } else {
+    }
+    else {
         printf("DEBUG: Variable %llu has no binding\n", (unsigned long long)var_id);
     }
     
-    // Update all variables in the constraint system to propagate constraints
-    printf("DEBUG: Updating constraint variables\n");
-    am_updatevars(store->solver);
-    
-    // Now propagate constraint values back to unification if needed
-    FlintConstraintVar* constraint_var = flint_get_or_create_constraint_var(store, var_id, NULL);
-    if (constraint_var) {
-        double constraint_value = am_value(constraint_var->amoeba_var);
-        printf("DEBUG: Constraint variable %llu has value %f\n", (unsigned long long)var_id, constraint_value);
-        
-        // Only propagate constraint values to unbound variables if the constraint value seems determined
-        // and the variable doesn't already have a unification binding
-        if (!var || !var->binding) {
-            // Don't auto-bind variables to constraint values - let unification drive the process
-            printf("DEBUG: Not auto-binding unbound variable %llu to constraint value %f\n", (unsigned long long)var_id, constraint_value);
+    // --- NLopt Integration ---
+    // 1. Determine the number of variables (dimensions)
+    unsigned num_vars = store->var_count;
+    if (num_vars == 0) {
+        printf("DEBUG: No variables in constraint store, nothing to optimize.\n");
+        return true;
+    }
+
+    // 2. Create NLopt optimizer object if not already created
+    if (!store->nlopt_solver) {
+        // Choose an algorithm. For linear equality/inequality, NLOPT_LN_AUGLAG_EQ or NLOPT_LN_COBYLA could work.
+        // NLOPT_LN_AUGLAG_EQ is good for equality constraints.
+        store->nlopt_solver = nlopt_create(NLOPT_LN_AUGLAG_EQ, num_vars);
+        if (!store->nlopt_solver) {
+            printf("ERROR: Failed to create NLopt solver.\n");
+            return false;
         }
+        // Set a dummy objective function (minimize 0)
+        nlopt_set_min_objective(store->nlopt_solver, nlopt_objective_function, NULL);
+        // Set optimization tolerance
+        nlopt_set_ftol_rel(store->nlopt_solver, 1e-4); // Relative tolerance on function value
+        nlopt_set_xtol_rel(store->nlopt_solver, 1e-4); // Relative tolerance on optimization parameters
     } else {
-        printf("DEBUG: No constraint variable found for var %llu\n", (unsigned long long)var_id);
+        // If solver already exists, ensure its dimensions match.
+        // If not, destroy and recreate, or handle appropriately.
+        // For simplicity, we'll assume dimensions don't change or recreate if they do.
+        if (nlopt_get_dimension(store->nlopt_solver) != num_vars) {
+            nlopt_destroy(store->nlopt_solver);
+            store->nlopt_solver = nlopt_create(NLOPT_LN_AUGLAG_EQ, num_vars);
+            if (!store->nlopt_solver) {
+                printf("ERROR: Failed to recreate NLopt solver with new dimensions.\n");
+                return false;
+            }
+            nlopt_set_min_objective(store->nlopt_solver, nlopt_objective_function, NULL);
+            nlopt_set_ftol_rel(store->nlopt_solver, 1e-4);
+            nlopt_set_xtol_rel(store->nlopt_solver, 1e-4);
+        }
+    }
+
+    // 3. Set initial guess for variables
+    double x[num_vars];
+    for (unsigned i = 0; i < num_vars; ++i) {
+        x[i] = store->variables[i].value;
+    }
+
+    // 4. Add constraints to NLopt
+    // This is a crucial part. NLopt expects a separate function for each constraint.
+    // We need to iterate through stored FlintConstraints and add them to NLopt.
+    // This will require passing per-constraint data to NLopt's constraint functions.
+    // For now, we'll add a placeholder.
+    
+    // Clear existing constraints from NLopt object before adding new ones
+    nlopt_remove_equality_constraints(store->nlopt_solver);
+    nlopt_remove_inequality_constraints(store->nlopt_solver);
+
+    for (size_t i = 0; i < store->constraint_count; ++i) {
+        FlintConstraint* constraint = &store->constraints[i];
+        
+        // Skip function constraints as they are handled algebraically or by backtracking
+        if (constraint->type == CONSTRAINT_FUNCTION) continue;
+
+        NloptFuncData* constraint_data = flint_alloc(sizeof(NloptFuncData));
+        constraint_data->store = store;
+        constraint_data->constraint = constraint;
+        
+        // For linear constraints, NLopt expects a vector of coefficients and a right-hand side.
+        // We need to convert our stored coefficients and constant_term into this format.
+        // NLopt's add_equality_constraint and add_inequality_constraint take a function pointer
+        // and a tolerance. The function evaluates the constraint.
+
+        if (constraint->type == CONSTRAINT_EQUAL) {
+            // For linear equality: a*x + b*y + ... = C  =>  a*x + b*y + ... - C = 0
+            // The constraint function should return (a*x + b*y + ... - C)
+            nlopt_add_equality_constraint(store->nlopt_solver, nlopt_linear_equality_constraint, constraint_data, 1e-8);
+        } else if (constraint->type == CONSTRAINT_LEQ) {
+            // For linear inequality: a*x + b*y + ... <= C  =>  a*x + b*y + ... - C <= 0
+            // The constraint function should return (a*x + b*y + ... - C)
+            nlopt_add_inequality_constraint(store->nlopt_solver, nlopt_linear_inequality_constraint, constraint_data, 1e-8);
+        } else if (constraint->type == CONSTRAINT_GEQ) {
+            // For linear inequality: a*x + b*y + ... >= C  =>  -(a*x + b*y + ...) + C <= 0
+            // The constraint function should return (-(a*x + b*y + ...) + C)
+            nlopt_add_inequality_constraint(store->nlopt_solver, nlopt_linear_inequality_constraint, constraint_data, 1e-8);
+        }
+    }
+
+    // 5. Run optimization
+    double minf; // minimum objective value (unused for constraint satisfaction)
+    nlopt_result nlopt_res = nlopt_optimize(store->nlopt_solver, x, &minf);
+
+    // 6. Update Flint variables with optimized values
+    if (nlopt_res >= 0) { // Optimization successful or stopped for a good reason
+        for (unsigned i = 0; i < num_vars; ++i) {
+            store->variables[i].value = x[i];
+        }
+        printf("DEBUG: NLopt optimization successful. Variables updated.\n");
+    } else {
+        printf("ERROR: NLopt optimization failed with result: %s\n", nlopt_result_to_string(nlopt_res));
+        return false;
     }
     
     return true;
@@ -674,13 +679,14 @@ FlintConstraint* flint_add_inequality_constraint(ConstraintStore* store, VarId v
 }
 
 void flint_remove_constraint(ConstraintStore* store, FlintConstraint* constraint) {
-    if (!store || !constraint || !constraint->amoeba_constraint) return;
+    if (!store || !constraint) return;
     
-    // Remove from amoeba solver
-    am_remove(constraint->amoeba_constraint);
-    
-    // Mark as removed (but don't delete from array to maintain indices)
-    constraint->amoeba_constraint = NULL;
+    // For NLopt, removing a constraint means not adding it to the nlopt_opt object
+    // during the next optimization run. We don't explicitly remove it from the stored
+    // constraints array, but rather mark it as inactive or rebuild the NLopt problem.
+    // For simplicity, we'll just set its type to an inactive type or similar.
+    // A more robust solution would involve rebuilding the NLopt problem from active constraints.
+    constraint->type = CONSTRAINT_UNIFY; // Mark as inactive/handled by unification
 }
 
 void flint_print_constraint_values(ConstraintStore* store) {
@@ -689,18 +695,11 @@ void flint_print_constraint_values(ConstraintStore* store) {
     printf("=== Constraint Variable Values ===\n");
     for (size_t i = 0; i < store->var_count; i++) {
         FlintConstraintVar* var = &store->variables[i];
-        double value = am_value(var->amoeba_var);
-        bool has_edit = am_hasedit(var->amoeba_var);
-        
         printf("Var %llu", (unsigned long long)var->flint_id);
         if (var->name) {
             printf(" (%s)", var->name);
         }
-        printf(": %.6f", value);
-        if (has_edit) {
-            printf(" [edit]");
-        }
-        printf("\n");
+        printf(": %.6f\n", var->value); // Directly print stored value
     }
     printf("Total constraints: %zu\n", store->constraint_count);
     printf("=================================\n");
@@ -710,11 +709,12 @@ void flint_print_constraint_values(ConstraintStore* store) {
  * Check if the constraint system is satisfiable
  */
 bool flint_is_constraint_system_satisfiable(ConstraintStore* store) {
-    if (!store || !store->solver) return true;
+    if (!store) return true; // Removed !store->solver check
     
-    // Try to update variables - if this fails, the system might be unsatisfiable
-    am_updatevars(store->solver);
-    return true; // amoeba doesn't provide a direct satisfiability check
+    // For NLopt, satisfiability is determined by the result of nlopt_optimize.
+    // If it returns NLOPT_SUCCESS or a similar positive code, it's satisfiable.
+    // We'll assume that if flint_solve_constraints runs without returning false, it's satisfiable.
+    return true; 
 }
 
 /**
@@ -729,20 +729,18 @@ void flint_print_constraint_system_status(ConstraintStore* store) {
     }
     
     printf("=== Constraint System Status ===\n");
-    printf("Solver: %s\n", store->solver ? "Available" : "NULL");
+    printf("Solver: %s\n", store->nlopt_solver ? "Available (NLopt)" : "NULL");
     printf("Variables: %zu / %zu\n", store->var_count, store->var_capacity);
     printf("Constraints: %zu / %zu\n", store->constraint_count, store->constraint_capacity);
-    printf("Auto-update: %s\n", store->auto_update ? "Enabled" : "Disabled");
+    printf("Auto-update: %s\n", store->auto_update ? "Enabled" : "Disabled"); // Auto-update is false for NLopt
     
     if (store->var_count > 0) {
         printf("Variable details:\n");
         for (size_t i = 0; i < store->var_count; i++) {
             FlintConstraintVar* var = &store->variables[i];
-            printf("  Var %llu: amoeba_var=%p, has_edit=%s, value=%.6f\n",
+            printf("  Var %llu: value=%.6f\n",
                    (unsigned long long)var->flint_id,
-                   var->amoeba_var,
-                   var->amoeba_var && am_hasedit(var->amoeba_var) ? "yes" : "no",
-                   var->amoeba_var ? am_value(var->amoeba_var) : 0.0);
+                   var->value);
         }
     }
     
@@ -755,7 +753,7 @@ bool flint_add_function_constraint(ConstraintStore* store, const char* function_
         return false;
     }
     
-    printf("[DEBUG] Adding function constraint: %s($%llu) = %d\n", function_name, var_id, target_value);
+    printf("DEBUG: Adding function constraint: %s($%llu) = %d\n", function_name, var_id, target_value);
     
     // For now, store this as a general constraint that will be handled by backtracking
     // We don't try to solve it algebraically - instead we let the backtracking solver
@@ -774,7 +772,6 @@ bool flint_add_function_constraint(ConstraintStore* store, const char* function_
     
     // Add the constraint
     FlintConstraint* constraint = &store->constraints[store->constraint_count];
-    constraint->amoeba_constraint = NULL;  // No amoeba constraint for function constraints
     constraint->type = CONSTRAINT_FUNCTION;
     constraint->var_count = 1;
     constraint->var_ids = flint_alloc(sizeof(VarId));
@@ -789,20 +786,20 @@ bool flint_add_function_constraint(ConstraintStore* store, const char* function_
     
     store->constraint_count++;
     
-    printf("[DEBUG] Function constraint added successfully (total: %zu)\n", store->constraint_count);
+    printf("DEBUG: Function constraint added successfully (total: %zu)\n", store->constraint_count);
     return true;
 }
 
 // Solve function constraints algebraically by analyzing function structure
 bool flint_solve_function_constraint_algebraically(ConstraintStore* store, const char* function_name, VarId var_id, int target_value, Environment* env) {
-    printf("[DEBUG] Attempting algebraic solution for %s($%llu) = %d\n", function_name, var_id, target_value);
+    printf("DEBUG: Attempting algebraic solution for %s($%llu) = %d\n", function_name, var_id, target_value);
     
     // For now, we'll implement simple linear function solving
     // A more sophisticated system would analyze the function body or use symbolic manipulation
     
     // Get the registered function to analyze its structure
     if (!flint_is_function_registered(function_name)) {
-        printf("[DEBUG] Function %s not registered, cannot analyze\n", function_name);
+        printf("DEBUG: Function %s not registered, cannot analyze\n", function_name);
         return false;
     }
     
@@ -815,14 +812,14 @@ bool flint_solve_function_constraint_algebraically(ConstraintStore* store, const
         // If increment(x) = target, then x + 5 = target, so x = target - 5
         solution = target_value - 5;
         has_solution = true;
-        printf("[DEBUG] Algebraic solution: increment(%lld) = %lld + 5 = %d\n", solution, solution, target_value);
+        printf("DEBUG: Algebraic solution: increment(%lld) = %lld + 5 = %d\n", solution, solution, target_value);
     } else {
         // For other functions, we could implement more sophisticated analysis
         // This could include:
         // - Parsing the function body to extract linear relationships
         // - Using symbolic differentiation for inverse functions
         // - Pattern matching on common function forms
-        printf("[DEBUG] No algebraic solver implemented for function %s\n", function_name);
+        printf("DEBUG: No algebraic solver implemented for function %s\n", function_name);
         return false;
     }
     
@@ -838,21 +835,22 @@ bool flint_solve_function_constraint_algebraically(ConstraintStore* store, const
             var_value.type = VAL_LOGICAL_VAR;
             var_value.data.logical_var = var;
             
-            printf("[DEBUG] Unifying variable $%llu with solution %lld\n", var_id, solution);
+            printf("DEBUG: Unifying variable $%llu with solution %lld\n", var_id, solution);
             bool unified = flint_unify(&var_value, solution_value, env);
             
             if (unified) {
-                printf("[DEBUG] Successfully solved constraint: $%llu = %lld\n", var_id, solution);
+                printf("DEBUG: Successfully solved constraint: $%llu = %lld\n", var_id, solution);
                 return true;
             } else {
-                printf("[DEBUG] Failed to unify variable with solution\n");
+                printf("DEBUG: Failed to unify variable with solution\n");
                 return false;
             }
         } else {
-            printf("[DEBUG] Could not find logical variable %llu\n", var_id);
+            printf("DEBUG: Could not find logical variable %llu\n", var_id);
             return false;
         }
     }
     
     return false;
 }
+

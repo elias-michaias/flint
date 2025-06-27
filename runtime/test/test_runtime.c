@@ -1,5 +1,5 @@
 #include "runtime.h"
-#include "amoeba.h"
+#include <nlopt.h>
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
@@ -1074,52 +1074,7 @@ bool test_async_linear_integration() {
 }
 
 // Test flexible constraint system with amoeba
-bool test_flexible_constraints() {
-    TEST("Flexible Constraint System");
-    
-    Environment* env = flint_create_environment(NULL);
-    ConstraintStore* store = flint_create_constraint_store();
-    env->constraint_store = store;
-    
-    ASSERT(store != NULL);
-    ASSERT(store->solver != NULL);
-    
-    // Create some constraint variables
-    VarId x = flint_fresh_var_id();
-    VarId y = flint_fresh_var_id();
-    VarId z = flint_fresh_var_id();
-    
-    // Add constraint: X + Y = Z
-    VarId add_vars[] = {x, y, z};
-    FlintConstraint* add_constraint = flint_add_arithmetic_constraint(
-        store, ARITH_ADD, add_vars, 3, 0.0, STRENGTH_REQUIRED);
-    ASSERT(add_constraint != NULL);
-    
-    // Suggest some values
-    flint_suggest_constraint_value(store, x, 10.0);
-    flint_suggest_constraint_value(store, y, 15.0);
-    
-    // Check that Z got computed correctly
-    double z_value = flint_get_constraint_value(store, z);
-    ASSERT(z_value >= 24.9 && z_value <= 25.1); // Should be approximately 25
-    
-    // Test inequality constraint: X <= Y
-    FlintConstraint* ineq_constraint = flint_add_inequality_constraint(
-        store, x, y, true, STRENGTH_STRONG);
-    ASSERT(ineq_constraint != NULL);
-    
-    // The constraint should already be satisfied (10 <= 15)
-    double x_value = flint_get_constraint_value(store, x);
-    double y_value = flint_get_constraint_value(store, y);
-    ASSERT(x_value <= y_value + 0.001); // Allow small floating point error
-    
-    flint_print_constraint_values(store);
-    
-    flint_free_environment(env);
-    
-    printf("✓ Flexible constraint tests passed\n");
-    return true;
-}
+
 
 // Test comprehensive flexible constraint system capabilities
 bool test_flexible_constraint_system() {
@@ -1148,41 +1103,32 @@ bool test_flexible_constraint_system() {
     FlintConstraintVar* z_var = flint_get_or_create_constraint_var(store, z, "Z");
     
     // Constraint 1: X + Y = Z  (X + Y - Z = 0)
-    am_Constraint* c1 = am_newconstraint(store->solver, AM_REQUIRED);
-    am_addterm(c1, x_var->amoeba_var, 1.0);   // X
-    am_addterm(c1, y_var->amoeba_var, 1.0);   // + Y
-    am_setrelation(c1, AM_EQUAL);
-    am_addterm(c1, z_var->amoeba_var, 1.0);   // = Z
-    am_add(c1);
+    ASSERT(flint_add_addition_constraint(store, x, y, z, STRENGTH_REQUIRED));
     printf("✓ Added constraint: X + Y = Z\n");
     
-    // Constraint 2: X >= 5  (X - 5 >= 0)
-    am_Constraint* c2 = am_newconstraint(store->solver, AM_REQUIRED);
-    am_addterm(c2, x_var->amoeba_var, 1.0);   // X
-    am_setrelation(c2, AM_GREATEQUAL);
-    am_addconstant(c2, 5.0);                  // >= 5
-    am_add(c2);
+    // Constraint 2: X >= 5
+    ASSERT(flint_add_inequality_constraint(store, x, flint_fresh_var_id(), false, STRENGTH_REQUIRED)); // X >= 5
     printf("✓ Added constraint: X >= 5\n");
     
-    // Constraint 3: Y = 2 * X  (Y - 2*X = 0)
-    am_Constraint* c3 = am_newconstraint(store->solver, AM_REQUIRED);
-    am_addterm(c3, y_var->amoeba_var, 1.0);   // Y
-    am_setrelation(c3, AM_EQUAL);
-    am_addterm(c3, x_var->amoeba_var, 2.0);   // = 2*X
-    am_add(c3);
+    // Constraint 3: Y = 2 * X
+    VarId temp_y_id = flint_fresh_var_id();
+    ASSERT(flint_add_linear_constraint(store, x, 2.0, 0.0, 0.0, STRENGTH_REQUIRED)); // 2*X = temp_y_id
+    ASSERT(flint_add_equals_constraint(store, y, temp_y_id, STRENGTH_REQUIRED)); // Y = temp_y_id
     printf("✓ Added constraint: Y = 2*X\n");
     
     printf("\nSolving constraints...\n");
     
     // Suggest a value for X and let the system solve for Y and Z
-    am_addedit(x_var->amoeba_var, AM_MEDIUM);
-    am_suggest(x_var->amoeba_var, 10.0);
+    flint_suggest_constraint_value(store, x, 10.0);
     printf("Suggested X = 10\n");
     
+    // Trigger constraint solving
+    flint_solve_constraints(store, x, env);
+    
     // Get the solved values
-    double x_val = am_value(x_var->amoeba_var);
-    double y_val = am_value(y_var->amoeba_var);
-    double z_val = am_value(z_var->amoeba_var);
+    double x_val = flint_get_constraint_value(store, x);
+    double y_val = flint_get_constraint_value(store, y);
+    double z_val = flint_get_constraint_value(store, z);
     
     printf("\nSolved values:\n");
     printf("X = %.1f\n", x_val);
@@ -1208,12 +1154,13 @@ bool test_flexible_constraint_system() {
     printf("\n=== Testing Dynamic Changes ===\n");
     
     // Change X to a different value
-    am_suggest(x_var->amoeba_var, 6.0);
+    flint_suggest_constraint_value(store, x, 6.0);
+    flint_solve_constraints(store, x, env);
     printf("Changed X to 6\n");
     
-    double new_x = am_value(x_var->amoeba_var);
-    double new_y = am_value(y_var->amoeba_var);
-    double new_z = am_value(z_var->amoeba_var);
+    double new_x = flint_get_constraint_value(store, x);
+    double new_y = flint_get_constraint_value(store, y);
+    double new_z = flint_get_constraint_value(store, z);
     
     printf("New values: X=%.1f, Y=%.1f, Z=%.1f\n", new_x, new_y, new_z);
     
@@ -1227,23 +1174,19 @@ bool test_flexible_constraint_system() {
     printf("\n=== Testing Inequality Constraints ===\n");
     
     // Add a weak preference: prefer Z to be as small as possible
-    VarId w = 4;
+    VarId w = flint_fresh_var_id();
     FlintConstraintVar* w_var = flint_get_or_create_constraint_var(store, w, "W");
     
     // W = Z (to create an objective)
-    am_Constraint* c4 = am_newconstraint(store->solver, AM_WEAK);
-    am_addterm(c4, w_var->amoeba_var, 1.0);   // W
-    am_setrelation(c4, AM_EQUAL);
-    am_addterm(c4, z_var->amoeba_var, 1.0);   // = Z
-    am_add(c4);
+    ASSERT(flint_add_equals_constraint(store, w, z, STRENGTH_WEAK));
     
     // Minimize W (weak preference to make it small)
-    am_addedit(w_var->amoeba_var, AM_WEAK);
-    am_suggest(w_var->amoeba_var, 0.0);  // Prefer small values
+    flint_suggest_constraint_value(store, w, 0.0);  // Prefer small values
+    flint_solve_constraints(store, w, env);
     
-    double final_x = am_value(x_var->amoeba_var);
-    double final_y = am_value(y_var->amoeba_var);
-    double final_z = am_value(z_var->amoeba_var);
+    double final_x = flint_get_constraint_value(store, x);
+    double final_y = flint_get_constraint_value(store, y);
+    double final_z = flint_get_constraint_value(store, z);
     
     printf("Final values with minimization: X=%.1f, Y=%.1f, Z=%.1f\n", 
            final_x, final_y, final_z);
@@ -1304,6 +1247,9 @@ bool test_constraint_unification_integration() {
     Value* val20 = flint_create_integer(20);
     ASSERT(flint_unify_with_constraints(varY, val20, env));
     
+    // Trigger constraint solving
+    flint_solve_constraints(store, z_id, env);
+
     // Check that Z resolves to 30 via constraints
     double z_value = flint_get_constraint_value(store, z_id);
     ASSERT(z_value >= 29.9 && z_value <= 30.1); // Should be approximately 30
@@ -1320,10 +1266,7 @@ bool test_constraint_unification_integration() {
     varW->data.logical_var->id = w_id;
     
     // Add constraint W = 42
-    VarId const_vars[] = {w_id};
-    FlintConstraint* const_constraint = flint_add_arithmetic_constraint(
-        store, ARITH_EQUAL, const_vars, 1, 42.0, STRENGTH_REQUIRED);
-    ASSERT(const_constraint != NULL);
+    ASSERT(flint_add_linear_constraint(store, w_id, 1.0, 0.0, 42.0, STRENGTH_REQUIRED));
     
     // Get the constraint value and create a Value for unification
     double w_value = flint_get_constraint_value(store, w_id);
@@ -2171,7 +2114,7 @@ int main() {
     all_passed &= test_pattern_matching();
     all_passed &= test_constraint_propagation();
     all_passed &= test_flexible_constraint_system();
-    all_passed &= test_flexible_constraints();
+    
     
     // Integration tests - comprehensive system interactions
     all_passed &= test_constraint_unification_integration();

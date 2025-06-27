@@ -13,10 +13,7 @@ typedef struct ChoicePoint ChoicePoint;
 typedef struct Environment Environment;
 typedef struct ConstraintStore ConstraintStore;
 
-// Amoeba constraint solver integration
-struct am_Solver;     // Forward declare amoeba types
-struct am_Var;
-struct am_Constraint;
+#include <nlopt.h>
 
 // Arithmetic operations for constraints
 typedef enum {
@@ -210,18 +207,19 @@ struct Environment {
 // Flint constraint variable - links VarId to amoeba variable
 typedef struct {
     VarId flint_id;              // Flint variable ID
-    struct am_Var* amoeba_var;   // Corresponding amoeba variable
     char* name;                  // Optional name for debugging
+    double value;                // Current value of the variable
 } FlintConstraintVar;
 
 // Flint constraint - wraps amoeba constraint with metadata
 typedef struct {
-    struct am_Constraint* amoeba_constraint;  // Amoeba constraint
     ConstraintType type;                      // Flint constraint type
     ConstraintStrength strength;              // Constraint strength
     VarId* var_ids;                           // Variable IDs involved
     size_t var_count;                         // Number of variables
     char* description;                        // Optional description
+    double* coefficients;                     // Coefficients for linear constraints
+    double constant_term;                     // Constant term for linear constraints
     
     // For function constraints
     char* function_name;                      // Function name (for CONSTRAINT_FUNCTION)
@@ -230,7 +228,7 @@ typedef struct {
 
 // Constraint store integrating amoeba solver
 struct ConstraintStore {
-    struct am_Solver* solver;              // Amoeba constraint solver
+    nlopt_opt nlopt_solver;              // NLopt optimizer object
     FlintConstraintVar* variables;         // Constraint variables
     size_t var_count;
     size_t var_capacity;

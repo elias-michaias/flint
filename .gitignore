@@ -13,8 +13,7 @@ runtime/test/*.o
 runtime/.deps/
 
 # Library dependencies and build artifacts
-runtime/lib/libdill/
-runtime/lib/amoeba/
+runtime/lib/
 
 # Generated example files (keep .fl source, ignore generated artifacts)
 examples/*.c

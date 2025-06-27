@@ -323,17 +323,15 @@ fn parse_program(input: PathBuf, debug: bool) -> Result<ParsedProgram, Box<dyn s
 }
 
 /// Helper function for cross-platform C compilation with dead code elimination
-fn setup_c_compiler(debug: bool) -> Command {
-    // Cross-platform compiler detection and configuration
+fn setup_c_compiler(debug: bool) -> (Command, String) {
+    // Always use C compiler (never C++)
     let (compiler, dead_code_flags) = if cfg!(target_os = "macos") {
         ("clang", vec!["-Wl,-dead_strip"])
     } else if cfg!(target_os = "windows") {
         ("gcc", vec!["-Wl,--gc-sections"])
     } else {
-        // Linux and others
         ("gcc", vec!["-Wl,--gc-sections"])
     };
-    
     let mut command = Command::new(compiler);
     command
         .arg("-std=c99")
@@ -343,34 +341,28 @@ fn setup_c_compiler(debug: bool) -> Command {
         .arg("-march=native")
         .arg("-ffunction-sections")
         .arg("-fdata-sections");
-    
     // Add dead code elimination flags
     for flag in dead_code_flags {
         command.arg(flag);
     }
-    
     if debug {
         command.arg("-DDEBUG");
     }
-    
-    command
+    (command, compiler.to_string())
 }
 
 /// Setup C compiler with Python package linking
-fn setup_c_compiler_with_packages(debug: bool, package_manager: &package::PackageManager) -> Command {
-    let mut command = setup_c_compiler(debug);
-    
+fn setup_c_compiler_with_packages(debug: bool, package_manager: &package::PackageManager) -> (Command, String) {
+    let (mut command, compiler_name) = setup_c_compiler(debug);
     // Add Python package include directories
     for include_dir in package_manager.get_include_dirs() {
         command.arg("-I").arg(&include_dir);
     }
-    
     // Add Python package linking flags
     for flag in package_manager.get_linking_flags() {
         command.arg(flag);
     }
-    
-    command
+    (command, compiler_name)
 }
 
 /// Run command: compile and execute functional logic programs
@@ -460,7 +452,8 @@ fn run_command(input: PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Er
     let runtime_include = flint_root.join("runtime");
     let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
     
-    let status = setup_c_compiler_with_packages(debug, &package_manager)
+    let (mut command, compiler_name) = setup_c_compiler_with_packages(debug, &package_manager);
+    let status = command
         .arg(&c_file)
         .arg(&runtime_lib)
         .arg("-I")
@@ -603,7 +596,8 @@ fn compile_command(input: PathBuf, output: Option<PathBuf>, executable: bool, de
         let runtime_include = flint_root.join("runtime");
         let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
         
-        let status = setup_c_compiler_with_packages(debug, &package_manager)
+        let (mut command, compiler_name) = setup_c_compiler_with_packages(debug, &package_manager);
+        let status = command
             .arg(&output_path)
             .arg(&runtime_lib)
             .arg("-I")
@@ -630,9 +624,9 @@ fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Resul
     let c_content = fs::read_to_string(&input)?;
     
     // Detect if this C file uses Python imports by looking for Python headers
-    let has_python_imports = c_content.contains("#include \".flint/lib/python/") || 
-                             c_content.contains("_wrapper.h") ||
-                             c_content.contains("#include <Python.h>");
+                            let has_python_imports = c_content.contains(r#"#include "/.flint/lib/python/""#) || 
+                             c_content.contains(r"_wrapper.h") ||
+                             c_content.contains(r"#include <Python.h>");
     
     if debug {
         println!("=== COMPILING C FILE {} ===", input.display());
@@ -674,21 +668,10 @@ fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Resul
     let libdill_include = flint_root.join("runtime/lib/libdill/libdill-install/include");
     
     // Start building the compilation command
-    let mut cmd = if debug {
-        let mut c = Command::new("gcc");
-        c.arg("-g").arg("-O0");
-        c
-    } else {
-        let mut c = Command::new("gcc");
-        c.arg("-O2");
-        c
-    };
+    let (mut cmd, compiler_name) = setup_c_compiler(debug);
     
     // Add basic flags
-    cmd.arg("-std=c99")
-       .arg("-Wall")
-       .arg("-Wextra")
-       .arg(&input)
+    cmd.arg(&input)
        .arg(&runtime_lib)
        .arg("-I")
        .arg(&runtime_include)
@@ -738,7 +721,7 @@ fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Resul
                 // First try to determine if we should use -framework Python or direct linking
                 let python_libs = Command::new("python3")
                     .arg("-c")
-                    .arg("import sysconfig; libdir = sysconfig.get_config_var('LIBDIR'); ldlibrary = sysconfig.get_config_var('LDLIBRARY'); version = sysconfig.get_config_var('VERSION'); print(f'-L{libdir} -lpython{version}')")
+                    .arg(r"import sysconfig; libdir = sysconfig.get_config_var('LIBDIR'); ldlibrary = sysconfig.get_config_var('LDLIBRARY'); version = sysconfig.get_config_var('VERSION'); print(f'-L{libdir} -lpython{version}')")
                     .output();
                     
                 if let Ok(libs_output) = python_libs {
@@ -747,7 +730,7 @@ fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Resul
                         let libs = libs_string.trim();
                         
                         // Test if the library flags work by attempting a simple compile test
-                        let test_compile = Command::new("clang")
+                        let test_compile = Command::new(&compiler_name)
                             .args(&["-x", "c", "-", "-o", "/dev/null"])
                             .args(libs.split_whitespace())
                             .stdin(std::process::Stdio::piped())
@@ -770,7 +753,7 @@ fn compile_c_file(input: PathBuf, output: Option<PathBuf>, debug: bool) -> Resul
                                 }
                             } else {
                                 // Try framework linking as fallback
-                                let framework_test = Command::new("clang")
+                                let framework_test = Command::new(&compiler_name)
                                     .args(&["-framework", "Python", "-x", "c", "-", "-o", "/dev/null"])
                                     .stdin(std::process::Stdio::piped())
                                     .stdout(std::process::Stdio::null())

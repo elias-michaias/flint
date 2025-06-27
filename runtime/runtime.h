@@ -218,7 +218,7 @@ FlintConstraint* flint_add_subtraction_constraint(ConstraintStore* store, VarId 
 FlintConstraint* flint_add_inequality_constraint(ConstraintStore* store, VarId var1, VarId var2, bool less_than, ConstraintStrength strength);
 
 // Arithmetic constraint helpers
-bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target);
+bool flint_add_linear_constraint(ConstraintStore* store, VarId var_id, double coefficient, double constant, double target, ConstraintStrength strength);
 bool flint_add_multi_var_linear_constraint(ConstraintStore* store, VarId* var_ids, double* coefficients, 
                                          size_t var_count, double constant, double target, 
                                          ConstraintStrength strength);
